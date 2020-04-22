@@ -4,12 +4,14 @@ import MobileCoreServices
 
 enum FilePickerError: Error {
     case readError(message: String)
+    case invalidArguments(message: String)
 }
 
 public class SwiftFilePickerWritablePlugin: NSObject, FlutterPlugin, UIDocumentPickerDelegate {
 
     private let _viewController: UIViewController
     private var _filePickerResult: FlutterResult?
+    private var _filePickerPath: String?
 
     public static func register(with registrar: FlutterPluginRegistrar) {
         let channel = FlutterMethodChannel(name: "design.codeux.file_picker_writable", binaryMessenger: registrar.messenger())
@@ -30,14 +32,27 @@ public class SwiftFilePickerWritablePlugin: NSObject, FlutterPlugin, UIDocumentP
             switch call.method {
             case "openFilePicker":
                 openFilePicker(result: result)
+            case "openFilePickerForCreate":
+                guard
+                    let args = call.arguments as? Dictionary<String, Any>,
+                    let path = args["path"] as? String else {
+                        throw FilePickerError.invalidArguments(message: "Expected 'args'")
+                }
+                openFilePickerForCreate(path: path, result: result)
             case "readFileWithIdentifier":
                 guard
                     let args = call.arguments as? Dictionary<String, Any>,
                     let identifier = args["identifier"] as? String else {
-                        result(FlutterError(code: "InvalidArgument", message: "Expected argument 'identifier' got \(call.arguments ?? "null")", details: nil))
-                        return
+                        throw FilePickerError.invalidArguments(message: "Expected 'identifier'")
                 }
                 try readFile(identifier: identifier, result: result)
+            case "writeFileWithIdentifier":
+                guard let args = call.arguments as? Dictionary<String, Any>,
+                    let identifier = args["identifier"] as? String,
+                    let path = args["path"] as? String else {
+                        throw FilePickerError.invalidArguments(message: "Expected 'identifier' and 'path' arguments.")
+                }
+                try writeFile(identifier: identifier, path: path, result: result)
             default:
                 result(FlutterMethodNotImplemented)
             }
@@ -62,6 +77,48 @@ public class SwiftFilePickerWritablePlugin: NSObject, FlutterPlugin, UIDocumentP
         let copiedFile = try _copyToTempDirectory(url: url)
         url.stopAccessingSecurityScopedResource()
         result(_fileInfoResult(tempFile: copiedFile, originalURL: url, bookmark: bookmark))
+    }
+    
+    func writeFile(identifier: String, path: String, result: @escaping FlutterResult) throws {
+        guard let bookmark = Data(base64Encoded: identifier) else {
+            throw FilePickerError.invalidArguments(message: "Unable to decode bookmark/identifier.")
+        }
+        var isStale: Bool = false
+        let url = try URL(resolvingBookmarkData: bookmark, bookmarkDataIsStale: &isStale)
+        print("url: \(url) / isStale: \(isStale)");
+        try _writeFile(path: path, destination: url)
+        let sourceFile = URL(fileURLWithPath: path)
+        result(_fileInfoResult(tempFile: sourceFile, originalURL: url, bookmark: bookmark))
+    }
+    
+    private func _writeFile(path: String, destination: URL) throws {
+        let sourceFile = URL(fileURLWithPath: path)
+        
+        if !destination.startAccessingSecurityScopedResource() {
+            throw FilePickerError.invalidArguments(message: "Unable to access original url \(destination)")
+        }
+        if !sourceFile.startAccessingSecurityScopedResource() {
+            throw FilePickerError.readError(message: "Unable to access source file")
+        }
+        defer {
+            destination.stopAccessingSecurityScopedResource()
+            sourceFile.stopAccessingSecurityScopedResource()
+        }
+        let data = try Data(contentsOf: sourceFile)
+        try data.write(to: destination, options: .atomicWrite)
+    }
+    
+    func openFilePickerForCreate(path: String, result: @escaping FlutterResult) {
+        if (_filePickerResult != nil) {
+            result(FlutterError(code: "DuplicatedCall", message: "Only one file open call at a time.", details: nil))
+            return
+        }
+        _filePickerResult = result
+        _filePickerPath = path
+        let ctrl = UIDocumentPickerViewController(documentTypes: [kUTTypeFolder as String], in: UIDocumentPickerMode.open)
+        ctrl.delegate = self
+        ctrl.modalPresentationStyle = .currentContext
+        _viewController.present(ctrl, animated: true, completion: nil)
     }
 
     func openFilePicker(result: @escaping FlutterResult) {
@@ -102,11 +159,27 @@ public class SwiftFilePickerWritablePlugin: NSObject, FlutterPlugin, UIDocumentP
     }
 
     public func documentPicker(_ controller: UIDocumentPickerViewController, didPickDocumentAt url: URL) {
-        guard url.startAccessingSecurityScopedResource() else {
-            _sendFilePickerResult(nil)
-            return
-        }
         do {
+            guard url.startAccessingSecurityScopedResource() else {
+                throw FilePickerError.readError(message: "Unnable to acquire acces to \(url)")
+            }
+            if let path = _filePickerPath {
+                print("Need to write \(path) to \(url)")
+                let sourceFile = URL(fileURLWithPath: path)
+                let targetFile = url.appendingPathComponent(sourceFile.lastPathComponent)
+                if !targetFile.startAccessingSecurityScopedResource() {
+                    throw FilePickerError.readError(message: "Unnable to acquire acces to \(targetFile)")
+                }
+                defer {
+                    targetFile.stopAccessingSecurityScopedResource()
+                }
+                try _writeFile(path: path, destination: targetFile)
+                
+                let bookmark = try targetFile.bookmarkData()
+                let tempFile = try _copyToTempDirectory(url: url)
+                _sendFilePickerResult(_fileInfoResult(tempFile: tempFile, originalURL: targetFile, bookmark: bookmark))
+                return
+            }
             let bookmark = try url.bookmarkData()
             let tempFile = try _copyToTempDirectory(url: url)
             _sendFilePickerResult(_fileInfoResult(tempFile: tempFile, originalURL: url, bookmark: bookmark))
@@ -117,7 +190,7 @@ public class SwiftFilePickerWritablePlugin: NSObject, FlutterPlugin, UIDocumentP
         
         url.stopAccessingSecurityScopedResource()
     }
-    
+        
     public func documentPickerWasCancelled(_ controller: UIDocumentPickerViewController) {
         _sendFilePickerResult(nil)
     }

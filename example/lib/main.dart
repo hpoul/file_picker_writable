@@ -1,12 +1,16 @@
 import 'dart:async';
 import 'dart:convert';
+import 'dart:io';
+import 'dart:math';
 
 import 'package:file_picker_writable/file_picker_writable.dart';
 import 'package:flutter/material.dart';
 import 'package:logging/logging.dart';
 import 'package:logging_appenders/logging_appenders.dart';
+import 'package:path_provider/path_provider.dart';
 import 'package:simple_json_persistence/simple_json_persistence.dart';
 import 'package:convert/convert.dart';
+import 'package:path/path.dart' as p;
 
 final _logger = Logger('main');
 
@@ -30,6 +34,7 @@ class AppData implements HasToJson {
 
   static AppData fromJson(Map<String, dynamic> json) => AppData(
       files: (json['files'] as List<dynamic>)
+          .where((dynamic element) => element != null)
           .map((dynamic e) => FileInfo.fromJson(e as Map<String, dynamic>))
           .toList());
 
@@ -69,10 +74,20 @@ class _MyAppState extends State<MyApp> {
               mainAxisAlignment: MainAxisAlignment.center,
               crossAxisAlignment: CrossAxisAlignment.center,
               children: <Widget>[
-                const Text('Hello world'),
-                RaisedButton(
-                  child: const Text('Open File Picker'),
-                  onPressed: _openFilePicker,
+                Row(
+                  mainAxisAlignment: MainAxisAlignment.center,
+                  mainAxisSize: MainAxisSize.max,
+                  children: <Widget>[
+                    RaisedButton(
+                      child: const Text('Open File Picker'),
+                      onPressed: _openFilePicker,
+                    ),
+                    const SizedBox(width: 32),
+                    RaisedButton(
+                      child: const Text('Create New File'),
+                      onPressed: _openFilePickerForCreate,
+                    ),
+                  ],
                 ),
                 ...?(!snapshot.hasData
                     ? null
@@ -80,6 +95,7 @@ class _MyAppState extends State<MyApp> {
                         .where((element) => element != null)
                         .map((fileInfo) => FileInfoDisplay(
                               fileInfo: fileInfo,
+                              appDataBloc: _appDataBloc,
                             ))),
               ],
             ),
@@ -92,18 +108,42 @@ class _MyAppState extends State<MyApp> {
   Future<void> _openFilePicker() async {
     final fileInfo = await FilePickerWritable().openFilePicker();
     _logger.fine('Got picker result: $fileInfo');
-    final data = await _appDataBloc.store.load();
-    if (data == null) {
+    if (fileInfo == null) {
       _logger.info('User canceled.');
       return;
     }
+    final data = await _appDataBloc.store.load();
+    await _appDataBloc.store
+        .save(data.copyWith(files: data.files + [fileInfo]));
+  }
+
+  Future<void> _openFilePickerForCreate() async {
+    final tempDirectory = await getTemporaryDirectory();
+    final rand = Random().nextInt(10000000);
+    final temp = File(p.join(tempDirectory.path, 'newfile.$rand.txt'));
+    final content = 'File created at ${DateTime.now()}\n\n';
+    await temp.writeAsString(content);
+    final fileInfo = await FilePickerWritable().openFilePickerForCreate(temp);
+    if (fileInfo == null) {
+      _logger.info('User canceled.');
+      return;
+    }
+    final data = await _appDataBloc.store.load();
     await _appDataBloc.store
         .save(data.copyWith(files: data.files + [fileInfo]));
   }
 }
 
 class FileInfoDisplay extends StatelessWidget {
-  const FileInfoDisplay({Key key, this.fileInfo}) : super(key: key);
+  const FileInfoDisplay({
+    Key key,
+    @required this.fileInfo,
+    @required this.appDataBloc,
+  })  : assert(fileInfo != null),
+        assert(appDataBloc != null),
+        super(key: key);
+
+  final AppDataBloc appDataBloc;
   final FileInfo fileInfo;
 
   @override
@@ -156,7 +196,34 @@ class FileInfoDisplay extends StatelessWidget {
                       ).show(context);
                     },
                     child: const Text('Read'),
-                  )
+                  ),
+                  FlatButton(
+                    onPressed: () async {
+                      final fi = fileInfo.file.existsSync()
+                          ? fileInfo
+                          : await FilePickerWritable()
+                              .readFileWithIdentifier(fileInfo.identifier);
+                      final content =
+                          'New Content written at ${DateTime.now()}.\n\n';
+                      await fi.file.writeAsString(content);
+                      await FilePickerWritable()
+                          .writeFileWithIdentifier(fi.identifier, fi.file);
+                      SimpleAlertDialog(
+                        bodyText: 'Wriitten: $content',
+                      ).show(context);
+                    },
+                    child: const Text('Overwrite'),
+                  ),
+                  IconButton(
+                    onPressed: () async {
+                      final appData = await appDataBloc.store.load();
+                      await appDataBloc.store.save(appData.copyWith(
+                          files: appData.files
+                              .where((element) => element != fileInfo)
+                              .toList()));
+                    },
+                    icon: Icon(Icons.remove_circle_outline),
+                  ),
                 ],
               )
             ],

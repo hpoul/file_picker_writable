@@ -62,11 +62,31 @@ class FilePickerWritable {
     return _resultToFileInfo(result);
   }
 
+  Future<FileInfo> openFilePickerForCreate(File file) async {
+    _logger.finest('openFilePickerForCreate($file)');
+    final result = await _channel.invokeMapMethod<String, String>(
+        'openFilePickerForCreate', {'path': file.absolute.path});
+    if (result == null) {
+      // User cancelled.
+      _logger.finer('User cancelled file picker.');
+      return null;
+    }
+    return _resultToFileInfo(result);
+  }
+
   Future<FileInfo> readFileWithIdentifier(String identifier) async {
     _logger.finest('readFileWithIdentifier()');
     final result = await _channel.invokeMapMethod<String, String>(
         'readFileWithIdentifier', {'identifier': identifier});
     return _resultToFileInfo(result);
+  }
+
+  Future<FileInfo> writeFileWithIdentifier(String identifier, File file) async {
+    _logger.finest('writeFileWithIdentifier(file: $file)');
+    await _channel.invokeMapMethod<String, String>('writeFileWithIdentifier', {
+      'identifier': identifier,
+      'path': file.absolute.path,
+    });
   }
 
   FileInfo _resultToFileInfo(Map<String, String> result) {
