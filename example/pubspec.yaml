@@ -1,5 +1,6 @@
 name: file_picker_writable_example
 description: Demonstrates how to use the file_picker_writable plugin.
+version: 1.0.0
 
 # The following line prevents the package from being accidentally published to
 # pub.dev using `pub publish`. This is preferred for private packages.
@@ -11,13 +12,10 @@ environment:
 dependencies:
   flutter:
     sdk: flutter
+  logging: ^0.11.4
+  logging_appenders: ^0.4.1
 
   file_picker_writable:
-    # When depending on this package from a real application you should use:
-    #   file_picker_writable: ^x.y.z
-    # See https://dart.dev/tools/pub/dependencies#version-constraints
-    # The example app is bundled with the plugin so we use a path dependency on
-    # the parent directory to use the current plugin's version. 
     path: ../
 
   # The following adds the Cupertino Icons font to your application.

@@ -1,0 +1,22 @@
+PODS:
+  - file_picker_writable (0.0.1):
+    - Flutter
+  - Flutter (1.0.0)
+
+DEPENDENCIES:
+  - file_picker_writable (from `.symlinks/plugins/file_picker_writable/ios`)
+  - Flutter (from `Flutter`)
+
+EXTERNAL SOURCES:
+  file_picker_writable:
+    :path: ".symlinks/plugins/file_picker_writable/ios"
+  Flutter:
+    :path: Flutter
+
+SPEC CHECKSUMS:
+  file_picker_writable: 67959f5c516feb5121693a14eda63fcbe6cbb6dc
+  Flutter: 0e3d915762c693b495b44d77113d4970485de6ec
+
+PODFILE CHECKSUM: c34e2287a9ccaa606aeceab922830efb9a6ff69a
+
+COCOAPODS: 1.8.4

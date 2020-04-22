@@ -1,10 +1,15 @@
-import 'package:flutter/material.dart';
 import 'dart:async';
 
-import 'package:flutter/services.dart';
 import 'package:file_picker_writable/file_picker_writable.dart';
+import 'package:flutter/material.dart';
+import 'package:logging/logging.dart';
+import 'package:logging_appenders/logging_appenders.dart';
+
+final _logger = Logger('main');
 
 void main() {
+  Logger.root.level = Level.ALL;
+  PrintAppender().attachToLogger(Logger.root);
   runApp(MyApp());
 }
 
@@ -14,32 +19,11 @@ class MyApp extends StatefulWidget {
 }
 
 class _MyAppState extends State<MyApp> {
-  String _platformVersion = 'Unknown';
+  FileInfo _fileInfo;
 
   @override
   void initState() {
     super.initState();
-    initPlatformState();
-  }
-
-  // Platform messages are asynchronous, so we initialize in an async method.
-  Future<void> initPlatformState() async {
-    String platformVersion;
-    // Platform messages may fail, so we use a try/catch PlatformException.
-    try {
-      platformVersion = await FilePickerWritable.platformVersion;
-    } on PlatformException {
-      platformVersion = 'Failed to get platform version.';
-    }
-
-    // If the widget was removed from the tree while the asynchronous platform
-    // message was in flight, we want to discard the reply rather than calling
-    // setState to update our non-existent appearance.
-    if (!mounted) return;
-
-    setState(() {
-      _platformVersion = platformVersion;
-    });
   }
 
   @override
@@ -47,12 +31,59 @@ class _MyAppState extends State<MyApp> {
     return MaterialApp(
       home: Scaffold(
         appBar: AppBar(
-          title: const Text('Plugin example app'),
+          title: const Text('File Picker Example'),
         ),
-        body: Center(
-          child: Text('Running on: $_platformVersion\n'),
+        body: Container(
+          width: double.infinity,
+          padding: const EdgeInsets.all(32),
+          child: Column(
+            mainAxisAlignment: MainAxisAlignment.center,
+            crossAxisAlignment: CrossAxisAlignment.center,
+            children: <Widget>[
+              const Text('Hello world'),
+              RaisedButton(
+                child: const Text('Open File Picker'),
+                onPressed: _openFilePicker,
+              ),
+              ...?_fileInfo == null
+                  ? null
+                  : [
+                      FileInfoDisplay(
+                        fileInfo: _fileInfo,
+                      )
+                    ],
+            ],
+          ),
         ),
       ),
+    );
+  }
+
+  Future<void> _openFilePicker() async {
+    final fileInfo = await FilePickerWritable().openFilePicker();
+    _logger.fine('Got picker result: $fileInfo');
+    setState(() {
+      _fileInfo = fileInfo;
+    });
+  }
+}
+
+class FileInfoDisplay extends StatelessWidget {
+  const FileInfoDisplay({Key key, this.fileInfo}) : super(key: key);
+  final FileInfo fileInfo;
+
+  @override
+  Widget build(BuildContext context) {
+    return Column(
+      children: <Widget>[
+        const Text('Selected File:'),
+        Text(fileInfo.file.path),
+        Text(
+          fileInfo.identifier,
+          maxLines: 1,
+          overflow: TextOverflow.ellipsis,
+        ),
+      ],
     );
   }
 }
