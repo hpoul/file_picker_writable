@@ -2,6 +2,9 @@ import Flutter
 import UIKit
 import MobileCoreServices
 
+enum FilePickerError: Error {
+    case readError(message: String)
+}
 
 public class SwiftFilePickerWritablePlugin: NSObject, FlutterPlugin, UIDocumentPickerDelegate {
 
@@ -23,12 +26,42 @@ public class SwiftFilePickerWritablePlugin: NSObject, FlutterPlugin, UIDocumentP
     }
 
     public func handle(_ call: FlutterMethodCall, result: @escaping FlutterResult) {
-        switch call.method {
-        case "openFilePicker":
-            openFilePicker(result: result)
-        default:
-            result(FlutterMethodNotImplemented)
+        do {
+            switch call.method {
+            case "openFilePicker":
+                openFilePicker(result: result)
+            case "readFileWithIdentifier":
+                guard
+                    let args = call.arguments as? Dictionary<String, Any>,
+                    let identifier = args["identifier"] as? String else {
+                        result(FlutterError(code: "InvalidArgument", message: "Expected argument 'identifier' got \(call.arguments ?? "null")", details: nil))
+                        return
+                }
+                try readFile(identifier: identifier, result: result)
+            default:
+                result(FlutterMethodNotImplemented)
+            }
+        } catch let error as FilePickerError {
+            result(FlutterError(code: "FilePickerError", message: "\(error)", details: nil))
+        } catch let error {
+            result(FlutterError(code: "UnknownError", message: "\(error)", details: nil))
         }
+    }
+    
+    func readFile(identifier: String, result: @escaping FlutterResult) throws {
+        guard let bookmark = Data(base64Encoded: identifier) else {
+            result(FlutterError(code: "InvalidDataError", message: "Unable to decode bookmark.", details: nil))
+            return
+        }
+        var isStale: Bool = false
+        let url = try URL(resolvingBookmarkData: bookmark, bookmarkDataIsStale: &isStale)
+        print("url: \(url) / isStale: \(isStale)");
+        if !url.startAccessingSecurityScopedResource() {
+            throw FilePickerError.readError(message: "Unable to start accessing security scope resource.")
+        }
+        let copiedFile = try _copyToTempDirectory(url: url)
+        url.stopAccessingSecurityScopedResource()
+        result(_fileInfoResult(tempFile: copiedFile, originalURL: url, bookmark: bookmark))
     }
 
     func openFilePicker(result: @escaping FlutterResult) {
@@ -45,7 +78,7 @@ public class SwiftFilePickerWritablePlugin: NSObject, FlutterPlugin, UIDocumentP
 
     private func _copyToTempDirectory(url: URL) throws -> URL {
         let tempDir = NSURL.fileURL(withPath: NSTemporaryDirectory(), isDirectory: true)
-        let tempFile = tempDir.appendingPathComponent(url.lastPathComponent)
+        let tempFile = tempDir.appendingPathComponent("\(UUID().uuidString)_\(url.lastPathComponent)")
         // Copy the file.
         do {
             try FileManager.default.copyItem(at: url, to: tempFile)
@@ -54,6 +87,11 @@ public class SwiftFilePickerWritablePlugin: NSObject, FlutterPlugin, UIDocumentP
             NSLog("Unable to copy file: \(error)")
             throw error
         }
+    }
+    
+    private func _fileInfoResult(tempFile: URL, originalURL: URL, bookmark: Data) -> [String: String] {
+        let identifier = bookmark.base64EncodedString()
+        return ["path": tempFile.path, "identifier": identifier, "uri": originalURL.absoluteString,]
     }
 
     private func _sendFilePickerResult(_ result: Any?) {
@@ -70,9 +108,8 @@ public class SwiftFilePickerWritablePlugin: NSObject, FlutterPlugin, UIDocumentP
         }
         do {
             let bookmark = try url.bookmarkData()
-            let identifier = bookmark.base64EncodedString()
             let tempFile = try _copyToTempDirectory(url: url)
-            _sendFilePickerResult(["path": tempFile.absoluteString, "identifier": identifier])
+            _sendFilePickerResult(_fileInfoResult(tempFile: tempFile, originalURL: url, bookmark: bookmark))
         } catch {
             _sendFilePickerResult(FlutterError(code: "ErrorProcessingResult", message: "Error handling result url \(url): \(error)", details: nil))
             return
