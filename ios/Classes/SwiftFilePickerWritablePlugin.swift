@@ -91,18 +91,27 @@ public class SwiftFilePickerWritablePlugin: NSObject, FlutterPlugin, UIDocumentP
         result(_fileInfoResult(tempFile: sourceFile, originalURL: url, bookmark: bookmark))
     }
     
-    private func _writeFile(path: String, destination: URL) throws {
+    // TODO: skipDestinationStartAccess is not doing anything right now. maybe get rid of it.
+    private func _writeFile(path: String, destination: URL, skipDestinationStartAccess: Bool = false) throws {
         let sourceFile = URL(fileURLWithPath: path)
         
-        if !destination.startAccessingSecurityScopedResource() {
-            throw FilePickerError.invalidArguments(message: "Unable to access original url \(destination)")
+        let destAccess = destination.startAccessingSecurityScopedResource()
+        if !destAccess {
+            print("Warning: Unable to access original url \(destination) (destination) \(skipDestinationStartAccess)")
+//            throw FilePickerError.invalidArguments(message: "Unable to access original url \(destination)")
         }
-        if !sourceFile.startAccessingSecurityScopedResource() {
-            throw FilePickerError.readError(message: "Unable to access source file")
+        let sourceAccess = sourceFile.startAccessingSecurityScopedResource()
+        if !sourceAccess {
+            print("Warning: startAccessingSecurityScopedResource is false for \(sourceFile) (sourceFile)")
+//            throw FilePickerError.readError(message: "Unable to access source file \(sourceFile)")
         }
         defer {
-            destination.stopAccessingSecurityScopedResource()
-            sourceFile.stopAccessingSecurityScopedResource()
+            if (destAccess) {
+                destination.stopAccessingSecurityScopedResource();
+            }
+            if (sourceAccess) {
+                sourceFile.stopAccessingSecurityScopedResource()
+            }
         }
         let data = try Data(contentsOf: sourceFile)
         try data.write(to: destination, options: .atomicWrite)
@@ -167,13 +176,13 @@ public class SwiftFilePickerWritablePlugin: NSObject, FlutterPlugin, UIDocumentP
                 print("Need to write \(path) to \(url)")
                 let sourceFile = URL(fileURLWithPath: path)
                 let targetFile = url.appendingPathComponent(sourceFile.lastPathComponent)
-                if !targetFile.startAccessingSecurityScopedResource() {
-                    throw FilePickerError.readError(message: "Unnable to acquire acces to \(targetFile)")
-                }
-                defer {
-                    targetFile.stopAccessingSecurityScopedResource()
-                }
-                try _writeFile(path: path, destination: targetFile)
+//                if !targetFile.startAccessingSecurityScopedResource() {
+//                    print("Warning: Unnable to acquire acces to \(targetFile)")
+//                }
+//                defer {
+//                    targetFile.stopAccessingSecurityScopedResource()
+//                }
+                try _writeFile(path: path, destination: targetFile, skipDestinationStartAccess: true)
                 
                 let bookmark = try targetFile.bookmarkData()
                 let tempFile = try _copyToTempDirectory(url: url)
