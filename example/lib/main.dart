@@ -66,38 +66,40 @@ class _MyAppState extends State<MyApp> {
         appBar: AppBar(
           title: const Text('File Picker Example'),
         ),
-        body: Container(
-          width: double.infinity,
-          child: StreamBuilder<AppData>(
-            stream: _appDataBloc.store.onValueChangedAndLoad,
-            builder: (context, snapshot) => Column(
-              mainAxisAlignment: MainAxisAlignment.center,
-              crossAxisAlignment: CrossAxisAlignment.center,
-              children: <Widget>[
-                Row(
-                  mainAxisAlignment: MainAxisAlignment.center,
-                  mainAxisSize: MainAxisSize.max,
-                  children: <Widget>[
-                    RaisedButton(
-                      child: const Text('Open File Picker'),
-                      onPressed: _openFilePicker,
-                    ),
-                    const SizedBox(width: 32),
-                    RaisedButton(
-                      child: const Text('Create New File'),
-                      onPressed: _openFilePickerForCreate,
-                    ),
-                  ],
-                ),
-                ...?(!snapshot.hasData
-                    ? null
-                    : snapshot.data.files
-                        .where((element) => element != null)
-                        .map((fileInfo) => FileInfoDisplay(
-                              fileInfo: fileInfo,
-                              appDataBloc: _appDataBloc,
-                            ))),
-              ],
+        body: SingleChildScrollView(
+          child: Container(
+            width: double.infinity,
+            child: StreamBuilder<AppData>(
+              stream: _appDataBloc.store.onValueChangedAndLoad,
+              builder: (context, snapshot) => Column(
+                mainAxisAlignment: MainAxisAlignment.center,
+                crossAxisAlignment: CrossAxisAlignment.center,
+                children: <Widget>[
+                  Row(
+                    mainAxisAlignment: MainAxisAlignment.center,
+                    mainAxisSize: MainAxisSize.max,
+                    children: <Widget>[
+                      RaisedButton(
+                        child: const Text('Open File Picker'),
+                        onPressed: _openFilePicker,
+                      ),
+                      const SizedBox(width: 32),
+                      RaisedButton(
+                        child: const Text('Create New File'),
+                        onPressed: _openFilePickerForCreate,
+                      ),
+                    ],
+                  ),
+                  ...?(!snapshot.hasData
+                      ? null
+                      : snapshot.data.files
+                          .where((element) => element != null)
+                          .map((fileInfo) => FileInfoDisplay(
+                                fileInfo: fileInfo,
+                                appDataBloc: _appDataBloc,
+                              ))),
+                ],
+              ),
             ),
           ),
         ),
