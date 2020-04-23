@@ -12,6 +12,7 @@ class FileInfo {
     @required this.file,
     @required this.identifier,
     @required this.uri,
+    this.fileName,
   })  : assert(identifier != null),
         assert(uri != null);
 
@@ -19,6 +20,7 @@ class FileInfo {
         file: File(json['path'] as String),
         identifier: json['identifier'] as String,
         uri: json['uri'] as String,
+        fileName: json['fileName'] as String,
       );
 
   /// temporary file which can be used for reading;
@@ -30,6 +32,8 @@ class FileInfo {
 
   final String uri;
 
+  final String fileName;
+
   @override
   String toString() {
     return 'FileInfo{${toJson()}}';
@@ -39,6 +43,7 @@ class FileInfo {
         'path': file.path,
         'identifier': identifier,
         'uri': uri,
+        'fileName': fileName,
       };
 }
 
@@ -97,6 +102,7 @@ class FilePickerWritable {
       file: File(result['path']),
       identifier: result['identifier'],
       uri: result['uri'],
+      fileName: result['fileName'],
     );
   }
 }

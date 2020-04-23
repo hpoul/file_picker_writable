@@ -177,6 +177,12 @@ class FileInfoDisplay extends StatelessWidget {
                     .apply(fontSizeFactor: 0.7)
                     .copyWith(fontWeight: FontWeight.bold),
               ),
+              Text(
+                'fileName: ${fileInfo.fileName}',
+                style: theme.textTheme.bodyText2
+                    .apply(fontSizeFactor: 0.7)
+                    .copyWith(fontWeight: FontWeight.bold),
+              ),
               ButtonBar(
                 alignment: MainAxisAlignment.end,
                 children: <Widget>[
