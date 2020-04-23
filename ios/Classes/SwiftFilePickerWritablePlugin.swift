@@ -185,7 +185,7 @@ public class SwiftFilePickerWritablePlugin: NSObject, FlutterPlugin, UIDocumentP
                 try _writeFile(path: path, destination: targetFile, skipDestinationStartAccess: true)
                 
                 let bookmark = try targetFile.bookmarkData()
-                let tempFile = try _copyToTempDirectory(url: url)
+                let tempFile = try _copyToTempDirectory(url: targetFile)
                 _sendFilePickerResult(_fileInfoResult(tempFile: tempFile, originalURL: targetFile, bookmark: bookmark))
                 return
             }
