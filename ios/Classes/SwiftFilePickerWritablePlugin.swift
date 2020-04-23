@@ -157,7 +157,12 @@ public class SwiftFilePickerWritablePlugin: NSObject, FlutterPlugin, UIDocumentP
     
     private func _fileInfoResult(tempFile: URL, originalURL: URL, bookmark: Data) -> [String: String] {
         let identifier = bookmark.base64EncodedString()
-        return ["path": tempFile.path, "identifier": identifier, "uri": originalURL.absoluteString,]
+        return [
+            "path": tempFile.path,
+            "identifier": identifier,
+            "uri": originalURL.absoluteString,
+            "fileName": originalURL.lastPathComponent,
+        ]
     }
 
     private func _sendFilePickerResult(_ result: Any?) {
