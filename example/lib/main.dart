@@ -55,51 +55,82 @@ class _MyAppState extends State<MyApp> {
   final AppDataBloc _appDataBloc = AppDataBloc();
 
   @override
+  Widget build(BuildContext context) {
+    return MaterialApp(
+      home: MainScreen(
+        appDataBloc: _appDataBloc,
+      ),
+    );
+  }
+}
+
+class MainScreen extends StatefulWidget {
+  const MainScreen({Key key, this.appDataBloc}) : super(key: key);
+  final AppDataBloc appDataBloc;
+
+  @override
+  _MainScreenState createState() => _MainScreenState();
+}
+
+class _MainScreenState extends State<MainScreen> {
+  AppDataBloc get _appDataBloc => widget.appDataBloc;
+
+  @override
   void initState() {
     super.initState();
+    FilePickerWritable().init(openFileHandler: (fileInfo) async {
+      _logger.fine('got file info. we are mounted:$mounted');
+      if (mounted) {
+        await SimpleAlertDialog.readFileContentsAndShowDialog(
+          fileInfo,
+          context,
+          bodyTextPrefix: 'Should open file from external app.\n\n'
+              'fileName: ${fileInfo.fileName}\n'
+              'uri: ${fileInfo.uri}\n\n\n',
+        );
+      }
+    });
   }
 
   @override
   Widget build(BuildContext context) {
-    return MaterialApp(
-      home: Scaffold(
-        appBar: AppBar(
-          title: const Text('File Picker Example'),
-        ),
-        body: SingleChildScrollView(
-          child: Container(
-            width: double.infinity,
-            child: StreamBuilder<AppData>(
-              stream: _appDataBloc.store.onValueChangedAndLoad,
-              builder: (context, snapshot) => Column(
-                mainAxisAlignment: MainAxisAlignment.center,
-                crossAxisAlignment: CrossAxisAlignment.center,
-                children: <Widget>[
-                  Row(
-                    mainAxisAlignment: MainAxisAlignment.center,
-                    mainAxisSize: MainAxisSize.max,
-                    children: <Widget>[
-                      RaisedButton(
-                        child: const Text('Open File Picker'),
-                        onPressed: _openFilePicker,
-                      ),
-                      const SizedBox(width: 32),
-                      RaisedButton(
-                        child: const Text('Create New File'),
-                        onPressed: _openFilePickerForCreate,
-                      ),
-                    ],
-                  ),
-                  ...?(!snapshot.hasData
-                      ? null
-                      : snapshot.data.files
-                          .where((element) => element != null)
-                          .map((fileInfo) => FileInfoDisplay(
-                                fileInfo: fileInfo,
-                                appDataBloc: _appDataBloc,
-                              ))),
-                ],
-              ),
+    return Scaffold(
+      appBar: AppBar(
+        title: const Text('File Picker Example'),
+      ),
+      body: SingleChildScrollView(
+        child: Container(
+          width: double.infinity,
+          child: StreamBuilder<AppData>(
+            stream: _appDataBloc.store.onValueChangedAndLoad,
+            builder: (context, snapshot) => Column(
+              mainAxisAlignment: MainAxisAlignment.center,
+              crossAxisAlignment: CrossAxisAlignment.center,
+              children: <Widget>[
+                Row(
+                  mainAxisAlignment: MainAxisAlignment.center,
+                  mainAxisSize: MainAxisSize.max,
+                  children: <Widget>[
+                    RaisedButton(
+                      child: const Text('Open File Picker'),
+                      onPressed: _openFilePicker,
+                    ),
+                    const SizedBox(width: 32),
+                    RaisedButton(
+                      child: const Text('Create New File'),
+                      onPressed: _openFilePickerForCreate,
+                    ),
+                  ],
+                ),
+                ...?(!snapshot.hasData
+                    ? null
+                    : snapshot.data.files
+                        .where((element) => element != null)
+                        .map((fileInfo) => FileInfoDisplay(
+                              fileInfo: fileInfo,
+                              appDataBloc: _appDataBloc,
+                            ))),
+              ],
             ),
           ),
         ),
@@ -122,7 +153,7 @@ class _MyAppState extends State<MyApp> {
   Future<void> _openFilePickerForCreate() async {
     final tempDirectory = await getTemporaryDirectory();
     final rand = Random().nextInt(10000000);
-    final temp = File(p.join(tempDirectory.path, 'newfile.$rand.txt'));
+    final temp = File(p.join(tempDirectory.path, 'newfile.$rand.codeux'));
     final content = 'File created at ${DateTime.now()}\n\n';
     await temp.writeAsString(content);
     final fileInfo = await FilePickerWritable().openFilePickerForCreate(temp);
@@ -192,16 +223,8 @@ class FileInfoDisplay extends StatelessWidget {
                           ? fileInfo
                           : await FilePickerWritable()
                               .readFileWithIdentifier(fileInfo.identifier);
-                      final dataList = await fi.file.openRead(0, 64).toList();
-                      final data =
-                          dataList.expand((element) => element).toList();
-                      final hexString = hex.encode(data);
-                      final utf8String =
-                          utf8.decode(data, allowMalformed: true);
-                      SimpleAlertDialog(
-                        titleText: 'Read first ${data.length} bytes of file',
-                        bodyText: 'hexString: $hexString\n\nutf8: $utf8String',
-                      ).show(context);
+                      await SimpleAlertDialog.readFileContentsAndShowDialog(
+                          fi, context);
                     },
                     child: const Text('Read'),
                   ),
@@ -254,6 +277,7 @@ class SimpleAlertDialog extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return AlertDialog(
+      scrollable: true,
       title: titleText == null ? null : Text(titleText),
       content: Text(bodyText),
       actions: <Widget>[
@@ -264,5 +288,21 @@ class SimpleAlertDialog extends StatelessWidget {
             }),
       ],
     );
+  }
+
+  static Future readFileContentsAndShowDialog(
+    FileInfo fi,
+    BuildContext context, {
+    String bodyTextPrefix = '',
+  }) async {
+    final dataList = await fi.file.openRead(0, 64).toList();
+    final data = dataList.expand((element) => element).toList();
+    final hexString = hex.encode(data);
+    final utf8String = utf8.decode(data, allowMalformed: true);
+    final fileContentExample = 'hexString: $hexString\n\nutf8: $utf8String';
+    SimpleAlertDialog(
+      titleText: 'Read first ${data.length} bytes of file',
+      bodyText: '$bodyTextPrefix $fileContentExample',
+    ).show(context);
   }
 }

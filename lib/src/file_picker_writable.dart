@@ -47,13 +47,44 @@ class FileInfo {
       };
 }
 
+typedef OpenFileHandler = void Function(FileInfo fileInfo);
+
 class FilePickerWritable {
   factory FilePickerWritable() => _instance;
-  FilePickerWritable._();
+  FilePickerWritable._() {
+    _channel.setMethodCallHandler((call) async {
+      _logger.fine('Got method call: {$call}');
+      if (call.method == 'openFile') {
+        try {
+          if (_openFileHandler != null) {
+            _logger.fine('calling handler. ${call.arguments.runtimeType}');
+            _openFileHandler(_resultToFileInfo(
+                (call.arguments as Map<dynamic, dynamic>).cast()));
+            return true;
+          }
+          return false;
+        } catch (e, stackTrace) {
+          _logger.fine('Error while handling method call.', e, stackTrace);
+          rethrow;
+        }
+      } else {
+        throw PlatformException(
+            code: 'MethodNotImplemented',
+            message: 'method ${call.method} not implemented.');
+      }
+    });
+  }
 
   static const MethodChannel _channel =
       MethodChannel('design.codeux.file_picker_writable');
   static final FilePickerWritable _instance = FilePickerWritable._();
+
+  OpenFileHandler _openFileHandler;
+
+  void init({@required OpenFileHandler openFileHandler}) {
+    _openFileHandler = openFileHandler;
+    _channel.invokeMethod<void>('init');
+  }
 
   Future<FileInfo> openFilePicker() async {
     _logger.finest('openFilePicker()');

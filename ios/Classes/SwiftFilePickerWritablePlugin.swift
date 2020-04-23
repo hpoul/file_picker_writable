@@ -7,11 +7,14 @@ enum FilePickerError: Error {
     case invalidArguments(message: String)
 }
 
-public class SwiftFilePickerWritablePlugin: NSObject, FlutterPlugin, UIDocumentPickerDelegate {
+public class SwiftFilePickerWritablePlugin: NSObject, FlutterPlugin {
 
     private let _viewController: UIViewController
+    private let _channel: FlutterMethodChannel
     private var _filePickerResult: FlutterResult?
     private var _filePickerPath: String?
+    private var isInitialized = false
+    private var _initOpenUrl: URL? = nil
 
     public static func register(with registrar: FlutterPluginRegistrar) {
         let channel = FlutterMethodChannel(name: "design.codeux.file_picker_writable", binaryMessenger: registrar.messenger())
@@ -19,17 +22,33 @@ public class SwiftFilePickerWritablePlugin: NSObject, FlutterPlugin, UIDocumentP
             NSLog("PANIC - unable to initialize plugin, no view controller available.")
             fatalError("No viewController available.")
         }
-        let instance = SwiftFilePickerWritablePlugin(viewController: vc)
+        let instance = SwiftFilePickerWritablePlugin(viewController: vc, channel: channel)
         registrar.addMethodCallDelegate(instance, channel: channel)
+        registrar.addApplicationDelegate(instance)
     }
 
-    public init(viewController: UIViewController) {
+    public init(viewController: UIViewController, channel: FlutterMethodChannel) {
         _viewController = viewController;
+        _channel = channel
+    }
+    
+    private func logDebug(_ message: String) {
+        print("DEBUG", "FilePickerWritablePlugin:", message)
+    }
+    private func logError(_ message: String) {
+        print("ERROR", "FilePickerWritablePlugin:", message)
     }
 
     public func handle(_ call: FlutterMethodCall, result: @escaping FlutterResult) {
         do {
             switch call.method {
+            case "init":
+                isInitialized = true
+                if let openUrl = _initOpenUrl {
+                    _channel.invokeMethod("openFile", arguments: try _prepareUrlForReading(url: openUrl))
+                    _initOpenUrl = nil
+                }
+                result(true)
             case "openFilePicker":
                 openFilePicker(result: result)
             case "openFilePickerForCreate":
@@ -70,7 +89,7 @@ public class SwiftFilePickerWritablePlugin: NSObject, FlutterPlugin, UIDocumentP
         }
         var isStale: Bool = false
         let url = try URL(resolvingBookmarkData: bookmark, bookmarkDataIsStale: &isStale)
-        print("url: \(url) / isStale: \(isStale)");
+        logDebug("url: \(url) / isStale: \(isStale)");
         if !url.startAccessingSecurityScopedResource() {
             throw FilePickerError.readError(message: "Unable to start accessing security scope resource.")
         }
@@ -85,7 +104,7 @@ public class SwiftFilePickerWritablePlugin: NSObject, FlutterPlugin, UIDocumentP
         }
         var isStale: Bool = false
         let url = try URL(resolvingBookmarkData: bookmark, bookmarkDataIsStale: &isStale)
-        print("url: \(url) / isStale: \(isStale)");
+        logDebug("url: \(url) / isStale: \(isStale)");
         try _writeFile(path: path, destination: url)
         let sourceFile = URL(fileURLWithPath: path)
         result(_fileInfoResult(tempFile: sourceFile, originalURL: url, bookmark: bookmark))
@@ -97,12 +116,12 @@ public class SwiftFilePickerWritablePlugin: NSObject, FlutterPlugin, UIDocumentP
         
         let destAccess = destination.startAccessingSecurityScopedResource()
         if !destAccess {
-            print("Warning: Unable to access original url \(destination) (destination) \(skipDestinationStartAccess)")
+            logDebug("Warning: Unable to access original url \(destination) (destination) \(skipDestinationStartAccess)")
 //            throw FilePickerError.invalidArguments(message: "Unable to access original url \(destination)")
         }
         let sourceAccess = sourceFile.startAccessingSecurityScopedResource()
         if !sourceAccess {
-            print("Warning: startAccessingSecurityScopedResource is false for \(sourceFile) (sourceFile)")
+            logDebug("Warning: startAccessingSecurityScopedResource is false for \(sourceFile) (sourceFile)")
 //            throw FilePickerError.readError(message: "Unable to access source file \(sourceFile)")
         }
         defer {
@@ -155,6 +174,18 @@ public class SwiftFilePickerWritablePlugin: NSObject, FlutterPlugin, UIDocumentP
         }
     }
     
+    private func _prepareUrlForReading(url: URL) throws -> [String: String] {
+        let securityScope = url.startAccessingSecurityScopedResource()
+        defer {
+            if securityScope {
+                url.stopAccessingSecurityScopedResource()
+            }
+        }
+        let bookmark = try url.bookmarkData()
+        let tempFile = try _copyToTempDirectory(url: url)
+        return _fileInfoResult(tempFile: tempFile, originalURL: url, bookmark: bookmark)
+    }
+    
     private func _fileInfoResult(tempFile: URL, originalURL: URL, bookmark: Data) -> [String: String] {
         let identifier = bookmark.base64EncodedString()
         return [
@@ -171,18 +202,21 @@ public class SwiftFilePickerWritablePlugin: NSObject, FlutterPlugin, UIDocumentP
         }
         _filePickerResult = nil
     }
+}
+
+extension SwiftFilePickerWritablePlugin : UIDocumentPickerDelegate {
 
     public func documentPicker(_ controller: UIDocumentPickerViewController, didPickDocumentAt url: URL) {
         do {
-            guard url.startAccessingSecurityScopedResource() else {
-                throw FilePickerError.readError(message: "Unnable to acquire acces to \(url)")
-            }
             if let path = _filePickerPath {
-                print("Need to write \(path) to \(url)")
+                guard url.startAccessingSecurityScopedResource() else {
+                    throw FilePickerError.readError(message: "Unnable to acquire acces to \(url)")
+                }
+                logDebug("Need to write \(path) to \(url)")
                 let sourceFile = URL(fileURLWithPath: path)
                 let targetFile = url.appendingPathComponent(sourceFile.lastPathComponent)
 //                if !targetFile.startAccessingSecurityScopedResource() {
-//                    print("Warning: Unnable to acquire acces to \(targetFile)")
+//                    logDebug("Warning: Unnable to acquire acces to \(targetFile)")
 //                }
 //                defer {
 //                    targetFile.stopAccessingSecurityScopedResource()
@@ -194,19 +228,42 @@ public class SwiftFilePickerWritablePlugin: NSObject, FlutterPlugin, UIDocumentP
                 _sendFilePickerResult(_fileInfoResult(tempFile: tempFile, originalURL: targetFile, bookmark: bookmark))
                 return
             }
-            let bookmark = try url.bookmarkData()
-            let tempFile = try _copyToTempDirectory(url: url)
-            _sendFilePickerResult(_fileInfoResult(tempFile: tempFile, originalURL: url, bookmark: bookmark))
+            _sendFilePickerResult(try _prepareUrlForReading(url: url))
         } catch {
             _sendFilePickerResult(FlutterError(code: "ErrorProcessingResult", message: "Error handling result url \(url): \(error)", details: nil))
             return
         }
         
-        url.stopAccessingSecurityScopedResource()
     }
         
     public func documentPickerWasCancelled(_ controller: UIDocumentPickerViewController) {
         _sendFilePickerResult(nil)
     }
     
+}
+
+// application delegate methods..
+extension SwiftFilePickerWritablePlugin: FlutterApplicationLifeCycleDelegate {
+    public func application(_ application: UIApplication, open url: URL, options: [UIApplication.OpenURLOptionsKey : Any] = [:]) -> Bool {
+        logDebug("Opening URL \(url) - options: \(options)")
+        return _handle(url: url)
+    }
+    
+    public func application(_ application: UIApplication, handleOpen url: URL) -> Bool {
+        logDebug("handleOpen for \(url)")
+        return _handle(url: url)
+    }
+    
+    private func _handle(url: URL) -> Bool {
+        if (!isInitialized) {
+            _initOpenUrl = url
+            return true
+        }
+        do {
+            _channel.invokeMethod("openFile", arguments: try _prepareUrlForReading(url: url))
+        } catch let error {
+            logError("Error handling open url for \(url): \(error)")
+        }
+        return true
+    }
 }

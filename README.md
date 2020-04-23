@@ -12,6 +12,15 @@ Flutter plugin to choose files which can be read, referenced and written back at
 * iOS 8 + Swift 5
 * Only tested on iOS 13+, so let me know ;-)
 
+### Support for file handlers
+
+1. Configure an OTI Type: https://developer.apple.com/library/archive/qa/qa1587/_index.html
+2. Add to plist file:
+   ```
+   UISupportsDocumentBrowser = NO
+   LSSupportsOpeningDocumentsInPlace = YES
+   ```
+
 ## Android
 
 * Android 4.4 (API Level 4.4)
