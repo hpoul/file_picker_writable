@@ -6,14 +6,18 @@ Flutter plugin to choose files which can be read, referenced and written back at
 
 # Requirements
 
-* Currently only supports 
-    [plugin api v2](https://flutter.dev/docs/development/packages-and-plugins/plugin-api-migration).
 
 ## iOS
+
+* iOS 8 + Swift 5
+* Only tested on iOS 13+, so let me know ;-)
 
 ## Android
 
 * Android 4.4 (API Level 4.4)
+* Currently only supports 
+    [plugin api v2](https://flutter.dev/docs/development/packages-and-plugins/plugin-api-migration).
+
 
 ## Getting Started
 
