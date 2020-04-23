@@ -45,11 +45,11 @@ even after an app restart.
 ```dart
 Future<void> persistChanges(FileInfo fileInfo, Uint8List newContent) async {
   // create a new temporary file inside your apps sandbox.
-  final File f = _createNewTempFile();
-  await f.writeBytes(newContent);
+  final File newFile = _createNewTempFile();
+  await newFile.writeBytes(newContent);
 
   // tell FilePickerWritable plugin to write the new contents over the user selected file
   await FilePickerWritable()
-     .writeFileWithIdentifier(fileInfo.identifier, fi.file);
+     .writeFileWithIdentifier(fileInfo.identifier, newFile);
 }
 ```
