@@ -17,11 +17,12 @@ import java.lang.IllegalStateException
 interface ActivityProvider {
   val activity: Activity?
   fun logDebug(message: String, e: Throwable? = null)
+  fun openFile(fileInfo: Map<String, String>)
 }
 
 class FilePickerWritableImpl(
   private val plugin: ActivityProvider
-) : PluginRegistry.ActivityResultListener {
+) : PluginRegistry.ActivityResultListener, PluginRegistry.NewIntentListener {
 
   companion object {
     const val REQUEST_CODE_OPEN_FILE = 40832
@@ -30,6 +31,9 @@ class FilePickerWritableImpl(
 
   private var filePickerCreateFile: File? = null
   private var filePickerResult: MethodChannel.Result? = null
+
+  private var isInitialized = false
+  private var initOpenUrl: Uri? = null
 
 
   fun openFilePicker(result: MethodChannel.Result) {
@@ -181,6 +185,13 @@ class FilePickerWritableImpl(
     result: MethodChannel.Result,
     fileUri: Uri
   ) {
+
+    result.success(
+      copyContentUriAndReturnFileInfo(fileUri)
+    )
+  }
+
+  private fun copyContentUriAndReturnFileInfo(fileUri: Uri): Map<String, String> {
     val activity = requireActivity()
 
     val contentResolver = activity.applicationContext.contentResolver
@@ -198,13 +209,11 @@ class FilePickerWritableImpl(
         input.copyTo(output)
       }
     }
-    result.success(
-      mapOf(
-        "path" to tempFile.absolutePath,
-        "identifier" to fileUri.toString(),
-        "fileName" to fileName,
-        "uri" to fileUri.toString()
-      )
+    return mapOf(
+      "path" to tempFile.absolutePath,
+      "identifier" to fileUri.toString(),
+      "fileName" to fileName,
+      "uri" to fileUri.toString()
     )
   }
 
@@ -239,6 +248,8 @@ class FilePickerWritableImpl(
 
   fun onAttachedToActivity(binding: ActivityPluginBinding) {
     binding.addActivityResultListener(this)
+    binding.addOnNewIntentListener(this)
+    onNewIntent(binding.activity.intent)
   }
 
   fun writeFileWithIdentifier(
@@ -263,5 +274,27 @@ class FilePickerWritableImpl(
 
   private fun requireActivity() = (plugin.activity
     ?: throw FilePickerException("Illegal state, expected activity to be there."))
+
+  override fun onNewIntent(intent: Intent?): Boolean {
+    val data = intent?.data
+    plugin.logDebug("onNewIntent($data)")
+    if (data == null) {
+      return false
+    }
+    if (isInitialized) {
+      plugin.openFile(copyContentUriAndReturnFileInfo(data))
+    } else {
+      initOpenUrl = data
+    }
+    return true
+  }
+
+  fun init() {
+    isInitialized = true
+    initOpenUrl?.let { uri ->
+      plugin.openFile(copyContentUriAndReturnFileInfo(uri))
+    }
+    initOpenUrl = null
+  }
 
 }

@@ -27,6 +27,27 @@ Flutter plugin to choose files which can be read, referenced and written back at
 * Currently only supports 
     [plugin api v2](https://flutter.dev/docs/development/packages-and-plugins/plugin-api-migration).
 
+### Support for file handlers
+
+#### AndroidManifest.xlm
+```xml
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW"  />
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.BROWSABLE" />
+                <data android:scheme="file" />
+                <data android:scheme="content" />
+                <data android:host="*"  />
+                <data android:mimeType="*/*" />
+                <!-- https://stackoverflow.com/a/52384331/109219 ?? -->
+                <data android:pathPattern=".*\\.codeux" />
+                <data android:pathPattern=".*\\..*\\.codeux" />
+                <data android:pathPattern=".*\\..*\\..*\\.codeux" />
+                <data android:pathPattern=".*\\..*\\..*\\..*\\.codeux" />
+                <data android:pathPattern=".*\\..*\\..*\\..*\\..*\\.codeux" />
+                <data android:pathPattern=".*\\..*\\..*\\..*\\.*\\..*\\.codeux" />
+            </intent-filter>
+```
 
 ## Getting Started
 

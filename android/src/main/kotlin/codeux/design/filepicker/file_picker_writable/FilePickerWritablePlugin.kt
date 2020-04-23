@@ -67,6 +67,9 @@ public class FilePickerWritablePlugin : FlutterPlugin, MethodCallHandler,
   ) {
     try {
       when (call.method) {
+        "init" -> {
+          impl.init()
+        }
         "openFilePicker" -> {
           impl.openFilePicker(result)
         }
@@ -128,5 +131,9 @@ public class FilePickerWritablePlugin : FlutterPlugin, MethodCallHandler,
 
   override fun logDebug(message: String, e: Throwable?) {
     Log.d(TAG, message, e)
+  }
+
+  override fun openFile(fileInfo: Map<String, String>) {
+    channel.invokeMethod("openFile", fileInfo)
   }
 }
