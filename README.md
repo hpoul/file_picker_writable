@@ -17,8 +17,10 @@ Flutter plugin to choose files which can be read, referenced and written back at
 1. Configure an OTI Type: https://developer.apple.com/library/archive/qa/qa1587/_index.html
 2. Add to plist file:
    ```
-   UISupportsDocumentBrowser = NO
-   LSSupportsOpeningDocumentsInPlace = YES
+	<key>UISupportsDocumentBrowser</key>
+	<false/>
+	<key>LSSupportsOpeningDocumentsInPlace</key>
+	<true/>
    ```
 
 ## Android
