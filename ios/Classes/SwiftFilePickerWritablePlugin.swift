@@ -15,28 +15,39 @@ public class SwiftFilePickerWritablePlugin: NSObject, FlutterPlugin {
     private var _filePickerPath: String?
     private var isInitialized = false
     private var _initOpenUrl: URL? = nil
+    private var _eventSink: FlutterEventSink? = nil
+    private var _eventQueue: [[String: String]] = []
 
     public static func register(with registrar: FlutterPluginRegistrar) {
-        let channel = FlutterMethodChannel(name: "design.codeux.file_picker_writable", binaryMessenger: registrar.messenger())
         guard let vc = UIApplication.shared.delegate?.window??.rootViewController else {
             NSLog("PANIC - unable to initialize plugin, no view controller available.")
             fatalError("No viewController available.")
         }
-        let instance = SwiftFilePickerWritablePlugin(viewController: vc, channel: channel)
-        registrar.addMethodCallDelegate(instance, channel: channel)
-        registrar.addApplicationDelegate(instance)
+        _ = SwiftFilePickerWritablePlugin(viewController: vc, registrar: registrar)
     }
 
-    public init(viewController: UIViewController, channel: FlutterMethodChannel) {
+    public init(viewController: UIViewController, registrar: FlutterPluginRegistrar) {
+
+        let channel = FlutterMethodChannel(name: "design.codeux.file_picker_writable", binaryMessenger: registrar.messenger())
         _viewController = viewController;
         _channel = channel
+
+        super.init()
+
+        registrar.addMethodCallDelegate(self, channel: channel)
+        registrar.addApplicationDelegate(self)
+
+        let eventChannel = FlutterEventChannel(name: "design.codeux.file_picker_writable/events", binaryMessenger: registrar.messenger())
+        eventChannel.setStreamHandler(self)
     }
     
     private func logDebug(_ message: String) {
         print("DEBUG", "FilePickerWritablePlugin:", message)
+        sendEvent(event: ["type": "log", "level": "DEBUG", "message": message])
     }
     private func logError(_ message: String) {
         print("ERROR", "FilePickerWritablePlugin:", message)
+        sendEvent(event: ["type": "log", "level": "ERROR", "message": message])
     }
 
     public func handle(_ call: FlutterMethodCall, result: @escaping FlutterResult) {
@@ -255,6 +266,10 @@ extension SwiftFilePickerWritablePlugin: FlutterApplicationLifeCycleDelegate {
     }
     
     private func _handle(url: URL) -> Bool {
+        if (!url.isFileURL) {
+            logDebug("url \(url) is not a file url. ignoring it for now.")
+            return false
+        }
         if (!isInitialized) {
             _initOpenUrl = url
             return true
@@ -266,4 +281,30 @@ extension SwiftFilePickerWritablePlugin: FlutterApplicationLifeCycleDelegate {
         }
         return true
     }
+}
+
+extension SwiftFilePickerWritablePlugin: FlutterStreamHandler {
+    public func onListen(withArguments arguments: Any?, eventSink events: @escaping FlutterEventSink) -> FlutterError? {
+        _eventSink = events
+        let queue = _eventQueue
+        _eventQueue = []
+        for item in queue {
+            events(item)
+        }
+        return nil
+    }
+    
+    public func onCancel(withArguments arguments: Any?) -> FlutterError? {
+        _eventSink = nil
+        return nil
+    }
+    
+    private func sendEvent(event: [String: String]) {
+        if let _eventSink = _eventSink {
+            _eventSink(event)
+        } else {
+            _eventQueue.append(event)
+        }
+    }
+    
 }

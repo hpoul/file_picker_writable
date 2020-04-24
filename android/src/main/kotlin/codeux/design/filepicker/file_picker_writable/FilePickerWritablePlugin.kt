@@ -1,19 +1,26 @@
 package codeux.design.filepicker.file_picker_writable
 
 import android.app.Activity
+import android.os.Handler
+import android.os.Looper
 import android.util.Log
 import androidx.annotation.NonNull;
 
 import io.flutter.embedding.engine.plugins.FlutterPlugin
 import io.flutter.embedding.engine.plugins.activity.ActivityAware
 import io.flutter.embedding.engine.plugins.activity.ActivityPluginBinding
+import io.flutter.plugin.common.BinaryMessenger
+import io.flutter.plugin.common.EventChannel
 import io.flutter.plugin.common.MethodCall
 import io.flutter.plugin.common.MethodChannel
 import io.flutter.plugin.common.MethodChannel.MethodCallHandler
 import io.flutter.plugin.common.MethodChannel.Result
 import io.flutter.plugin.common.PluginRegistry.Registrar
 import java.io.File
+import java.io.PrintWriter
+import java.io.StringWriter
 import java.lang.UnsupportedOperationException
+import java.util.*
 
 /** FilePickerWritablePlugin */
 public class FilePickerWritablePlugin : FlutterPlugin, MethodCallHandler,
@@ -27,14 +34,42 @@ public class FilePickerWritablePlugin : FlutterPlugin, MethodCallHandler,
   private val impl: FilePickerWritableImpl = FilePickerWritableImpl(this)
   private var currentBinding: ActivityPluginBinding? = null
 
+  private val eventQueue = LinkedList<Map<String, String>>()
+  private var eventSink: EventChannel.EventSink? = null
+
+  private val mainHandler = Handler(Looper.getMainLooper())
+
   override fun onAttachedToEngine(
     @NonNull flutterPluginBinding: FlutterPlugin.FlutterPluginBinding
   ) {
+    initializePlugin(flutterPluginBinding.binaryMessenger)
+  }
+
+  fun initializePlugin(binaryMessenger: BinaryMessenger) {
     channel = MethodChannel(
-      flutterPluginBinding.getFlutterEngine().getDartExecutor(),
+      binaryMessenger,
       "design.codeux.file_picker_writable"
     )
     channel.setMethodCallHandler(this);
+    EventChannel(
+      binaryMessenger,
+      "design.codeux.file_picker_writable/events"
+    ).setStreamHandler(object :
+      EventChannel.StreamHandler {
+      override fun onListen(arguments: Any?, events: EventChannel.EventSink?) {
+        eventSink = events
+        mainHandler.run {
+          while (true) {
+            val event = eventQueue.poll() ?: break
+            eventSink?.success(event)
+          }
+        }
+      }
+
+      override fun onCancel(arguments: Any?) {
+        eventSink = null
+      }
+    })
   }
 
   // This static function is optional and equivalent to onAttachedToEngine. It supports the old
@@ -51,12 +86,11 @@ public class FilePickerWritablePlugin : FlutterPlugin, MethodCallHandler,
 
     @JvmStatic
     fun registerWith(registrar: Registrar) {
-      val channel = MethodChannel(
-        registrar.messenger(),
-        "design.codeux.file_picker_writable"
+      FilePickerWritablePlugin().initializePlugin(registrar.messenger())
+      Log.w(
+        TAG, "v1 plugin api is unsupported, migrate to v2 " +
+        "https://flutter.dev/go/android-project-migration"
       )
-      channel.setMethodCallHandler(FilePickerWritablePlugin())
-      throw UnsupportedOperationException("Right now we only support v2 plugin embedding.")
     }
   }
 
@@ -131,9 +165,29 @@ public class FilePickerWritablePlugin : FlutterPlugin, MethodCallHandler,
 
   override fun logDebug(message: String, e: Throwable?) {
     Log.d(TAG, message, e)
+    val exception = e?.let {
+      e.localizedMessage + "\n" +
+        StringWriter().also {
+          e.printStackTrace(PrintWriter(it))
+        }.toString()
+    } ?: ""
+    sendEvent(
+      mapOf(
+        "type" to "log",
+        "level" to "debug",
+        "message" to message,
+        "exception" to exception
+      )
+    )
   }
 
   override fun openFile(fileInfo: Map<String, String>) {
     channel.invokeMethod("openFile", fileInfo)
+  }
+
+  private fun sendEvent(event: Map<String, String>) {
+    mainHandler.run {
+      eventSink?.success(event) ?: eventQueue.add(event)
+    }
   }
 }

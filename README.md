@@ -26,8 +26,8 @@ Flutter plugin to choose files which can be read, referenced and written back at
 ## Android
 
 * Android 4.4 (API Level 4.4)
-* Currently only supports 
-    [plugin api v2](https://flutter.dev/docs/development/packages-and-plugins/plugin-api-migration).
+* Only supports [plugin api v2](https://flutter.dev/go/android-project-migration).
+  * (v1 is implemented but untested)
 
 ### Support for file handlers
 

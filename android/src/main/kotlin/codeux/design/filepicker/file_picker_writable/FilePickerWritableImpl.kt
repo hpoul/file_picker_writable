@@ -3,6 +3,7 @@ package codeux.design.filepicker.file_picker_writable
 import android.app.Activity
 import android.app.Activity.RESULT_OK
 import android.content.ActivityNotFoundException
+import android.content.ContentProvider
 import android.content.ContentResolver
 import android.content.Intent
 import android.database.Cursor
@@ -136,7 +137,11 @@ class FilePickerWritableImpl(
           val fileUri =
             requireNotNull(data?.data) { "RESULT_OK with null file uri $data" }
           plugin.logDebug("Got result $fileUri")
-          handleFileUriCreateResponse(result, fileUri, initialFileContent)
+          handleFileUriCreateResponse(
+            result,
+            fileUri,
+            initialFileContent
+          )
 
           true
         }
@@ -177,7 +182,10 @@ class FilePickerWritableImpl(
     copyContentUriAndReturn(result, fileUri)
   }
 
-  fun readFileWithIdentifier(result: MethodChannel.Result, identifier: String) {
+  fun readFileWithIdentifier(
+    result: MethodChannel.Result,
+    identifier: String
+  ) {
     copyContentUriAndReturn(result, Uri.parse(identifier))
   }
 
@@ -217,7 +225,10 @@ class FilePickerWritableImpl(
     )
   }
 
-  private fun readFileInfo(uri: Uri, contentResolver: ContentResolver): String {
+  private fun readFileInfo(
+    uri: Uri,
+    contentResolver: ContentResolver
+  ): String {
 
     // The query, because it only applies to a single document, returns only
     // one row. There's no need to filter, sort, or select fields,
@@ -275,10 +286,22 @@ class FilePickerWritableImpl(
   private fun requireActivity() = (plugin.activity
     ?: throw FilePickerException("Illegal state, expected activity to be there."))
 
+  val CONTENT_PROVIDER_SCHEMES = setOf(
+    ContentResolver.SCHEME_CONTENT,
+    ContentResolver.SCHEME_FILE,
+    ContentResolver.SCHEME_ANDROID_RESOURCE
+  );
+
   override fun onNewIntent(intent: Intent?): Boolean {
     val data = intent?.data
+    val scheme = data?.scheme
+
     plugin.logDebug("onNewIntent($data)")
     if (data == null) {
+      return false
+    }
+    if (scheme == null || !CONTENT_PROVIDER_SCHEMES.contains(scheme)) {
+      plugin.logDebug("Not handling url $data (no supported scheme $CONTENT_PROVIDER_SCHEMES)")
       return false
     }
     if (isInitialized) {
