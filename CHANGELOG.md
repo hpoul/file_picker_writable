@@ -1,3 +1,8 @@
+## 1.0.0
+
+* Only handle file urls on iOS and file, content URLs on android.
+* Send native logs to dart to make debugging easier.
+
 ## 1.0.0-rc.2
 
 * Add support for handling "file open" intents on on android and iOS (openUrl).
