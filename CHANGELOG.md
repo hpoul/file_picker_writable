@@ -1,3 +1,9 @@
+## 1.0.0+1
+
+* Improved documentation & comments.
+* Add `toJsonString` and `fromJsonString` to `FileInfo` for easier serialization.
+* Loosen package dependency version constraint for `convert` package.
+
 ## 1.0.0
 
 * Only handle file urls on iOS and file, content URLs on android.
