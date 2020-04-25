@@ -4,8 +4,8 @@ import android.app.Activity
 import android.os.Handler
 import android.os.Looper
 import android.util.Log
-import androidx.annotation.NonNull;
-
+import androidx.annotation.MainThread
+import androidx.annotation.NonNull
 import io.flutter.embedding.engine.plugins.FlutterPlugin
 import io.flutter.embedding.engine.plugins.activity.ActivityAware
 import io.flutter.embedding.engine.plugins.activity.ActivityPluginBinding
@@ -16,16 +16,16 @@ import io.flutter.plugin.common.MethodChannel
 import io.flutter.plugin.common.MethodChannel.MethodCallHandler
 import io.flutter.plugin.common.MethodChannel.Result
 import io.flutter.plugin.common.PluginRegistry.Registrar
+import kotlinx.coroutines.*
 import java.io.File
 import java.io.PrintWriter
 import java.io.StringWriter
-import java.lang.UnsupportedOperationException
 import java.util.*
 
 /** FilePickerWritablePlugin */
-public class FilePickerWritablePlugin : FlutterPlugin, MethodCallHandler,
+class FilePickerWritablePlugin : FlutterPlugin, MethodCallHandler,
   ActivityAware,
-  ActivityProvider {
+  ActivityProvider, CoroutineScope by MainScope() {
   /// The MethodChannel that will the communication between Flutter and native Android
   ///
   /// This local reference serves to register the plugin with the Flutter Engine and unregister it
@@ -36,8 +36,6 @@ public class FilePickerWritablePlugin : FlutterPlugin, MethodCallHandler,
 
   private val eventQueue = LinkedList<Map<String, String>>()
   private var eventSink: EventChannel.EventSink? = null
-
-  private val mainHandler = Handler(Looper.getMainLooper())
 
   override fun onAttachedToEngine(
     @NonNull flutterPluginBinding: FlutterPlugin.FlutterPluginBinding
@@ -50,7 +48,7 @@ public class FilePickerWritablePlugin : FlutterPlugin, MethodCallHandler,
       binaryMessenger,
       "design.codeux.file_picker_writable"
     )
-    channel.setMethodCallHandler(this);
+    channel.setMethodCallHandler(this)
     EventChannel(
       binaryMessenger,
       "design.codeux.file_picker_writable/events"
@@ -58,7 +56,7 @@ public class FilePickerWritablePlugin : FlutterPlugin, MethodCallHandler,
       EventChannel.StreamHandler {
       override fun onListen(arguments: Any?, events: EventChannel.EventSink?) {
         eventSink = events
-        mainHandler.run {
+        launch(Dispatchers.Main) {
           while (true) {
             val event = eventQueue.poll() ?: break
             eventSink?.success(event)
@@ -72,6 +70,8 @@ public class FilePickerWritablePlugin : FlutterPlugin, MethodCallHandler,
     })
   }
 
+
+
   // This static function is optional and equivalent to onAttachedToEngine. It supports the old
   // pre-Flutter-1.12 Android projects. You are encouraged to continue supporting
   // plugin registration via this function while apps migrate to use the new Android APIs
@@ -84,6 +84,7 @@ public class FilePickerWritablePlugin : FlutterPlugin, MethodCallHandler,
   companion object {
     const val TAG = "FilePickerWritable"
 
+    @Suppress("unused")
     @JvmStatic
     fun registerWith(registrar: Registrar) {
       FilePickerWritablePlugin().initializePlugin(registrar.messenger())
@@ -99,45 +100,50 @@ public class FilePickerWritablePlugin : FlutterPlugin, MethodCallHandler,
     @NonNull call: MethodCall,
     @NonNull result: Result
   ) {
-    try {
-      when (call.method) {
-        "init" -> {
-          impl.init()
+    launch(Dispatchers.Main) {
+      logDebug("Got method call: ${call.method}")
+      try {
+        when (call.method) {
+          "init" -> {
+            impl.init()
+          }
+          "openFilePicker" -> {
+            impl.openFilePicker(result)
+          }
+          "openFilePickerForCreate" -> {
+            val path = call.argument<String>("path")
+              ?: throw FilePickerException("Expected argument 'path'")
+            impl.openFilePickerForCreate(result, path)
+          }
+          "readFileWithIdentifier" -> {
+            val identifier = call.argument<String>("identifier")
+              ?: throw FilePickerException("Expected argument 'identifier'")
+            impl.readFileWithIdentifier(result, identifier)
+          }
+          "writeFileWithIdentifier" -> {
+            val identifier = call.argument<String>("identifier")
+              ?: throw FilePickerException("Expected argument 'identifier'")
+            val path = call.argument<String>("path")
+              ?: throw FilePickerException("Expected argument 'path'")
+            impl.writeFileWithIdentifier(result, identifier, File(path))
+          }
+          else -> {
+            result.notImplemented()
+          }
         }
-        "openFilePicker" -> {
-          impl.openFilePicker(result)
-        }
-        "openFilePickerForCreate" -> {
-          val path = call.argument<String>("path")
-            ?: throw FilePickerException("Expected argument 'path'")
-          impl.openFilePickerForCreate(result, path)
-        }
-        "readFileWithIdentifier" -> {
-          val identifier = call.argument<String>("identifier")
-            ?: throw FilePickerException("Expected argument 'identifier'")
-          impl.readFileWithIdentifier(result, identifier)
-        }
-        "writeFileWithIdentifier" -> {
-          val identifier = call.argument<String>("identifier")
-            ?: throw FilePickerException("Expected argument 'identifier'")
-          val path = call.argument<String>("path")
-            ?: throw FilePickerException("Expected argument 'path'")
-          impl.writeFileWithIdentifier(result, identifier, File(path))
-        }
-        else -> {
-          result.notImplemented()
-        }
+      } catch (e: Exception) {
+        logDebug("Error while handling method call $call", e)
+        result.error("FilePickerError", e.toString(), null)
       }
-    } catch (e: Exception) {
-      logDebug("Error while handling method call $call", e)
-      result.error("FilePickerError", e.toString(), null)
     }
+
   }
 
   override fun onDetachedFromEngine(
     @NonNull binding: FlutterPlugin.FlutterPluginBinding
   ) {
     channel.setMethodCallHandler(null)
+    cancel("onDetachedFromEngine")
   }
 
   override fun onDetachedFromActivity() {
@@ -166,7 +172,7 @@ public class FilePickerWritablePlugin : FlutterPlugin, MethodCallHandler,
   override fun logDebug(message: String, e: Throwable?) {
     Log.d(TAG, message, e)
     val exception = e?.let {
-      e.localizedMessage + "\n" +
+      "${e.localizedMessage}\n" +
         StringWriter().also {
           e.printStackTrace(PrintWriter(it))
         }.toString()
@@ -175,18 +181,19 @@ public class FilePickerWritablePlugin : FlutterPlugin, MethodCallHandler,
       mapOf(
         "type" to "log",
         "level" to "debug",
-        "message" to message,
+        "message" to "${Thread.currentThread().name} $message",
         "exception" to exception
       )
     )
   }
 
+  @MainThread
   override fun openFile(fileInfo: Map<String, String>) {
     channel.invokeMethod("openFile", fileInfo)
   }
 
   private fun sendEvent(event: Map<String, String>) {
-    mainHandler.run {
+    launch(Dispatchers.Main) {
       eventSink?.success(event) ?: eventQueue.add(event)
     }
   }

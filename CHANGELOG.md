@@ -1,3 +1,8 @@
+## 1.0.1
+
+* Android: make sure all file operations happen outside the main UI thread.
+  * Everything uses coroutines now to correctly dispatch everything to a worker thread.
+
 ## 1.0.0+1
 
 * Improved documentation & comments.

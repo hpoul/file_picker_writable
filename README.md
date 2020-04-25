@@ -1,3 +1,5 @@
+[![Pub Version](https://img.shields.io/pub/v/file_picker_writable)](https://pub.dev/packages/file_picker_writable)
+
 # file_picker_writable
 
 Flutter plugin to choose files which can be read, referenced and written back at a

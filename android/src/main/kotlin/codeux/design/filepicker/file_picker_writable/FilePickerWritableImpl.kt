@@ -3,21 +3,25 @@ package codeux.design.filepicker.file_picker_writable
 import android.app.Activity
 import android.app.Activity.RESULT_OK
 import android.content.ActivityNotFoundException
-import android.content.ContentProvider
 import android.content.ContentResolver
 import android.content.Intent
 import android.database.Cursor
 import android.net.Uri
 import android.provider.OpenableColumns
+import androidx.annotation.MainThread
 import io.flutter.embedding.engine.plugins.activity.ActivityPluginBinding
 import io.flutter.plugin.common.MethodChannel
 import io.flutter.plugin.common.PluginRegistry
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import java.io.File
-import java.lang.IllegalStateException
 
-interface ActivityProvider {
+interface ActivityProvider : CoroutineScope {
   val activity: Activity?
   fun logDebug(message: String, e: Throwable? = null)
+  @MainThread
   fun openFile(fileInfo: Map<String, String>)
 }
 
@@ -37,6 +41,7 @@ class FilePickerWritableImpl(
   private var initOpenUrl: Uri? = null
 
 
+  @MainThread
   fun openFilePicker(result: MethodChannel.Result) {
     if (filePickerResult != null) {
       throw FilePickerException("Invalid lifecycle, only one call at a time.")
@@ -60,6 +65,7 @@ class FilePickerWritableImpl(
     }
   }
 
+  @MainThread
   fun openFilePickerForCreate(result: MethodChannel.Result, path: String) {
     if (filePickerResult != null) {
       throw FilePickerException("Invalid lifecycle, only one call at a time.")
@@ -124,7 +130,9 @@ class FilePickerWritableImpl(
           val fileUri = data?.data
           if (fileUri != null) {
             plugin.logDebug("Got result $fileUri")
-            handleFileUriResponse(result, fileUri)
+            plugin.launch {
+              handleFileUriResponse(result, fileUri)
+            }
           } else {
             plugin.logDebug("Got RESULT_OK with null fileUri?")
             result.success(null)
@@ -137,11 +145,13 @@ class FilePickerWritableImpl(
           val fileUri =
             requireNotNull(data?.data) { "RESULT_OK with null file uri $data" }
           plugin.logDebug("Got result $fileUri")
-          handleFileUriCreateResponse(
-            result,
-            fileUri,
-            initialFileContent
-          )
+          plugin.launch {
+            handleFileUriCreateResponse(
+              result,
+              fileUri,
+              initialFileContent
+            )
+          }
 
           true
         }
@@ -161,7 +171,8 @@ class FilePickerWritableImpl(
     }
   }
 
-  private fun handleFileUriCreateResponse(
+  @MainThread
+  private suspend fun handleFileUriCreateResponse(
     result: MethodChannel.Result,
     fileUri: Uri,
     initialFileContent: File
@@ -175,21 +186,24 @@ class FilePickerWritableImpl(
     writeFileWithIdentifier(result, fileUri.toString(), initialFileContent)
   }
 
-  private fun handleFileUriResponse(
+  @MainThread
+  private suspend fun handleFileUriResponse(
     result: MethodChannel.Result,
     fileUri: Uri
   ) {
     copyContentUriAndReturn(result, fileUri)
   }
 
-  fun readFileWithIdentifier(
+  @MainThread
+  suspend fun readFileWithIdentifier(
     result: MethodChannel.Result,
     identifier: String
   ) {
     copyContentUriAndReturn(result, Uri.parse(identifier))
   }
 
-  private fun copyContentUriAndReturn(
+  @MainThread
+  private suspend fun copyContentUriAndReturn(
     result: MethodChannel.Result,
     fileUri: Uri
   ) {
@@ -199,37 +213,40 @@ class FilePickerWritableImpl(
     )
   }
 
-  private fun copyContentUriAndReturnFileInfo(fileUri: Uri): Map<String, String> {
+  @MainThread
+  private suspend fun copyContentUriAndReturnFileInfo(fileUri: Uri): Map<String, String> {
     val activity = requireActivity()
 
     val contentResolver = activity.applicationContext.contentResolver
-    val takeFlags: Int = Intent.FLAG_GRANT_READ_URI_PERMISSION or
-      Intent.FLAG_GRANT_WRITE_URI_PERMISSION
-    contentResolver.takePersistableUriPermission(fileUri, takeFlags)
 
-    val fileName = readFileInfo(fileUri, contentResolver)
+    return withContext(Dispatchers.IO) {
+      val takeFlags: Int = Intent.FLAG_GRANT_READ_URI_PERMISSION or
+        Intent.FLAG_GRANT_WRITE_URI_PERMISSION
+      contentResolver.takePersistableUriPermission(fileUri, takeFlags)
 
-    val tempFile = File.createTempFile(fileName, null, activity.cacheDir)
-    plugin.logDebug("Copy file $fileUri to $tempFile")
-    contentResolver.openInputStream(fileUri).use { input ->
-      requireNotNull(input)
-      tempFile.outputStream().use { output ->
-        input.copyTo(output)
+      val fileName = readFileInfo(fileUri, contentResolver)
+
+      val tempFile = File.createTempFile(fileName, null, activity.cacheDir)
+      plugin.logDebug("Copy file $fileUri to $tempFile")
+      contentResolver.openInputStream(fileUri).use { input ->
+        requireNotNull(input)
+        tempFile.outputStream().use { output ->
+          input.copyTo(output)
+        }
       }
+      mapOf(
+        "path" to tempFile.absolutePath,
+        "identifier" to fileUri.toString(),
+        "fileName" to fileName,
+        "uri" to fileUri.toString()
+      )
     }
-    return mapOf(
-      "path" to tempFile.absolutePath,
-      "identifier" to fileUri.toString(),
-      "fileName" to fileName,
-      "uri" to fileUri.toString()
-    )
   }
 
-  private fun readFileInfo(
+  private suspend fun readFileInfo(
     uri: Uri,
     contentResolver: ContentResolver
-  ): String {
-
+  ): String = withContext(Dispatchers.IO) {
     // The query, because it only applies to a single document, returns only
     // one row. There's no need to filter, sort, or select fields,
     // because we want all fields for one document.
@@ -247,7 +264,7 @@ class FilePickerWritableImpl(
       val displayName: String =
         it.getString(it.getColumnIndex(OpenableColumns.DISPLAY_NAME))
       plugin.logDebug("Display Name: $displayName")
-      return displayName
+      displayName
 
     } ?: throw FilePickerException("Unable to load file info from $uri")
 
@@ -263,7 +280,8 @@ class FilePickerWritableImpl(
     onNewIntent(binding.activity.intent)
   }
 
-  fun writeFileWithIdentifier(
+  @MainThread
+  suspend fun writeFileWithIdentifier(
     result: MethodChannel.Result,
     identifier: String,
     file: File
@@ -274,10 +292,12 @@ class FilePickerWritableImpl(
     val fileUri = Uri.parse(identifier)
     val activity = requireActivity()
     val contentResolver = activity.contentResolver
-    contentResolver.openOutputStream(fileUri, "w").use { output ->
-      require(output != null)
-      file.inputStream().use { input ->
-        input.copyTo(output)
+    withContext(Dispatchers.IO) {
+      contentResolver.openOutputStream(fileUri, "w").use { output ->
+        require(output != null)
+        file.inputStream().use { input ->
+          input.copyTo(output)
+        }
       }
     }
     copyContentUriAndReturn(result, fileUri)
@@ -286,11 +306,11 @@ class FilePickerWritableImpl(
   private fun requireActivity() = (plugin.activity
     ?: throw FilePickerException("Illegal state, expected activity to be there."))
 
-  val CONTENT_PROVIDER_SCHEMES = setOf(
+  private val CONTENT_PROVIDER_SCHEMES = setOf(
     ContentResolver.SCHEME_CONTENT,
     ContentResolver.SCHEME_FILE,
     ContentResolver.SCHEME_ANDROID_RESOURCE
-  );
+  )
 
   override fun onNewIntent(intent: Intent?): Boolean {
     val data = intent?.data
@@ -304,15 +324,18 @@ class FilePickerWritableImpl(
       plugin.logDebug("Not handling url $data (no supported scheme $CONTENT_PROVIDER_SCHEMES)")
       return false
     }
-    if (isInitialized) {
-      plugin.openFile(copyContentUriAndReturnFileInfo(data))
-    } else {
-      initOpenUrl = data
+    plugin.launch {
+      if (isInitialized) {
+        plugin.openFile(copyContentUriAndReturnFileInfo(data))
+      } else {
+        initOpenUrl = data
+      }
     }
     return true
   }
 
-  fun init() {
+  @MainThread
+  suspend fun init() {
     isInitialized = true
     initOpenUrl?.let { uri ->
       plugin.openFile(copyContentUriAndReturnFileInfo(uri))
