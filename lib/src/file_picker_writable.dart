@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:convert';
 import 'dart:io';
 
 import 'package:flutter/foundation.dart';
@@ -7,6 +8,7 @@ import 'package:logging/logging.dart';
 
 final _logger = Logger('file_picker_writable');
 
+/// Contains information about a user selected file.
 class FileInfo {
   FileInfo({
     @required this.file,
@@ -23,15 +25,32 @@ class FileInfo {
         fileName: json['fileName'] as String,
       );
 
-  /// temporary file which can be used for reading;
+  static FileInfo fromJsonString(String jsonString) =>
+      fromJson(json.decode(jsonString) as Map<String, dynamic>);
+
+  /// Temporary file which can be used for reading.
+  /// Can (usually) be used during the lifetime of your app instance.
+  /// Should typically be only read once, if you later need to access it again
+  /// use the [identifier] to read it with
+  /// [FilePickerWritable.readFileWithIdentifier].
   final File file;
 
   /// permanent identifier which can be used for reading at a later time,
   /// or used for writing back data.
   final String identifier;
 
+  /// Platform dependent URI.
+  /// - On android either content:// or file:// url.
+  /// - On iOS a file:// URL below a document provider (like iCloud).
+  ///   Not a really user friendly name.
   final String uri;
 
+  /// If available, contains the file name of the original file.
+  /// (ie. most of the time the last path segment). Especially useful
+  /// with android content providers which typically do not contain
+  /// an actual file name in the content uri.
+  ///
+  /// Might be null.
   final String fileName;
 
   @override
@@ -45,10 +64,25 @@ class FileInfo {
         'uri': uri,
         'fileName': fileName,
       };
+
+  /// Serializes this data into a json string for easy serialization.
+  /// Can be read back using [fromJsonString].
+  String toJsonString() => json.encode(toJson());
 }
 
 typedef OpenFileHandler = void Function(FileInfo fileInfo);
 
+/// Singleton to accessing services of the FilePickerWritable plugin.
+///
+/// It can be used for:
+///
+/// * Open a file picker to let the user pick an existing
+///   file: [openFilePicker]
+/// * Open a file picker to let the user pick a location for creating
+///   a new file: [openFilePickerForCreate]
+/// * Write a previously picked file [writeFileWithIdentifier]
+/// * (re)read a previously picked file [readFileWithIdentifier]
+///
 class FilePickerWritable {
   factory FilePickerWritable() => _instance;
 
@@ -121,6 +155,8 @@ class FilePickerWritable {
     return _resultToFileInfo(result);
   }
 
+  /// Reads the file previously picked by the user.
+  /// Expects a [FileInfo.identifier] string for [identifier].
   Future<FileInfo> readFileWithIdentifier(String identifier) async {
     _logger.finest('readFileWithIdentifier()');
     final result = await _channel.invokeMapMethod<String, String>(
@@ -128,6 +164,8 @@ class FilePickerWritable {
     return _resultToFileInfo(result);
   }
 
+  /// Writes the file previously picked by the user.
+  /// Expects a [FileInfo.identifier] string for [identifier].
   Future<FileInfo> writeFileWithIdentifier(String identifier, File file) async {
     _logger.finest('writeFileWithIdentifier(file: $file)');
     final result = await _channel
