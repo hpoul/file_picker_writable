@@ -56,7 +56,7 @@ public class SwiftFilePickerWritablePlugin: NSObject, FlutterPlugin {
             case "init":
                 isInitialized = true
                 if let openUrl = _initOpenUrl {
-                    _channel.invokeMethod("openFile", arguments: try _prepareUrlForReading(url: openUrl))
+                    _handleUrl(url: openUrl)
                     _initOpenUrl = nil
                 }
                 result(true)
@@ -266,20 +266,28 @@ extension SwiftFilePickerWritablePlugin: FlutterApplicationLifeCycleDelegate {
     }
     
     private func _handle(url: URL) -> Bool {
-        if (!url.isFileURL) {
-            logDebug("url \(url) is not a file url. ignoring it for now.")
-            return false
-        }
+//        if (!url.isFileURL) {
+//            logDebug("url \(url) is not a file url. ignoring it for now.")
+//            return false
+//        }
         if (!isInitialized) {
             _initOpenUrl = url
             return true
         }
+        _handleUrl(url: url)
+        return true
+    }
+    
+    private func _handleUrl(url: URL) {
         do {
-            _channel.invokeMethod("openFile", arguments: try _prepareUrlForReading(url: url))
+            if (url.isFileURL) {
+                _channel.invokeMethod("openFile", arguments: try _prepareUrlForReading(url: url))
+            } else {
+                _channel.invokeMethod("handleUri", arguments: url.absoluteString)
+            }
         } catch let error {
             logError("Error handling open url for \(url): \(error)")
         }
-        return true
     }
 }
 

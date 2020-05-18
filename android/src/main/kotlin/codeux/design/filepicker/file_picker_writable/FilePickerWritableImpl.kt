@@ -23,6 +23,8 @@ interface ActivityProvider : CoroutineScope {
   fun logDebug(message: String, e: Throwable? = null)
   @MainThread
   fun openFile(fileInfo: Map<String, String>)
+  @MainThread
+  fun handleOpenUri(uri: Uri)
 }
 
 class FilePickerWritableImpl(
@@ -320,13 +322,13 @@ class FilePickerWritableImpl(
     if (data == null) {
       return false
     }
-    if (scheme == null || !CONTENT_PROVIDER_SCHEMES.contains(scheme)) {
-      plugin.logDebug("Not handling url $data (no supported scheme $CONTENT_PROVIDER_SCHEMES)")
-      return false
-    }
+//    if (scheme == null || !CONTENT_PROVIDER_SCHEMES.contains(scheme)) {
+//      plugin.logDebug("Not handling url $data (no supported scheme $CONTENT_PROVIDER_SCHEMES)")
+//      return false
+//    }
     plugin.launch {
       if (isInitialized) {
-        plugin.openFile(copyContentUriAndReturnFileInfo(data))
+        handleUri(data)
       } else {
         initOpenUrl = data
       }
@@ -338,9 +340,20 @@ class FilePickerWritableImpl(
   suspend fun init() {
     isInitialized = true
     initOpenUrl?.let { uri ->
-      plugin.openFile(copyContentUriAndReturnFileInfo(uri))
+      handleUri(uri)
     }
     initOpenUrl = null
+  }
+
+  @MainThread
+  private suspend fun handleUri(uri: Uri) {
+    val scheme = uri.scheme ?: return
+    val isFile = CONTENT_PROVIDER_SCHEMES.contains(scheme)
+    if (isFile) {
+      plugin.openFile(copyContentUriAndReturnFileInfo(uri))
+    } else {
+      plugin.handleOpenUri(uri)
+    }
   }
 
 }

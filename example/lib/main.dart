@@ -78,17 +78,19 @@ class _MainScreenState extends State<MainScreen> {
   @override
   void initState() {
     super.initState();
-    FilePickerWritable().init(openFileHandler: (fileInfo) async {
+    FilePickerWritable().init().registerFileInfoHandler((fileInfo) async {
       _logger.fine('got file info. we are mounted:$mounted');
-      if (mounted) {
-        await SimpleAlertDialog.readFileContentsAndShowDialog(
-          fileInfo,
-          context,
-          bodyTextPrefix: 'Should open file from external app.\n\n'
-              'fileName: ${fileInfo.fileName}\n'
-              'uri: ${fileInfo.uri}\n\n\n',
-        );
+      if (!mounted) {
+        return false;
       }
+      await SimpleAlertDialog.readFileContentsAndShowDialog(
+        fileInfo,
+        context,
+        bodyTextPrefix: 'Should open file from external app.\n\n'
+            'fileName: ${fileInfo.fileName}\n'
+            'uri: ${fileInfo.uri}\n\n\n',
+      );
+      return true;
     });
   }
 

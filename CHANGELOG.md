@@ -1,3 +1,7 @@
+## 1.1.0
+
+* Handle All URLs from intents or custom URL schemas, and propagate it to url handler.
+
 ## 1.0.1
 
 * Android: make sure all file operations happen outside the main UI thread.

@@ -1,6 +1,7 @@
 package codeux.design.filepicker.file_picker_writable
 
 import android.app.Activity
+import android.net.Uri
 import android.os.Handler
 import android.os.Looper
 import android.util.Log
@@ -190,6 +191,11 @@ class FilePickerWritablePlugin : FlutterPlugin, MethodCallHandler,
   @MainThread
   override fun openFile(fileInfo: Map<String, String>) {
     channel.invokeMethod("openFile", fileInfo)
+  }
+
+  @MainThread
+  override fun handleOpenUri(uri: Uri) {
+    channel.invokeMethod("handleUri", uri.toString())
   }
 
   private fun sendEvent(event: Map<String, String>) {

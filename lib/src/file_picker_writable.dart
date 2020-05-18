@@ -5,6 +5,7 @@ import 'dart:io';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 import 'package:logging/logging.dart';
+import 'package:synchronized/synchronized.dart';
 
 final _logger = Logger('file_picker_writable');
 
@@ -70,8 +71,6 @@ class FileInfo {
   String toJsonString() => json.encode(toJson());
 }
 
-typedef OpenFileHandler = void Function(FileInfo fileInfo);
-
 /// Singleton to accessing services of the FilePickerWritable plugin.
 ///
 /// It can be used for:
@@ -89,23 +88,23 @@ class FilePickerWritable {
   FilePickerWritable._() {
     _channel.setMethodCallHandler((call) async {
       _logger.fine('Got method call: {$call}');
-      if (call.method == 'openFile') {
-        try {
-          if (_openFileHandler != null) {
-            _logger.fine('calling handler. ${call.arguments.runtimeType}');
-            _openFileHandler(_resultToFileInfo(
-                (call.arguments as Map<dynamic, dynamic>).cast()));
-            return true;
-          }
-          return false;
-        } catch (e, stackTrace) {
-          _logger.fine('Error while handling method call.', e, stackTrace);
-          rethrow;
+      try {
+        if (call.method == 'openFile') {
+          await _filePickerState._fireFileInfoHandlers(_resultToFileInfo(
+              (call.arguments as Map<dynamic, dynamic>).cast()));
+          return true;
+        } else if (call.method == 'handleUri') {
+          _filePickerState
+              ._fireUriHandlers(Uri.parse(call.arguments as String));
+          return true;
+        } else {
+          throw PlatformException(
+              code: 'MethodNotImplemented',
+              message: 'method ${call.method} not implemented.');
         }
-      } else {
-        throw PlatformException(
-            code: 'MethodNotImplemented',
-            message: 'method ${call.method} not implemented.');
+      } catch (e, stackTrace) {
+        _logger.fine('Error while handling method call.', e, stackTrace);
+        rethrow;
       }
     });
     _eventChannel.receiveBroadcastStream().listen((dynamic eventArg) {
@@ -124,11 +123,11 @@ class FilePickerWritable {
       EventChannel('design.codeux.file_picker_writable/events');
   static final FilePickerWritable _instance = FilePickerWritable._();
 
-  OpenFileHandler _openFileHandler;
+  final _filePickerState = FilePickerState();
 
-  void init({@required OpenFileHandler openFileHandler}) {
-    _openFileHandler = openFileHandler;
+  FilePickerState init() {
     _channel.invokeMethod<void>('init');
+    return _filePickerState;
   }
 
   Future<FileInfo> openFilePicker() async {
@@ -184,5 +183,76 @@ class FilePickerWritable {
       uri: result['uri'],
       fileName: result['fileName'],
     );
+  }
+}
+
+typedef FileInfoHandler = FutureOr<bool> Function(FileInfo fileInfo);
+typedef UriHandler = bool Function(Uri uriHandler);
+
+class FilePickerState {
+  FileInfo _fileInfo;
+  Uri _uri;
+
+  final List<UriHandler> _uriHandlers = [];
+  final List<FileInfoHandler> _fileInfoHandler = [];
+
+//  void init() {
+//    FilePickerWritable().init(openFileHandler: (fileInfo) {
+//      _fireFileInfoHandlers(fileInfo);
+//    }, uriHandler: (uri) {
+//      _fireUriHandlers(uri);
+//    });
+//  }
+
+  Future<void> _fireFileInfoHandlers(FileInfo fileInfo) async {
+    for (final handler in _fileInfoHandler) {
+      if (await handler(fileInfo)) {
+        // handled.
+        return;
+      }
+    }
+    _fileInfo = fileInfo;
+  }
+
+  final _fileInfoLock = Lock();
+
+  void registerFileInfoHandler(FileInfoHandler fileInfoHandler) {
+    if (_fileInfo != null) {
+      _fileInfoLock.synchronized(() async {
+        if (_fileInfo != null) {
+          if (await fileInfoHandler(_fileInfo)) {
+            _fileInfo = null;
+          }
+        }
+      });
+    }
+    _fileInfoHandler.add(fileInfoHandler);
+  }
+
+  void removeFileInfoHandler(FileInfoHandler fileInfoHandler) {
+    _fileInfoHandler.remove(fileInfoHandler);
+  }
+
+  void _fireUriHandlers(Uri uri) {
+    for (final handler in _uriHandlers.reversed) {
+      if (handler(uri)) {
+        // handled.
+        return;
+      }
+    }
+    _uri = uri;
+  }
+
+  void registerUriHandler(UriHandler uriHandler) {
+    if (_uri != null) {
+      if (uriHandler(_uri)) {
+        _uri = null;
+      }
+    }
+    _uriHandlers.add(uriHandler);
+  }
+
+  void removeUriHandler(UriHandler uriHandler) {
+    _uriHandlers.remove(uriHandler);
   }
 }
