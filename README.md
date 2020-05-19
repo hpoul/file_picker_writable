@@ -5,6 +5,8 @@
 Flutter plugin to choose files which can be read, referenced and written back at a
   later time (persistent permissions on android, secure bookmarks on iOS).
 
+It also offers handlers for open intents when the user wants to open associated files from
+other apps. In the same way it will also handle arbitrary URLs and pass them back to dart.
 
 # Requirements
 
@@ -52,6 +54,12 @@ Flutter plugin to choose files which can be read, referenced and written back at
                 <data android:pathPattern=".*\\..*\\..*\\..*\\.*\\..*\\.codeux" />
             </intent-filter>
 ```
+
+## MacOS
+
+Is currently not supported. The only thing the plugin will do is listen for URL Events
+and pass them through to the dart side.
+
 
 ## Getting Started
 

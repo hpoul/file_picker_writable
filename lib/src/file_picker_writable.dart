@@ -187,7 +187,7 @@ class FilePickerWritable {
 }
 
 typedef FileInfoHandler = FutureOr<bool> Function(FileInfo fileInfo);
-typedef UriHandler = bool Function(Uri uriHandler);
+typedef UriHandler = bool Function(Uri uri);
 
 class FilePickerState {
   FileInfo _fileInfo;

@@ -1,3 +1,7 @@
+## 1.1.1
+
+* Implement the Uri handling part of the plugin for macos.
+
 ## 1.1.0
 
 * Handle All URLs from intents or custom URL schemas, and propagate it to url handler.

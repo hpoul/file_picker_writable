@@ -78,7 +78,8 @@ class _MainScreenState extends State<MainScreen> {
   @override
   void initState() {
     super.initState();
-    FilePickerWritable().init().registerFileInfoHandler((fileInfo) async {
+    final state = FilePickerWritable().init();
+    state.registerFileInfoHandler((fileInfo) async {
       _logger.fine('got file info. we are mounted:$mounted');
       if (!mounted) {
         return false;
@@ -90,6 +91,13 @@ class _MainScreenState extends State<MainScreen> {
             'fileName: ${fileInfo.fileName}\n'
             'uri: ${fileInfo.uri}\n\n\n',
       );
+      return true;
+    });
+    state.registerUriHandler((uri) {
+      SimpleAlertDialog(
+        titleText: 'Handling Uri',
+        bodyText: 'Got a uri to handle: $uri',
+      ).show(context);
       return true;
     });
   }
@@ -255,7 +263,7 @@ class FileInfoDisplay extends StatelessWidget {
                               .where((element) => element != fileInfo)
                               .toList()));
                     },
-                    icon: Icon(Icons.remove_circle_outline),
+                    icon: const Icon(Icons.remove_circle_outline),
                   ),
                 ],
               )
