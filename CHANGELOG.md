@@ -1,3 +1,7 @@
+## 1.1.1+1
+
+* iOS: Fix universal links handling.
+
 ## 1.1.1
 
 * Implement the Uri handling part of the plugin for macos.
