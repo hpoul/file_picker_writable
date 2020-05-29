@@ -222,9 +222,13 @@ class FilePickerWritableImpl(
     val contentResolver = activity.applicationContext.contentResolver
 
     return withContext(Dispatchers.IO) {
-      val takeFlags: Int = Intent.FLAG_GRANT_READ_URI_PERMISSION or
-        Intent.FLAG_GRANT_WRITE_URI_PERMISSION
-      contentResolver.takePersistableUriPermission(fileUri, takeFlags)
+      try {
+        val takeFlags: Int = Intent.FLAG_GRANT_READ_URI_PERMISSION or
+          Intent.FLAG_GRANT_WRITE_URI_PERMISSION
+        contentResolver.takePersistableUriPermission(fileUri, takeFlags)
+      } catch (e: SecurityException) {
+        plugin.logDebug("Couldn't take persistable URI permission on $fileUri", e)
+      }
 
       val fileName = readFileInfo(fileUri, contentResolver)
 
