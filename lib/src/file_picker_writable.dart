@@ -14,6 +14,7 @@ class FileInfo {
   FileInfo({
     @required this.file,
     @required this.identifier,
+    @required this.persistable,
     @required this.uri,
     this.fileName,
   })  : assert(identifier != null),
@@ -22,6 +23,7 @@ class FileInfo {
   static FileInfo fromJson(Map<String, dynamic> json) => FileInfo(
         file: File(json['path'] as String),
         identifier: json['identifier'] as String,
+        persistable: (json['persistable'] as String) == 'true',
         uri: json['uri'] as String,
         fileName: json['fileName'] as String,
       );
@@ -36,9 +38,13 @@ class FileInfo {
   /// [FilePickerWritable.readFileWithIdentifier].
   final File file;
 
-  /// permanent identifier which can be used for reading at a later time,
-  /// or used for writing back data.
+  /// Identifier which can be used for reading at a later time, or used for
+  /// writing back data. See [persistable] to see whether access can persist
+  /// beyond the current process lifetime.
   final String identifier;
+
+  /// Indicates whether [identifier] is persistable across app relaunches
+  final bool persistable;
 
   /// Platform dependent URI.
   /// - On android either content:// or file:// url.
@@ -62,6 +68,7 @@ class FileInfo {
   Map<String, dynamic> toJson() => <String, dynamic>{
         'path': file.path,
         'identifier': identifier,
+        'persistable': persistable.toString(),
         'uri': uri,
         'fileName': fileName,
       };
@@ -180,6 +187,7 @@ class FilePickerWritable {
     return FileInfo(
       file: File(result['path']),
       identifier: result['identifier'],
+      persistable: result['persistable'] == 'true',
       uri: result['uri'],
       fileName: result['fileName'],
     );
