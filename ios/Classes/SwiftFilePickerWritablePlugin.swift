@@ -202,6 +202,7 @@ public class SwiftFilePickerWritablePlugin: NSObject, FlutterPlugin {
         return [
             "path": tempFile.path,
             "identifier": identifier,
+            "persistable": "true", // There is no known failure mode given correct configuration
             "uri": originalURL.absoluteString,
             "fileName": originalURL.lastPathComponent,
         ]
