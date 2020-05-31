@@ -1,3 +1,8 @@
+## 1.1.1+2
+
+* Android fix crash when requesting persistable permissions (mostly for ACTION_VIEW intent) #1
+  thanks @amake https://github.com/hpoul/file_picker_writable/pull/2
+
 ## 1.1.1+1
 
 * iOS: Fix universal links handling.
