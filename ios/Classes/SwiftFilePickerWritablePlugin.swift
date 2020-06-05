@@ -101,11 +101,16 @@ public class SwiftFilePickerWritablePlugin: NSObject, FlutterPlugin {
         var isStale: Bool = false
         let url = try URL(resolvingBookmarkData: bookmark, bookmarkDataIsStale: &isStale)
         logDebug("url: \(url) / isStale: \(isStale)");
-        if !url.startAccessingSecurityScopedResource() {
-            throw FilePickerError.readError(message: "Unable to start accessing security scope resource.")
+        let securityScope = url.startAccessingSecurityScopedResource()
+        defer {
+            if securityScope {
+                url.stopAccessingSecurityScopedResource()
+            }
+        }
+        if !securityScope {
+            logDebug("Warning: startAccessingSecurityScopedResource is false for \(url).")
         }
         let copiedFile = try _copyToTempDirectory(url: url)
-        url.stopAccessingSecurityScopedResource()
         result(_fileInfoResult(tempFile: copiedFile, originalURL: url, bookmark: bookmark))
     }
     
