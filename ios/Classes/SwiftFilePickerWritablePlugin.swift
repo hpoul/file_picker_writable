@@ -132,7 +132,7 @@ public class SwiftFilePickerWritablePlugin: NSObject, FlutterPlugin {
         
         let destAccess = destination.startAccessingSecurityScopedResource()
         if !destAccess {
-            logDebug("Warning: Unable to access original url \(destination) (destination) \(skipDestinationStartAccess)")
+            logDebug("Warning: startAccessingSecurityScopedResource is false for \(destination) (destination); skipDestinationStartAccess=\(skipDestinationStartAccess)")
 //            throw FilePickerError.invalidArguments(message: "Unable to access original url \(destination)")
         }
         let sourceAccess = sourceFile.startAccessingSecurityScopedResource()
