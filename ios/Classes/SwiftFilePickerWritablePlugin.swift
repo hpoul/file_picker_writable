@@ -15,6 +15,7 @@ public class SwiftFilePickerWritablePlugin: NSObject, FlutterPlugin {
     private var _filePickerPath: String?
     private var isInitialized = false
     private var _initOpenUrl: URL? = nil
+    private var _initOpenUrlIsPersistable: Bool? = nil
     private var _eventSink: FlutterEventSink? = nil
     private var _eventQueue: [[String: String]] = []
 
@@ -56,8 +57,11 @@ public class SwiftFilePickerWritablePlugin: NSObject, FlutterPlugin {
             case "init":
                 isInitialized = true
                 if let openUrl = _initOpenUrl {
-                    _handleUrl(url: openUrl)
+                    // It is an error for _initOpenUrl to be present but
+                    // _initOpenUrlIsPersistable to be nil
+                    _handleUrl(url: openUrl, persistable: _initOpenUrlIsPersistable!)
                     _initOpenUrl = nil
+                    _initOpenUrlIsPersistable = nil
                 }
                 result(true)
             case "openFilePicker":
@@ -190,7 +194,7 @@ public class SwiftFilePickerWritablePlugin: NSObject, FlutterPlugin {
         }
     }
     
-    private func _prepareUrlForReading(url: URL) throws -> [String: String] {
+    private func _prepareUrlForReading(url: URL, persistable: Bool) throws -> [String: String] {
         let securityScope = url.startAccessingSecurityScopedResource()
         defer {
             if securityScope {
@@ -202,15 +206,15 @@ public class SwiftFilePickerWritablePlugin: NSObject, FlutterPlugin {
         }
         let bookmark = try url.bookmarkData()
         let tempFile = try _copyToTempDirectory(url: url)
-        return _fileInfoResult(tempFile: tempFile, originalURL: url, bookmark: bookmark)
+        return _fileInfoResult(tempFile: tempFile, originalURL: url, bookmark: bookmark, persistable: persistable)
     }
     
-    private func _fileInfoResult(tempFile: URL, originalURL: URL, bookmark: Data) -> [String: String] {
+    private func _fileInfoResult(tempFile: URL, originalURL: URL, bookmark: Data, persistable: Bool = true) -> [String: String] {
         let identifier = bookmark.base64EncodedString()
         return [
             "path": tempFile.path,
             "identifier": identifier,
-            "persistable": "true", // There is no known failure mode given correct configuration
+            "persistable": "\(persistable)",
             "uri": originalURL.absoluteString,
             "fileName": originalURL.lastPathComponent,
         ]
@@ -248,7 +252,7 @@ extension SwiftFilePickerWritablePlugin : UIDocumentPickerDelegate {
                 _sendFilePickerResult(_fileInfoResult(tempFile: tempFile, originalURL: targetFile, bookmark: bookmark))
                 return
             }
-            _sendFilePickerResult(try _prepareUrlForReading(url: url))
+            _sendFilePickerResult(try _prepareUrlForReading(url: url, persistable: true))
         } catch {
             _sendFilePickerResult(FlutterError(code: "ErrorProcessingResult", message: "Error handling result url \(url): \(error)", details: nil))
             return
@@ -266,12 +270,21 @@ extension SwiftFilePickerWritablePlugin : UIDocumentPickerDelegate {
 extension SwiftFilePickerWritablePlugin: FlutterApplicationLifeCycleDelegate {
     public func application(_ application: UIApplication, open url: URL, options: [UIApplication.OpenURLOptionsKey : Any] = [:]) -> Bool {
         logDebug("Opening URL \(url) - options: \(options)")
-        return _handle(url: url)
+        let persistable: Bool
+        if #available(iOS 9.0, *) {
+            // Will be true for files received by "Open in", false for "Copy to"
+            persistable = options[.openInPlace] as? Bool ?? false
+        } else {
+            // Prior to iOS 9.0 files must not be openable in-place?
+            persistable = false
+        }
+        return _handle(url: url, persistable: persistable)
     }
     
     public func application(_ application: UIApplication, handleOpen url: URL) -> Bool {
         logDebug("handleOpen for \(url)")
-        return _handle(url: url)
+        // This is an old API predating open-in-place support(?)
+        return _handle(url: url, persistable: false)
     }
     
     public func application(_ application: UIApplication, continue userActivity: NSUserActivity, restorationHandler: @escaping ([Any]) -> Void) -> Bool {
@@ -283,26 +296,28 @@ extension SwiftFilePickerWritablePlugin: FlutterApplicationLifeCycleDelegate {
                 return false
         }
         logDebug("continue userActivity webpageURL: \(incomingURL)")
-        return _handle(url: incomingURL)
+        // TODO: Confirm that persistable should be true here
+        return _handle(url: incomingURL, persistable: true)
     }
     
-    private func _handle(url: URL) -> Bool {
+    private func _handle(url: URL, persistable: Bool) -> Bool {
 //        if (!url.isFileURL) {
 //            logDebug("url \(url) is not a file url. ignoring it for now.")
 //            return false
 //        }
         if (!isInitialized) {
             _initOpenUrl = url
+            _initOpenUrlIsPersistable = persistable
             return true
         }
-        _handleUrl(url: url)
+        _handleUrl(url: url, persistable: persistable)
         return true
     }
     
-    private func _handleUrl(url: URL) {
+    private func _handleUrl(url: URL, persistable: Bool) {
         do {
             if (url.isFileURL) {
-                _channel.invokeMethod("openFile", arguments: try _prepareUrlForReading(url: url))
+                _channel.invokeMethod("openFile", arguments: try _prepareUrlForReading(url: url, persistable: persistable))
             } else {
                 _channel.invokeMethod("handleUri", arguments: url.absoluteString)
             }
