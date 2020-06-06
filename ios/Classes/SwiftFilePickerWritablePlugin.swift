@@ -317,13 +317,29 @@ extension SwiftFilePickerWritablePlugin: FlutterApplicationLifeCycleDelegate {
     private func _handleUrl(url: URL, persistable: Bool) {
         do {
             if (url.isFileURL) {
-                _channel.invokeMethod("openFile", arguments: try _prepareUrlForReading(url: url, persistable: persistable))
+                _channel.invokeMethod("openFile", arguments: try _prepareUrlForReading(url: url, persistable: persistable)) { result in
+                    if !persistable && self._isInboxFile(url) {
+                        do {
+                            try FileManager.default.removeItem(at: url)
+                        } catch let error {
+                            self.logError("Failed to delete inbox file \(url); error: \(error)")
+                        }
+                    }
+                }
             } else {
                 _channel.invokeMethod("handleUri", arguments: url.absoluteString)
             }
         } catch let error {
             logError("Error handling open url for \(url): \(error)")
         }
+    }
+
+    private func _isInboxFile(_ url: URL) -> Bool {
+        let inboxes = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).map {
+            $0.resolvingSymlinksInPath().appendingPathComponent("Inbox").absoluteString
+        }
+        let resolvedUrl = url.resolvingSymlinksInPath().absoluteString
+        return inboxes.contains { resolvedUrl.starts(with: $0) }
     }
 }
 
