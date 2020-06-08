@@ -126,51 +126,46 @@ class FilePickerWritableImpl(
       )
       return true
     }
-    try {
-      return when (requestCode) {
-        REQUEST_CODE_OPEN_FILE -> {
-          val fileUri = data?.data
-          if (fileUri != null) {
-            plugin.logDebug("Got result $fileUri")
-            plugin.launch {
+    plugin.launch {
+      try {
+        when (requestCode) {
+          REQUEST_CODE_OPEN_FILE -> {
+            val fileUri = data?.data
+            if (fileUri != null) {
+              plugin.logDebug("Got result $fileUri")
               handleFileUriResponse(result, fileUri)
+            } else {
+              plugin.logDebug("Got RESULT_OK with null fileUri?")
+              result.success(null)
             }
-          } else {
-            plugin.logDebug("Got RESULT_OK with null fileUri?")
-            result.success(null)
           }
-          true
-        }
-        REQUEST_CODE_CREATE_FILE -> {
-          val initialFileContent = filePickerCreateFile
-            ?: throw FilePickerException("illegal state - filePickerCreateFile was nul")
-          val fileUri =
-            requireNotNull(data?.data) { "RESULT_OK with null file uri $data" }
-          plugin.logDebug("Got result $fileUri")
-          plugin.launch {
+          REQUEST_CODE_CREATE_FILE -> {
+            val initialFileContent = filePickerCreateFile
+              ?: throw FilePickerException("illegal state - filePickerCreateFile was nul")
+            val fileUri =
+              requireNotNull(data?.data) { "RESULT_OK with null file uri $data" }
+            plugin.logDebug("Got result $fileUri")
             handleFileUriCreateResponse(
               result,
               fileUri,
               initialFileContent
             )
           }
-
-          true
+          else -> {
+            // can never happen, we already checked the result code.
+            throw IllegalStateException("Unexpected requestCode $requestCode")
+          }
         }
-        else -> {
-          // can never happen, we already checked the result code.
-          throw IllegalStateException("Unexpected requestCode $requestCode")
-        }
+      } catch (e: Exception) {
+        plugin.logDebug("Error during handling file picker result.", e)
+        result.error(
+          "FatalError",
+          "Error handling file picker callback. $e",
+          null
+        )
       }
-    } catch (e: Exception) {
-      plugin.logDebug("Error during handling file packer result.", e)
-      result.error(
-        "FatalError",
-        "Error handling file picker callback. $e",
-        null
-      )
-      return true
     }
+    return true
   }
 
   @MainThread
@@ -334,10 +329,14 @@ class FilePickerWritableImpl(
 //      return false
 //    }
     plugin.launch {
-      if (isInitialized) {
-        handleUri(data)
-      } else {
-        initOpenUrl = data
+      try {
+        if (isInitialized) {
+          handleUri(data)
+        } else {
+          initOpenUrl = data
+        }
+      } catch (exception: Exception) {
+        plugin.logDebug("Error while handling intent for $data", exception)
       }
     }
     return true
