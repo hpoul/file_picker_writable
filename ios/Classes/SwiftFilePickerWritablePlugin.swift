@@ -14,8 +14,7 @@ public class SwiftFilePickerWritablePlugin: NSObject, FlutterPlugin {
     private var _filePickerResult: FlutterResult?
     private var _filePickerPath: String?
     private var isInitialized = false
-    private var _initOpenUrl: URL? = nil
-    private var _initOpenUrlIsPersistable: Bool? = nil
+    private var _initOpen: (url: URL, persistable: Bool)?
     private var _eventSink: FlutterEventSink? = nil
     private var _eventQueue: [[String: String]] = []
 
@@ -56,12 +55,9 @@ public class SwiftFilePickerWritablePlugin: NSObject, FlutterPlugin {
             switch call.method {
             case "init":
                 isInitialized = true
-                if let openUrl = _initOpenUrl {
-                    // It is an error for _initOpenUrl to be present but
-                    // _initOpenUrlIsPersistable to be nil
-                    _handleUrl(url: openUrl, persistable: _initOpenUrlIsPersistable!)
-                    _initOpenUrl = nil
-                    _initOpenUrlIsPersistable = nil
+                if let (openUrl, persistable) = _initOpen {
+                    _handleUrl(url: openUrl, persistable: persistable)
+                    _initOpen = nil
                 }
                 result(true)
             case "openFilePicker":
@@ -306,8 +302,7 @@ extension SwiftFilePickerWritablePlugin: FlutterApplicationLifeCycleDelegate {
 //            return false
 //        }
         if (!isInitialized) {
-            _initOpenUrl = url
-            _initOpenUrlIsPersistable = persistable
+            _initOpen = (url, persistable)
             return true
         }
         _handleUrl(url: url, persistable: persistable)
