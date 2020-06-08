@@ -329,7 +329,11 @@ class FilePickerWritableImpl(
 //    }
     plugin.launch {
       if (isInitialized) {
-        handleUri(data)
+        try {
+          handleUri(data)
+        } catch (e: Exception) {
+          plugin.logDebug("Error trying to handle intent data $data: $e")
+        }
       } else {
         initOpenUrl = data
       }
