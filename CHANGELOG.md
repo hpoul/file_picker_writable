@@ -1,4 +1,4 @@
-## 1.1.1+3
+## 1.1.1+4
 
 * Android: better error handling, which previously might have caused crashes in previous version.
 * iOS: Fix handling of `Copy to` use case. (ie. imported files, vs. opened files).
