@@ -39,11 +39,16 @@ class FileInfo {
   final File file;
 
   /// Identifier which can be used for reading at a later time, or used for
-  /// writing back data. See [persistable] to see whether access can persist
-  /// beyond the current process lifetime.
+  /// writing back data. See [persistable] for details on the valid lifetime of
+  /// the identifier.
   final String identifier;
 
-  /// Indicates whether [identifier] is persistable across app relaunches
+  /// Indicates whether [identifier] is persistable. When true, it is safe to
+  /// retain this identifier for access at any later time.
+  ///
+  /// When false, you cannot assume that access will be granted in the
+  /// future. In particular, for files received from outside the app, the
+  /// identifier may only be valid until the [FileInfoHandler] returns.
   final bool persistable;
 
   /// Platform dependent URI.
