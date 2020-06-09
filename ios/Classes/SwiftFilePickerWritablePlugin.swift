@@ -313,12 +313,18 @@ extension SwiftFilePickerWritablePlugin: FlutterApplicationLifeCycleDelegate {
         do {
             if (url.isFileURL) {
                 _channel.invokeMethod("openFile", arguments: try _prepareUrlForReading(url: url, persistable: persistable)) { result in
-                    if !persistable && self._isInboxFile(url) {
+                    guard !persistable else {
+                        // Persistable files don't need cleanup
+                        return
+                    }
+                    if self._isInboxFile(url) {
                         do {
                             try FileManager.default.removeItem(at: url)
                         } catch let error {
                             self.logError("Failed to delete inbox file \(url); error: \(error)")
                         }
+                    } else {
+                        self.logError("Unexpected non-persistable file \(url)")
                     }
                 }
             } else {
