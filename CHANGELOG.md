@@ -1,3 +1,9 @@
+## 1.1.1+3
+
+* Android: better error handling, which previously might have caused crashes in previous version.
+* iOS: Fix handling of `Copy to` use case. (ie. imported files, vs. opened files).
+       & cleanup of `Inbox` folder. Again thanks https://github.com/amake
+
 ## 1.1.1+2
 
 * Android fix crash when requesting persistable permissions (mostly for ACTION_VIEW intent) #1
