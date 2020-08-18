@@ -3,14 +3,12 @@ import 'dart:convert';
 import 'dart:io';
 import 'dart:math';
 
+import 'package:convert/convert.dart';
 import 'package:file_picker_writable/file_picker_writable.dart';
 import 'package:flutter/material.dart';
 import 'package:logging/logging.dart';
 import 'package:logging_appenders/logging_appenders.dart';
-import 'package:path_provider/path_provider.dart';
 import 'package:simple_json_persistence/simple_json_persistence.dart';
-import 'package:convert/convert.dart';
-import 'package:path/path.dart' as p;
 
 final _logger = Logger('main');
 
@@ -79,13 +77,14 @@ class _MainScreenState extends State<MainScreen> {
   void initState() {
     super.initState();
     final state = FilePickerWritable().init();
-    state.registerFileInfoHandler((fileInfo) async {
+    state.registerFileOpenHandler((fileInfo, file) async {
       _logger.fine('got file info. we are mounted:$mounted');
       if (!mounted) {
         return false;
       }
       await SimpleAlertDialog.readFileContentsAndShowDialog(
         fileInfo,
+        file,
         context,
         bodyTextPrefix: 'Should open file from external app.\n\n'
             'fileName: ${fileInfo.fileName}\n'
@@ -149,24 +148,28 @@ class _MainScreenState extends State<MainScreen> {
   }
 
   Future<void> _openFilePicker() async {
-    final fileInfo = await FilePickerWritable().openFilePicker();
-    _logger.fine('Got picker result: $fileInfo');
+    final fileInfo =
+        await FilePickerWritable().openFile((fileInfo, file) async {
+      _logger.fine('Got picker result: $fileInfo');
+      final data = await _appDataBloc.store.load();
+      await _appDataBloc.store
+          .save(data.copyWith(files: data.files + [fileInfo]));
+      return fileInfo;
+    });
     if (fileInfo == null) {
-      _logger.info('User canceled.');
-      return;
+      _logger.fine('User cancelled.');
     }
-    final data = await _appDataBloc.store.load();
-    await _appDataBloc.store
-        .save(data.copyWith(files: data.files + [fileInfo]));
   }
 
   Future<void> _openFilePickerForCreate() async {
-    final tempDirectory = await getTemporaryDirectory();
     final rand = Random().nextInt(10000000);
-    final temp = File(p.join(tempDirectory.path, 'newfile.$rand.codeux'));
-    final content = 'File created at ${DateTime.now()}\n\n';
-    await temp.writeAsString(content);
-    final fileInfo = await FilePickerWritable().openFilePickerForCreate(temp);
+    final fileInfo = await FilePickerWritable().openFileForCreate(
+      fileName: 'newfile.$rand.codeux',
+      writer: (file) async {
+        final content = 'File created at ${DateTime.now()}\n\n';
+        await file.writeAsString(content);
+      },
+    );
     if (fileInfo == null) {
       _logger.info('User canceled.');
       return;
@@ -202,7 +205,7 @@ class FileInfoDisplay extends StatelessWidget {
             children: <Widget>[
               const Text('Selected File:'),
               Text(
-                fileInfo.file.path,
+                fileInfo.fileName,
                 maxLines: 4,
                 overflow: TextOverflow.ellipsis,
                 style: theme.textTheme.caption.apply(fontSizeFactor: 0.75),
@@ -229,29 +232,28 @@ class FileInfoDisplay extends StatelessWidget {
                 children: <Widget>[
                   FlatButton(
                     onPressed: () async {
-                      final fi = fileInfo.file.existsSync()
-                          ? fileInfo
-                          : await FilePickerWritable()
-                              .readFileWithIdentifier(fileInfo.identifier);
-                      await SimpleAlertDialog.readFileContentsAndShowDialog(
-                          fi, context);
+                      FilePickerWritable().readFile(
+                          identifier: fileInfo.identifier,
+                          reader: (fileInfo, file) async {
+                            await SimpleAlertDialog
+                                .readFileContentsAndShowDialog(
+                                    fileInfo, file, context);
+                          });
                     },
                     child: const Text('Read'),
                   ),
                   FlatButton(
                     onPressed: () async {
-                      final fi = fileInfo.file.existsSync()
-                          ? fileInfo
-                          : await FilePickerWritable()
-                              .readFileWithIdentifier(fileInfo.identifier);
-                      final content =
-                          'New Content written at ${DateTime.now()}.\n\n';
-                      await fi.file.writeAsString(content);
-                      await FilePickerWritable()
-                          .writeFileWithIdentifier(fi.identifier, fi.file);
-                      SimpleAlertDialog(
-                        bodyText: 'Wriitten: $content',
-                      ).show(context);
+                      await FilePickerWritable().writeFile(
+                          identifier: fileInfo.identifier,
+                          writer: (file) async {
+                            final content =
+                                'New Content written at ${DateTime.now()}.\n\n';
+                            await file.writeAsString(content);
+                            SimpleAlertDialog(
+                              bodyText: 'Written: $content',
+                            ).show(context);
+                          });
                     },
                     child: const Text('Overwrite'),
                   ),
@@ -302,10 +304,11 @@ class SimpleAlertDialog extends StatelessWidget {
 
   static Future readFileContentsAndShowDialog(
     FileInfo fi,
+    File file,
     BuildContext context, {
     String bodyTextPrefix = '',
   }) async {
-    final dataList = await fi.file.openRead(0, 64).toList();
+    final dataList = await file.openRead(0, 64).toList();
     final data = dataList.expand((element) => element).toList();
     final hexString = hex.encode(data);
     final utf8String = utf8.decode(data, allowMalformed: true);

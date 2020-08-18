@@ -207,12 +207,13 @@ class FilePickerWritable {
   ///
   /// Will return a [FileInfo] which allows future access to the file or
   /// `null` if the user cancelled the file picker.
-  Future<FileInfo> openFileForCreate<T>({
+  Future<FileInfo> openFileForCreate({
     @required String fileName,
     @required Future<void> Function(File tempFile) writer,
   }) async {
     _logger.finest('openFilePickerForCreate($fileName)');
     return _createFileInNewTempDirectory(fileName, (tempFile) async {
+      await writer(tempFile);
       final result = await _channel.invokeMapMethod<String, String>(
           'openFilePickerForCreate', {'path': tempFile.absolute.path});
       if (result == null) {
@@ -289,6 +290,7 @@ class FilePickerWritable {
     _logger.finest('writeFileWithIdentifier()');
     final result =
         await _createFileInNewTempDirectory(fileName, (tempFile) async {
+      await writer(tempFile);
       final result = await _channel
           .invokeMapMethod<String, String>('writeFileWithIdentifier', {
         'identifier': identifier,
