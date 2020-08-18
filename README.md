@@ -67,17 +67,20 @@ See the example on how to implement it in a simple application.
 
 ```dart
 Future<void> readFile() async {
-  final fileInfo = await FilePickerWritable().openFilePicker();
-  _logger.fine('Got picker result: $fileInfo');
+  final fileInfo = await FilePickerWritable().openFile((fileInfo, file) async {
+    _logger.fine('Got picker result: $fileInfo');
+
+    // now do something useful with the selected file...
+    _logger.info('Got file contents in temporary file: $file');
+    _logger.info('fileName: ${fileInfo.fileName}');
+    _logger.info('Identifier which can be persisted for later retrieval:'
+        '${fileInfo.identifier}');
+    return fileInfo;
+  });
   if (fileInfo == null) {
     _logger.info('User canceled.');
     return;
   }
-  // now do something useful with the selected file...
-  _logger.info('Got file contents in temporary file: ${fileInfo.file}');
-  _logger.info('fileName: ${fileInfo.fileName}');
-  _logger.info('Identifier which can be persisted for later retrieval:'
-      '${fileInfo.identifier}');
 }
 ```
 
@@ -86,12 +89,12 @@ even after an app restart.
 
 ```dart
 Future<void> persistChanges(FileInfo fileInfo, Uint8List newContent) async {
-  // create a new temporary file inside your apps sandbox.
-  final File newFile = _createNewTempFile();
-  await newFile.writeBytes(newContent);
-
   // tell FilePickerWritable plugin to write the new contents over the user selected file
-  await FilePickerWritable()
-     .writeFileWithIdentifier(fileInfo.identifier, newFile);
+  await FilePickerWritable().writeFile(
+      identifier: fileInfo.identifier,
+      writer: (file) async {
+        // write new content into the temporary file.
+        await file.writeBytes(newContent);
+      });
 }
 ```
