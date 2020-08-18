@@ -2,6 +2,7 @@
   <dictionary name="herbert">
     <words>
       <w>coroutines</w>
+      <w>unawaited</w>
     </words>
   </dictionary>
 </component>

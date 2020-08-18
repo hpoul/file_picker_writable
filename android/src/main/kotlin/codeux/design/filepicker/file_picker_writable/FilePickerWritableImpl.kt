@@ -141,7 +141,7 @@ class FilePickerWritableImpl(
           }
           REQUEST_CODE_CREATE_FILE -> {
             val initialFileContent = filePickerCreateFile
-              ?: throw FilePickerException("illegal state - filePickerCreateFile was nul")
+              ?: throw FilePickerException("illegal state - filePickerCreateFile was null")
             val fileUri =
               requireNotNull(data?.data) { "RESULT_OK with null file uri $data" }
             plugin.logDebug("Got result $fileUri")
@@ -229,7 +229,13 @@ class FilePickerWritableImpl(
 
       val fileName = readFileInfo(fileUri, contentResolver)
 
-      val tempFile = File.createTempFile(fileName, null, activity.cacheDir)
+      val tempFile =
+        File.createTempFile(
+          // use a maximum of 20 characters.
+          // It's just a temp file name so does not really matter.
+          fileName.take(20),
+          null, activity.cacheDir
+        )
       plugin.logDebug("Copy file $fileUri to $tempFile")
       contentResolver.openInputStream(fileUri).use { input ->
         requireNotNull(input)

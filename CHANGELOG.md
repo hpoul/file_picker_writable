@@ -1,3 +1,8 @@
+## 1.2.0-dev.1
+
+* Massive cleanup of the dart side API to make ensure proper cleanup of files.
+  There should be no breaking changes, but a lot of deprecations.
+
 ## 1.1.1+4
 
 * Android: better error handling, which previously might have caused crashes in previous version.

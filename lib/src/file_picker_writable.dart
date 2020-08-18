@@ -5,7 +5,9 @@ import 'dart:io';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 import 'package:logging/logging.dart';
+import 'package:path_provider/path_provider.dart';
 import 'package:synchronized/synchronized.dart';
+import 'package:path/path.dart' as path;
 
 final _logger = Logger('file_picker_writable');
 
@@ -35,7 +37,9 @@ class FileInfo {
   /// Can (usually) be used during the lifetime of your app instance.
   /// Should typically be only read once, if you later need to access it again
   /// use the [identifier] to read it with
-  /// [FilePickerWritable.readFileWithIdentifier].
+  /// [FilePickerWritable.read].
+  @Deprecated('Should no longer be used, with [FilePickerWritable.read] '
+      'this will be removed immediately.')
   final File file;
 
   /// Identifier which can be used for reading at a later time, or used for
@@ -48,7 +52,7 @@ class FileInfo {
   ///
   /// When false, you cannot assume that access will be granted in the
   /// future. In particular, for files received from outside the app, the
-  /// identifier may only be valid until the [FileInfoHandler] returns.
+  /// identifier may only be valid until the [FileOpenHandler] returns.
   final bool persistable;
 
   /// Platform dependent URI.
@@ -71,6 +75,7 @@ class FileInfo {
   }
 
   Map<String, dynamic> toJson() => <String, dynamic>{
+        // ignore: deprecated_member_use_from_same_package
         'path': file.path,
         'identifier': identifier,
         'persistable': persistable.toString(),
@@ -83,16 +88,18 @@ class FileInfo {
   String toJsonString() => json.encode(toJson());
 }
 
+typedef FileReader<T> = Future<T> Function(FileInfo fileInfo, File file);
+
 /// Singleton to accessing services of the FilePickerWritable plugin.
 ///
 /// It can be used for:
 ///
 /// * Open a file picker to let the user pick an existing
-///   file: [openFilePicker]
+///   file: [openFile]
 /// * Open a file picker to let the user pick a location for creating
-///   a new file: [openFilePickerForCreate]
+///   a new file: [openFileForCreate]
 /// * Write a previously picked file [writeFileWithIdentifier]
-/// * (re)read a previously picked file [readFileWithIdentifier]
+/// * (re)read a previously picked file [readFile]
 ///
 class FilePickerWritable {
   factory FilePickerWritable() => _instance;
@@ -102,7 +109,7 @@ class FilePickerWritable {
       _logger.fine('Got method call: {$call}');
       try {
         if (call.method == 'openFile') {
-          await _filePickerState._fireFileInfoHandlers(_resultToFileInfo(
+          await _filePickerState._fireFileOpenHandlers(_resultToFileInfo(
               (call.arguments as Map<dynamic, dynamic>).cast()));
           return true;
         } else if (call.method == 'handleUri') {
@@ -142,6 +149,7 @@ class FilePickerWritable {
     return _filePickerState;
   }
 
+  @Deprecated('use [openFile] instead.')
   Future<FileInfo> openFilePicker() async {
     _logger.finest('openFilePicker()');
     final result =
@@ -154,6 +162,8 @@ class FilePickerWritable {
     return _resultToFileInfo(result);
   }
 
+  /// Use [openFileForCreate] instead.
+  @Deprecated('Use [openFileForCreate] instead.')
   Future<FileInfo> openFilePickerForCreate(File file) async {
     _logger.finest('openFilePickerForCreate($file)');
     final result = await _channel.invokeMapMethod<String, String>(
@@ -166,13 +176,92 @@ class FilePickerWritable {
     return _resultToFileInfo(result);
   }
 
+  /// Shows a file picker so the user can select a file and calls [reader]
+  /// afterwards.
+  Future<T> openFile<T>(FileReader<T> reader) async {
+    _logger.finest('openFilePicker()');
+    final result =
+        await _channel.invokeMapMethod<String, String>('openFilePicker');
+    if (result == null) {
+      // User cancelled.
+      _logger.finer('User cancelled file picker.');
+      return null;
+    }
+    final fileInfo = _resultToFileInfo(result);
+    if (fileInfo == null) {
+      // user canceled.
+      return null;
+    }
+    // ignore: deprecated_member_use_from_same_package
+    final file = fileInfo.file;
+    try {
+      return await reader(fileInfo, file);
+    } finally {
+      _unawaited(file.delete());
+    }
+  }
+
+  /// Opens a file picker for the user to create a file.
+  /// It suggests an [fileName] file name and creates a file with the
+  /// contents written to the temp file by [writer].
+  ///
+  /// Will return a [FileInfo] which allows future access to the file or
+  /// `null` if the user cancelled the file picker.
+  Future<FileInfo> openFileForCreate<T>({
+    @required String fileName,
+    @required Future<void> Function(File tempFile) writer,
+  }) async {
+    _logger.finest('openFilePickerForCreate($fileName)');
+    return _createFileInNewTempDirectory(fileName, (tempFile) async {
+      final result = await _channel.invokeMapMethod<String, String>(
+          'openFilePickerForCreate', {'path': tempFile.absolute.path});
+      if (result == null) {
+        // User cancelled.
+        _logger.finer('User cancelled file picker.');
+        return null;
+      }
+      return _resultToFileInfo(result);
+    });
+  }
+
   /// Reads the file previously picked by the user.
   /// Expects a [FileInfo.identifier] string for [identifier].
+  ///
+  /// Use [readFile] instead.
+  @Deprecated('Use [readFile] instead.')
   Future<FileInfo> readFileWithIdentifier(String identifier) async {
     _logger.finest('readFileWithIdentifier()');
     final result = await _channel.invokeMapMethod<String, String>(
         'readFileWithIdentifier', {'identifier': identifier});
     return _resultToFileInfo(result);
+  }
+
+  /// Reads the file previously picked by the user.
+  /// Expects a [FileInfo.identifier] string for [identifier].
+  ///
+  Future<T> readFile<T>({
+    @required String identifier,
+    @required FileReader<T> reader,
+  }) async {
+    assert(identifier != null);
+    assert(reader != null);
+    _logger.finest('readFile()');
+    final result = await _channel.invokeMapMethod<String, String>(
+        'readFileWithIdentifier', {'identifier': identifier});
+    if (result == null) {
+      throw StateError('Error while reading file with identifier $identifier');
+    }
+    final fileInfo = _resultToFileInfo(result);
+    // ignore: deprecated_member_use_from_same_package
+    final file = fileInfo.file;
+    try {
+      return reader(fileInfo, file);
+    } catch (e, stackTrace) {
+      _logger.warning('Error while calling reader method.', e, stackTrace);
+      rethrow;
+    } finally {
+      _unawaited(file.delete());
+    }
   }
 
   /// Writes the file previously picked by the user.
@@ -187,6 +276,29 @@ class FilePickerWritable {
     return _resultToFileInfo(result);
   }
 
+  /// Writes data to a file previously picked by the user.
+  /// Expects a [FileInfo.identifier] string for [identifier].
+  /// The [writer] will receive a file in a temporary directory named
+  /// [fileName] (if not given will be called `temp`).
+  /// The temporary directory will be deleted when writing is complete.
+  Future<FileInfo> writeFile({
+    @required String identifier,
+    String fileName = 'temp',
+    Future<void> Function(File file) writer,
+  }) async {
+    _logger.finest('writeFileWithIdentifier()');
+    final result =
+        await _createFileInNewTempDirectory(fileName, (tempFile) async {
+      final result = await _channel
+          .invokeMapMethod<String, String>('writeFileWithIdentifier', {
+        'identifier': identifier,
+        'path': tempFile.absolute.path,
+      });
+      return result;
+    });
+    return _resultToFileInfo(result);
+  }
+
   FileInfo _resultToFileInfo(Map<String, String> result) {
     assert(result != null);
     return FileInfo(
@@ -197,9 +309,41 @@ class FilePickerWritable {
       fileName: result['fileName'],
     );
   }
+
+  Future<T> _createFileInNewTempDirectory<T>(
+      String baseName, Future<T> Function(File tempFile) callback) async {
+    if (baseName.length > 30) {
+      baseName = baseName.substring(0, 30);
+    }
+    final tempDirBase = await getTemporaryDirectory();
+
+    final tempDir = await tempDirBase.createTemp('file_picker_writable');
+    await tempDir.create(recursive: true);
+    final tempFile = File(path.join(
+      tempDir.path,
+      baseName,
+    ));
+    try {
+      return await callback(tempFile);
+    } finally {
+      _unawaited(tempDir
+          .delete(recursive: true)
+          .catchError((dynamic error, StackTrace stackTrace) {
+        _logger.warning('Error while deleting temp dir.', error, stackTrace);
+      }));
+    }
+  }
 }
 
+@Deprecated('Use [FileOpenHandler] instead.')
 typedef FileInfoHandler = FutureOr<bool> Function(FileInfo fileInfo);
+
+/// FileOpenHandlers are registered as callbacks to be called when
+/// the app is launched for a file selection.
+/// [file] (and [fileInfo].file will be deleted after this function completes.)
+///
+/// The handler must return `true` if it has handled the file.
+typedef FileOpenHandler = FutureOr<bool> Function(FileInfo fileInfo, File file);
 typedef UriHandler = bool Function(Uri uri);
 
 class FilePickerState {
@@ -207,7 +351,9 @@ class FilePickerState {
   Uri _uri;
 
   final List<UriHandler> _uriHandlers = [];
+  @Deprecated('only _fileOpenHandler should be used.')
   final List<FileInfoHandler> _fileInfoHandler = [];
+  final List<FileOpenHandler> _fileOpenHandler = [];
 
 //  void init() {
 //    FilePickerWritable().init(openFileHandler: (fileInfo) {
@@ -217,18 +363,44 @@ class FilePickerState {
 //    });
 //  }
 
-  Future<void> _fireFileInfoHandlers(FileInfo fileInfo) async {
-    for (final handler in _fileInfoHandler) {
-      if (await handler(fileInfo)) {
-        // handled.
-        return;
+  Future<bool> _fireFileOpenHandlers(FileInfo fileInfo) async {
+    // ignore: deprecated_member_use_from_same_package
+    _fileInfo = null;
+    // fileOpenHandler do not expect files to be deleted.
+    var _deprecatedNoDeleteFile = false;
+    // ignore: deprecated_member_use_from_same_package
+    final file = fileInfo.file;
+    try {
+      for (final handler in _fileOpenHandler) {
+        if (await handler(fileInfo, file)) {
+          // handled.
+          return true;
+        }
+      }
+
+      // ignore: deprecated_member_use_from_same_package
+      for (final handler in _fileInfoHandler) {
+        if (await handler(fileInfo)) {
+          // handled.
+          _deprecatedNoDeleteFile = true;
+          return true;
+        }
+      }
+      _fileInfo = fileInfo;
+    } catch (e, stackTrace) {
+      _logger.severe('FileOpenHandler throw exception.', e, stackTrace);
+    } finally {
+      if (_fileInfo == null && !_deprecatedNoDeleteFile) {
+        _unawaited(file.delete());
       }
     }
-    _fileInfo = fileInfo;
+    return false;
   }
 
   final _fileInfoLock = Lock();
 
+  /// deprecated: use [registerFileOpenHandler] instead.
+  @Deprecated('use [registerFileOpenHandler] instead.')
   void registerFileInfoHandler(FileInfoHandler fileInfoHandler) {
     if (_fileInfo != null) {
       _fileInfoLock.synchronized(() async {
@@ -242,8 +414,33 @@ class FilePickerState {
     _fileInfoHandler.add(fileInfoHandler);
   }
 
+  @Deprecated('use [removeFileOpenHandler] instead.')
   void removeFileInfoHandler(FileInfoHandler fileInfoHandler) {
     _fileInfoHandler.remove(fileInfoHandler);
+  }
+
+  /// Registers the [fileOpenHandler] to be called when the app is launched
+  /// with a file it should open.
+  /// The fileOpenHandler will receive a file object which will be deleted
+  /// once it returns.
+  void registerFileOpenHandler(FileOpenHandler fileOpenHandler) {
+    if (_fileInfo != null) {
+      _fileInfoLock.synchronized(() async {
+        if (_fileInfo != null) {
+          // ignore: deprecated_member_use_from_same_package
+          final file = _fileInfo.file;
+          if (await fileOpenHandler(_fileInfo, file)) {
+            _fileInfo = null;
+          }
+        }
+      });
+    }
+    _fileOpenHandler.add(fileOpenHandler);
+  }
+
+  /// Removes the given [fileOpenHandler].
+  void removeFileOpenHandler(FileOpenHandler fileOpenHandler) {
+    _fileOpenHandler.remove(fileOpenHandler);
   }
 
   void _fireUriHandlers(Uri uri) {
@@ -269,3 +466,5 @@ class FilePickerState {
     _uriHandlers.remove(uriHandler);
   }
 }
+
+void _unawaited(Future<dynamic> future) {}
