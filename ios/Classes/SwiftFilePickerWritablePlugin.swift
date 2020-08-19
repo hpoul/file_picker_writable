@@ -171,6 +171,7 @@ public class SwiftFilePickerWritablePlugin: NSObject, FlutterPlugin {
             return
         }
         _filePickerResult = result
+        _filePickerPath = nil
         let ctrl = UIDocumentPickerViewController(documentTypes: [kUTTypeItem as String], in: UIDocumentPickerMode.open)
         ctrl.delegate = self
         ctrl.modalPresentationStyle = .currentContext
@@ -229,8 +230,9 @@ extension SwiftFilePickerWritablePlugin : UIDocumentPickerDelegate {
     public func documentPicker(_ controller: UIDocumentPickerViewController, didPickDocumentAt url: URL) {
         do {
             if let path = _filePickerPath {
+                _filePickerPath = nil
                 guard url.startAccessingSecurityScopedResource() else {
-                    throw FilePickerError.readError(message: "Unnable to acquire acces to \(url)")
+                    throw FilePickerError.readError(message: "Unable to acquire acces to \(url)")
                 }
                 logDebug("Need to write \(path) to \(url)")
                 let sourceFile = URL(fileURLWithPath: path)
