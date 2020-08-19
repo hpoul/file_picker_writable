@@ -334,6 +334,9 @@ extension SwiftFilePickerWritablePlugin: FlutterApplicationLifeCycleDelegate {
             }
         } catch let error {
             logError("Error handling open url for \(url): \(error)")
+            _channel.invokeMethod("handleError", arguments: [
+                "message": "Error while handling openUrl for isFileURL=\(url.isFileURL): \(error)"
+            ])
         }
     }
 

@@ -117,6 +117,9 @@ class FilePickerWritable {
           await _filePickerState
               ._fireUriHandlers(Uri.parse(call.arguments as String));
           return true;
+        } else if (call.method == 'handleError') {
+          await _filePickerState._fireErrorEvent(
+              ErrorEvent.fromJson(call.arguments as Map<dynamic, dynamic>));
         } else {
           throw PlatformException(
               code: 'MethodNotImplemented',
@@ -356,6 +359,15 @@ class FilePickerState {
     return await _fireEvent(FilePickerEventOpen(fileInfo));
   }
 
+  Future<bool> _fireErrorEvent(ErrorEvent errorEvent) async {
+    _logger.fine('Firing error event for $errorEvent');
+    return await _fireEvent(
+      FilePickerEventLambda(
+          (handler) => handler.handleErrorEvent(errorEvent), () async {},
+          debugMessage: 'error: $errorEvent'),
+    );
+  }
+
   Future<bool> _fireEvent(FilePickerEvent event) async {
     try {
       for (final handler in _eventHandlers) {
@@ -424,6 +436,14 @@ class FilePickerState {
 
   void removeUriHandler(UriHandler uriHandler) => _eventHandlers
       .remove(FilePickerEventHandlerLambda(uriHandler: uriHandler));
+
+  void registerErrorEventHandler(ErrorEventHandler errorEventHandler) =>
+      _registerFilePickerEventHandler(
+          FilePickerEventHandlerLambda(errorEventHandler: errorEventHandler));
+
+  void removeErrorEventHandler(ErrorEventHandler errorEventHandler) =>
+      _eventHandlers.remove(
+          FilePickerEventHandlerLambda(errorEventHandler: errorEventHandler));
 }
 
 void _unawaited(Future<dynamic> future) {}

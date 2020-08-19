@@ -16,12 +16,27 @@ typedef FileInfoHandler = FutureOr<bool> Function(FileInfo fileInfo);
 /// The handler must return `true` if it has handled the file.
 typedef FileOpenHandler = FutureOr<bool> Function(FileInfo fileInfo, File file);
 typedef UriHandler = bool Function(Uri uri);
+typedef ErrorEventHandler = Future<bool> Function(ErrorEvent errorEvent);
 
 abstract class FilePickerEventHandler {
   @Deprecated('Use [handleFileOpen] instead')
   Future<bool> handleFileInfo(FileInfo fileInfo) async => false;
   Future<bool> handleFileOpen(FileInfo fileInfo, File file);
   Future<bool> handleUri(Uri uri);
+  Future<bool> handleErrorEvent(ErrorEvent errorEvent) async => false;
+}
+
+class ErrorEvent {
+  ErrorEvent({this.message});
+  factory ErrorEvent.fromJson(Map<dynamic, dynamic> map) =>
+      ErrorEvent(message: map['message'] as String);
+
+  final String message;
+
+  @override
+  String toString() {
+    return 'ErrorEvent{message: $message}';
+  }
 }
 
 class FilePickerEventHandlerLambda extends FilePickerEventHandler {
@@ -29,12 +44,14 @@ class FilePickerEventHandlerLambda extends FilePickerEventHandler {
     this.fileInfoHandler,
     this.fileOpenHandler,
     this.uriHandler,
+    this.errorEventHandler,
   });
 
   @Deprecated('use [fileOpenHandler]')
   final FileInfoHandler fileInfoHandler;
   final FileOpenHandler fileOpenHandler;
   final UriHandler uriHandler;
+  final ErrorEventHandler errorEventHandler;
 
   @Deprecated('replaced by [handleFileOpen]')
   @override
@@ -49,18 +66,25 @@ class FilePickerEventHandlerLambda extends FilePickerEventHandler {
   Future<bool> handleUri(Uri uri) async => uriHandler?.call(uri) ?? false;
 
   @override
+  Future<bool> handleErrorEvent(ErrorEvent errorEvent) =>
+      errorEventHandler?.call(errorEvent) ?? Future.value(false);
+
+  @override
   bool operator ==(dynamic other) =>
+      other is FilePickerEventHandlerLambda &&
       // ignore: deprecated_member_use_from_same_package
       fileInfoHandler == other.fileInfoHandler &&
       fileOpenHandler == other.fileOpenHandler &&
-      uriHandler == other.uriHandler;
+      uriHandler == other.uriHandler &&
+      errorEventHandler == other.errorEventHandler;
 
   @override
-  int get hashCode => hash3(
+  int get hashCode => hash4(
         // ignore: deprecated_member_use_from_same_package
         fileInfoHandler,
         fileOpenHandler,
         uriHandler,
+        errorEventHandler,
       );
 }
 

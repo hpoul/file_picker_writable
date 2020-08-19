@@ -99,6 +99,17 @@ class _MainScreenState extends State<MainScreen> {
       ).show(context);
       return true;
     });
+    state.registerErrorEventHandler((errorEvent) async {
+      _logger.fine('Handling error event, mounted: $mounted');
+      if (!mounted) {
+        return false;
+      }
+      SimpleAlertDialog(
+        titleText: 'Received error event',
+        bodyText: errorEvent.message,
+      ).show(context);
+      return true;
+    });
   }
 
   @override
