@@ -437,6 +437,9 @@ class FilePickerState {
   void removeUriHandler(UriHandler uriHandler) => _eventHandlers
       .remove(FilePickerEventHandlerLambda(uriHandler: uriHandler));
 
+  /// Registers [errorEventHandler] which will be called when an error
+  /// occurs during open handlers, when it can't be delivered otherwise.
+  /// (ie. an error during initialisation of openURLs/File Open)
   void registerErrorEventHandler(ErrorEventHandler errorEventHandler) =>
       _registerFilePickerEventHandler(
           FilePickerEventHandlerLambda(errorEventHandler: errorEventHandler));

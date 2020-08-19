@@ -1,9 +1,10 @@
-## 1.2.0-dev.1
+## 1.2.0-dev.2
 
 * Massive cleanup of the dart side API to make ensure proper cleanup of files.
   There should be no breaking changes, but a lot of deprecations.
 * iOS: Fixed bug preventing subsequent reads to fail after first write.
-
+* Add error handler which will be notified of errors happening prior to 
+  file opens/url handlers.
 
 ## 1.1.1+4
 
