@@ -6,6 +6,7 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 import 'package:logging/logging.dart';
 import 'package:path_provider/path_provider.dart';
+import 'package:quiver/core.dart';
 import 'package:synchronized/synchronized.dart';
 import 'package:path/path.dart' as path;
 
@@ -113,7 +114,7 @@ class FilePickerWritable {
               (call.arguments as Map<dynamic, dynamic>).cast()));
           return true;
         } else if (call.method == 'handleUri') {
-          _filePickerState
+          await _filePickerState
               ._fireUriHandlers(Uri.parse(call.arguments as String));
           return true;
         } else {
@@ -348,14 +349,113 @@ typedef FileInfoHandler = FutureOr<bool> Function(FileInfo fileInfo);
 typedef FileOpenHandler = FutureOr<bool> Function(FileInfo fileInfo, File file);
 typedef UriHandler = bool Function(Uri uri);
 
-class FilePickerState {
-  FileInfo _fileInfo;
-  Uri _uri;
+abstract class FilePickerEventHandler {
+  @Deprecated('Use [handleFileOpen] instead')
+  Future<bool> handleFileInfo(FileInfo fileInfo) async => false;
+  Future<bool> handleFileOpen(FileInfo fileInfo, File file);
+  Future<bool> handleUri(Uri uri);
+}
 
-  final List<UriHandler> _uriHandlers = [];
-  @Deprecated('only _fileOpenHandler should be used.')
-  final List<FileInfoHandler> _fileInfoHandler = [];
-  final List<FileOpenHandler> _fileOpenHandler = [];
+class _FilePickerEventHandlerLambda extends FilePickerEventHandler {
+  _FilePickerEventHandlerLambda({
+    this.fileInfoHandler,
+    this.fileOpenHandler,
+    this.uriHandler,
+  });
+
+  @Deprecated('use [fileOpenHandler]')
+  final FileInfoHandler fileInfoHandler;
+  final FileOpenHandler fileOpenHandler;
+  final UriHandler uriHandler;
+
+  @Deprecated('replaced by [handleFileOpen]')
+  @override
+  Future<bool> handleFileInfo(FileInfo fileInfo) async =>
+      fileInfoHandler?.call(fileInfo) ?? false;
+
+  @override
+  Future<bool> handleFileOpen(FileInfo fileInfo, File file) async =>
+      fileOpenHandler?.call(fileInfo, file) ?? false;
+
+  @override
+  Future<bool> handleUri(Uri uri) async => uriHandler?.call(uri) ?? false;
+
+  @override
+  bool operator ==(dynamic other) =>
+      // ignore: deprecated_member_use_from_same_package
+      fileInfoHandler == other.fileInfoHandler &&
+      fileOpenHandler == other.fileOpenHandler &&
+      uriHandler == other.uriHandler;
+
+  @override
+  int get hashCode => hash3(
+        // ignore: deprecated_member_use_from_same_package
+        fileInfoHandler,
+        fileOpenHandler,
+        uriHandler,
+      );
+}
+
+abstract class _FilePickerEvent {
+  _FilePickerEvent();
+  Future<bool> dispatch(FilePickerEventHandler handler);
+  Future<void> dispose();
+  String get debugMessage;
+}
+
+class _FilePickerEventLambda extends _FilePickerEvent {
+  _FilePickerEventLambda(this.dispatchLambda, this.disposeLambda,
+      {@required this.debugMessage});
+  final Future<bool> Function(FilePickerEventHandler handler) dispatchLambda;
+  final Future<void> Function() disposeLambda;
+  @override
+  final String debugMessage;
+
+  @override
+  Future<bool> dispatch(FilePickerEventHandler handler) =>
+      dispatchLambda(handler);
+
+  @override
+  Future<void> dispose() => disposeLambda();
+}
+
+class _FilePickerEventOpen extends _FilePickerEvent {
+  _FilePickerEventOpen(this._fileInfo);
+
+  final FileInfo _fileInfo;
+
+  bool noCleanupDeprecatedFileInfo = false;
+
+  @override
+  String get debugMessage => 'fileOpen';
+
+  @override
+  Future<bool> dispatch(FilePickerEventHandler handler) async {
+    // ignore: deprecated_member_use_from_same_package
+    if (await handler.handleFileOpen(_fileInfo, _fileInfo.file)) {
+      return true;
+    }
+    // as a fallback invoke deprecated `handleFileInfo`.
+    // ignore: deprecated_member_use_from_same_package
+    if (await handler.handleFileInfo(_fileInfo)) {
+      noCleanupDeprecatedFileInfo = true;
+      return true;
+    }
+    return false;
+  }
+
+  @override
+  Future<void> dispose() async {
+    if (!noCleanupDeprecatedFileInfo) {
+      // ignore: deprecated_member_use_from_same_package
+      await _fileInfo.file.delete();
+    }
+  }
+}
+
+class FilePickerState {
+  final List<FilePickerEventHandler> _eventHandlers = [];
+  _FilePickerEvent _pendingEvent;
 
 //  void init() {
 //    FilePickerWritable().init(openFileHandler: (fileInfo) {
@@ -366,107 +466,77 @@ class FilePickerState {
 //  }
 
   Future<bool> _fireFileOpenHandlers(FileInfo fileInfo) async {
-    // ignore: deprecated_member_use_from_same_package
-    _fileInfo = null;
-    // fileOpenHandler do not expect files to be deleted.
-    var _deprecatedNoDeleteFile = false;
-    // ignore: deprecated_member_use_from_same_package
-    final file = fileInfo.file;
-    try {
-      for (final handler in _fileOpenHandler) {
-        if (await handler(fileInfo, file)) {
-          // handled.
-          return true;
-        }
-      }
-
-      // ignore: deprecated_member_use_from_same_package
-      for (final handler in _fileInfoHandler) {
-        if (await handler(fileInfo)) {
-          // handled.
-          _deprecatedNoDeleteFile = true;
-          return true;
-        }
-      }
-      _fileInfo = fileInfo;
-    } catch (e, stackTrace) {
-      _logger.severe('FileOpenHandler throw exception.', e, stackTrace);
-    } finally {
-      if (_fileInfo == null && !_deprecatedNoDeleteFile) {
-        _unawaited(file.delete());
-      }
-    }
-    return false;
+    return await _fireEvent(_FilePickerEventOpen(fileInfo));
   }
 
-  final _fileInfoLock = Lock();
+  Future<bool> _fireEvent(_FilePickerEvent event) async {
+    try {
+      for (final handler in _eventHandlers) {
+        if (await event.dispatch(handler)) {
+          _unawaited(event.dispose());
+          return true;
+        }
+      }
+      if (_pendingEvent != null) {
+        _unawaited(_pendingEvent?.dispose());
+      }
+      _pendingEvent = event;
+      return false;
+    } catch (e, stackTrace) {
+      _logger.severe('Error while dispatching ${event.debugMessage} event.', e,
+          stackTrace);
+      rethrow;
+    }
+  }
 
-  /// deprecated: use [registerFileOpenHandler] instead.
-  @Deprecated('use [registerFileOpenHandler] instead.')
-  void registerFileInfoHandler(FileInfoHandler fileInfoHandler) {
-    if (_fileInfo != null) {
-      _fileInfoLock.synchronized(() async {
-        if (_fileInfo != null) {
-          if (await fileInfoHandler(_fileInfo)) {
-            _fileInfo = null;
+  final _pendingEventLock = Lock();
+
+  void _registerFilePickerEventHandler(FilePickerEventHandler handler) {
+    if (_pendingEvent != null) {
+      _pendingEventLock.synchronized(() async {
+        if (_pendingEvent != null) {
+          if (await _pendingEvent.dispatch(handler)) {
+            _pendingEvent = null;
           }
         }
       });
     }
-    _fileInfoHandler.add(fileInfoHandler);
+    _eventHandlers.add(handler);
+  }
+
+  /// deprecated: use [registerFileOpenHandler] instead.
+  @Deprecated('use [registerFileOpenHandler] instead.')
+  void registerFileInfoHandler(FileInfoHandler fileInfoHandler) {
+    _registerFilePickerEventHandler(
+        _FilePickerEventHandlerLambda(fileInfoHandler: fileInfoHandler));
   }
 
   @Deprecated('use [removeFileOpenHandler] instead.')
-  void removeFileInfoHandler(FileInfoHandler fileInfoHandler) {
-    _fileInfoHandler.remove(fileInfoHandler);
-  }
+  bool removeFileInfoHandler(FileInfoHandler fileInfoHandler) => _eventHandlers
+      .remove(_FilePickerEventHandlerLambda(fileInfoHandler: fileInfoHandler));
 
   /// Registers the [fileOpenHandler] to be called when the app is launched
   /// with a file it should open.
   /// The fileOpenHandler will receive a file object which will be deleted
   /// once it returns.
-  void registerFileOpenHandler(FileOpenHandler fileOpenHandler) {
-    if (_fileInfo != null) {
-      _fileInfoLock.synchronized(() async {
-        if (_fileInfo != null) {
-          // ignore: deprecated_member_use_from_same_package
-          final file = _fileInfo.file;
-          if (await fileOpenHandler(_fileInfo, file)) {
-            _fileInfo = null;
-          }
-        }
-      });
-    }
-    _fileOpenHandler.add(fileOpenHandler);
-  }
+  void registerFileOpenHandler(FileOpenHandler fileOpenHandler) =>
+      _registerFilePickerEventHandler(
+          _FilePickerEventHandlerLambda(fileOpenHandler: fileOpenHandler));
 
   /// Removes the given [fileOpenHandler].
-  void removeFileOpenHandler(FileOpenHandler fileOpenHandler) {
-    _fileOpenHandler.remove(fileOpenHandler);
-  }
+  bool removeFileOpenHandler(FileOpenHandler fileOpenHandler) => _eventHandlers
+      .remove(_FilePickerEventHandlerLambda(fileOpenHandler: fileOpenHandler));
 
-  void _fireUriHandlers(Uri uri) {
-    for (final handler in _uriHandlers.reversed) {
-      if (handler(uri)) {
-        // handled.
-        return;
-      }
-    }
-    _uri = uri;
-  }
+  Future<bool> _fireUriHandlers(Uri uri) => _fireEvent(_FilePickerEventLambda(
+      (handler) => handler.handleUri(uri), () => null,
+      debugMessage: 'handleUri($uri)'));
 
-  void registerUriHandler(UriHandler uriHandler) {
-    if (_uri != null) {
-      if (uriHandler(_uri)) {
-        _uri = null;
-      }
-    }
-    _uriHandlers.add(uriHandler);
-  }
+  void registerUriHandler(UriHandler uriHandler) =>
+      _registerFilePickerEventHandler(
+          _FilePickerEventHandlerLambda(uriHandler: uriHandler));
 
-  void removeUriHandler(UriHandler uriHandler) {
-    _uriHandlers.remove(uriHandler);
-  }
+  void removeUriHandler(UriHandler uriHandler) => _eventHandlers
+      .remove(_FilePickerEventHandlerLambda(uriHandler: uriHandler));
 }
 
 void _unawaited(Future<dynamic> future) {}
