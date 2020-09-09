@@ -56,7 +56,7 @@ packages:
       name: cupertino_icons
       url: "https://pub.dartlang.org"
     source: hosted
-    version: "0.1.3"
+    version: "1.0.0"
   dio:
     dependency: transitive
     description:
@@ -71,13 +71,20 @@ packages:
       url: "https://pub.dartlang.org"
     source: hosted
     version: "1.1.0-nullsafety"
+  file:
+    dependency: transitive
+    description:
+      name: file
+      url: "https://pub.dartlang.org"
+    source: hosted
+    version: "5.2.1"
   file_picker_writable:
     dependency: "direct main"
     description:
       path: ".."
       relative: true
     source: path
-    version: "1.2.0-dev.1"
+    version: "1.2.0"
   flutter:
     dependency: "direct main"
     description: flutter
@@ -122,7 +129,7 @@ packages:
       name: logging_appenders
       url: "https://pub.dartlang.org"
     source: hosted
-    version: "0.4.1"
+    version: "0.4.2+5"
   matcher:
     dependency: transitive
     description:
@@ -150,7 +157,14 @@ packages:
       name: path_provider
       url: "https://pub.dartlang.org"
     source: hosted
-    version: "1.6.7"
+    version: "1.6.14"
+  path_provider_linux:
+    dependency: transitive
+    description:
+      name: path_provider_linux
+      url: "https://pub.dartlang.org"
+    source: hosted
+    version: "0.0.1+2"
   path_provider_macos:
     dependency: transitive
     description:
@@ -165,6 +179,13 @@ packages:
       url: "https://pub.dartlang.org"
     source: hosted
     version: "1.0.1"
+  pedantic:
+    dependency: "direct dev"
+    description:
+      name: pedantic
+      url: "https://pub.dartlang.org"
+    source: hosted
+    version: "1.9.2"
   platform:
     dependency: transitive
     description:
@@ -179,6 +200,13 @@ packages:
       url: "https://pub.dartlang.org"
     source: hosted
     version: "1.0.2"
+  process:
+    dependency: transitive
+    description:
+      name: process
+      url: "https://pub.dartlang.org"
+    source: hosted
+    version: "3.0.13"
   quiver:
     dependency: transitive
     description:
@@ -199,7 +227,7 @@ packages:
       name: simple_json_persistence
       url: "https://pub.dartlang.org"
     source: hosted
-    version: "1.0.0-dev.2"
+    version: "1.0.2"
   sky_engine:
     dependency: transitive
     description: flutter
@@ -268,6 +296,13 @@ packages:
       url: "https://pub.dartlang.org"
     source: hosted
     version: "2.1.0-nullsafety.2"
+  xdg_directories:
+    dependency: transitive
+    description:
+      name: xdg_directories
+      url: "https://pub.dartlang.org"
+    source: hosted
+    version: "0.1.2"
 sdks:
   dart: ">=2.10.0-0.0.dev <2.10.0"
   flutter: ">=1.12.13+hotfix.5 <2.0.0"

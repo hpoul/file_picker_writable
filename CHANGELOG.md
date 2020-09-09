@@ -1,4 +1,4 @@
-## 1.2.0-dev.2
+## 1.2.0
 
 * Massive cleanup of the dart side API to make ensure proper cleanup of files.
   There should be no breaking changes, but a lot of deprecations.
