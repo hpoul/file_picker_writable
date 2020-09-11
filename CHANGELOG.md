@@ -1,3 +1,7 @@
+## 1.2.0+1
+
+* correctly await callback from `readFile` #6 (thanks [@amake](https://github.com/amake))
+
 ## 1.2.0
 
 * Massive cleanup of the dart side API to make ensure proper cleanup of files.
