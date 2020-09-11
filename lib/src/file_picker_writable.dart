@@ -260,7 +260,7 @@ class FilePickerWritable {
     // ignore: deprecated_member_use_from_same_package
     final file = fileInfo.file;
     try {
-      return reader(fileInfo, file);
+      return await reader(fileInfo, file);
     } catch (e, stackTrace) {
       _logger.warning('Error while calling reader method.', e, stackTrace);
       rethrow;
