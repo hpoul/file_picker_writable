@@ -25,11 +25,11 @@ abstract class FilePickerEventHandler {
 }
 
 class ErrorEvent {
-  ErrorEvent({this.message});
+  ErrorEvent({required this.message});
   factory ErrorEvent.fromJson(Map<dynamic, dynamic> map) =>
-      ErrorEvent(message: map['message'] as String?);
+      ErrorEvent(message: map['message'] as String? ?? 'Invalid error event');
 
-  final String? message;
+  final String message;
 
   @override
   String toString() {

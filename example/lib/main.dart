@@ -20,14 +20,14 @@ Future<void> main() async {
 }
 
 class AppDataBloc {
-  final store = SimpleJsonPersistence.getForTypeSync(
+  final store = SimpleJsonPersistence.getForTypeWithDefault(
     (json) => AppData.fromJson(json),
     defaultCreator: () => AppData(files: []),
   );
 }
 
 class AppData implements HasToJson {
-  AppData({@required this.files}) : assert(files != null);
+  AppData({required this.files});
   final List<FileInfo> files;
 
   static AppData fromJson(Map<String, dynamic> json) => AppData(
@@ -41,7 +41,7 @@ class AppData implements HasToJson {
         'files': files,
       };
 
-  AppData copyWith({List<FileInfo> files}) => AppData(files: files);
+  AppData copyWith({required List<FileInfo> files}) => AppData(files: files);
 }
 
 class MyApp extends StatefulWidget {
@@ -63,7 +63,7 @@ class _MyAppState extends State<MyApp> {
 }
 
 class MainScreen extends StatefulWidget {
-  const MainScreen({Key key, this.appDataBloc}) : super(key: key);
+  const MainScreen({Key? key, required this.appDataBloc}) : super(key: key);
   final AppDataBloc appDataBloc;
 
   @override
@@ -144,12 +144,10 @@ class _MainScreenState extends State<MainScreen> {
                 ),
                 ...?(!snapshot.hasData
                     ? null
-                    : snapshot.data.files
-                        .where((element) => element != null)
-                        .map((fileInfo) => FileInfoDisplay(
-                              fileInfo: fileInfo,
-                              appDataBloc: _appDataBloc,
-                            ))),
+                    : snapshot.data!.files.map((fileInfo) => FileInfoDisplay(
+                          fileInfo: fileInfo,
+                          appDataBloc: _appDataBloc,
+                        ))),
               ],
             ),
           ),
@@ -193,12 +191,10 @@ class _MainScreenState extends State<MainScreen> {
 
 class FileInfoDisplay extends StatelessWidget {
   const FileInfoDisplay({
-    Key key,
-    @required this.fileInfo,
-    @required this.appDataBloc,
-  })  : assert(fileInfo != null),
-        assert(appDataBloc != null),
-        super(key: key);
+    Key? key,
+    required this.fileInfo,
+    required this.appDataBloc,
+  }) : super(key: key);
 
   final AppDataBloc appDataBloc;
   final FileInfo fileInfo;
@@ -216,10 +212,10 @@ class FileInfoDisplay extends StatelessWidget {
             children: <Widget>[
               const Text('Selected File:'),
               Text(
-                fileInfo.fileName,
+                fileInfo.fileName ?? 'null',
                 maxLines: 4,
                 overflow: TextOverflow.ellipsis,
-                style: theme.textTheme.caption.apply(fontSizeFactor: 0.75),
+                style: theme.textTheme.caption!.apply(fontSizeFactor: 0.75),
               ),
               Text(
                 fileInfo.identifier,
@@ -228,13 +224,13 @@ class FileInfoDisplay extends StatelessWidget {
               ),
               Text(
                 'uri:${fileInfo.uri}',
-                style: theme.textTheme.bodyText2
+                style: theme.textTheme.bodyText2!
                     .apply(fontSizeFactor: 0.7)
                     .copyWith(fontWeight: FontWeight.bold),
               ),
               Text(
                 'fileName: ${fileInfo.fileName}',
-                style: theme.textTheme.bodyText2
+                style: theme.textTheme.bodyText2!
                     .apply(fontSizeFactor: 0.7)
                     .copyWith(fontWeight: FontWeight.bold),
               ),
@@ -289,9 +285,9 @@ class FileInfoDisplay extends StatelessWidget {
 }
 
 class SimpleAlertDialog extends StatelessWidget {
-  const SimpleAlertDialog({Key key, this.titleText, this.bodyText})
+  const SimpleAlertDialog({Key? key, this.titleText, required this.bodyText})
       : super(key: key);
-  final String titleText;
+  final String? titleText;
   final String bodyText;
 
   Future<void> show(BuildContext context) =>
@@ -301,7 +297,7 @@ class SimpleAlertDialog extends StatelessWidget {
   Widget build(BuildContext context) {
     return AlertDialog(
       scrollable: true,
-      title: titleText == null ? null : Text(titleText),
+      title: titleText == null ? null : Text(titleText!),
       content: Text(bodyText),
       actions: <Widget>[
         TextButton(
