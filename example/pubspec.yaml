@@ -14,7 +14,7 @@ dependencies:
     sdk: flutter
   logging: ^1.0.0
   logging_appenders: ^1.0.0
-  simple_json_persistence: ^2.0.0-nullsafety.3
+  simple_json_persistence: ^2.0.0-nullsafety.4
   path: ^1.8.0
   path_provider: ^2.0.0
 
