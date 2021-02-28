@@ -1,3 +1,7 @@
+## 2.0.0-nullsafety.1
+
+* Nullsafety migration.
+
 ## 1.2.0+1
 
 * correctly await callback from `readFile` #6 (thanks [@amake](https://github.com/amake))

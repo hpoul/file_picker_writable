@@ -104,7 +104,7 @@ class _MainScreenState extends State<MainScreen> {
       if (!mounted) {
         return false;
       }
-      SimpleAlertDialog(
+      await SimpleAlertDialog(
         titleText: 'Received error event',
         bodyText: errorEvent.message,
       ).show(context);
@@ -131,12 +131,12 @@ class _MainScreenState extends State<MainScreen> {
                   mainAxisAlignment: MainAxisAlignment.center,
                   mainAxisSize: MainAxisSize.max,
                   children: <Widget>[
-                    RaisedButton(
+                    ElevatedButton(
                       child: const Text('Open File Picker'),
                       onPressed: _openFilePicker,
                     ),
                     const SizedBox(width: 32),
-                    RaisedButton(
+                    ElevatedButton(
                       child: const Text('Create New File'),
                       onPressed: _openFilePickerForCreate,
                     ),
@@ -241,9 +241,9 @@ class FileInfoDisplay extends StatelessWidget {
               ButtonBar(
                 alignment: MainAxisAlignment.end,
                 children: <Widget>[
-                  FlatButton(
+                  TextButton(
                     onPressed: () async {
-                      FilePickerWritable().readFile(
+                      await FilePickerWritable().readFile(
                           identifier: fileInfo.identifier,
                           reader: (fileInfo, file) async {
                             await SimpleAlertDialog
@@ -253,7 +253,7 @@ class FileInfoDisplay extends StatelessWidget {
                     },
                     child: const Text('Read'),
                   ),
-                  FlatButton(
+                  TextButton(
                     onPressed: () async {
                       await FilePickerWritable().writeFile(
                           identifier: fileInfo.identifier,
@@ -261,7 +261,7 @@ class FileInfoDisplay extends StatelessWidget {
                             final content =
                                 'New Content written at ${DateTime.now()}.\n\n';
                             await file.writeAsString(content);
-                            SimpleAlertDialog(
+                            await SimpleAlertDialog(
                               bodyText: 'Written: $content',
                             ).show(context);
                           });
@@ -304,7 +304,7 @@ class SimpleAlertDialog extends StatelessWidget {
       title: titleText == null ? null : Text(titleText),
       content: Text(bodyText),
       actions: <Widget>[
-        FlatButton(
+        TextButton(
             child: const Text('Ok'),
             onPressed: () {
               Navigator.of(context).pop();
@@ -324,7 +324,7 @@ class SimpleAlertDialog extends StatelessWidget {
     final hexString = hex.encode(data);
     final utf8String = utf8.decode(data, allowMalformed: true);
     final fileContentExample = 'hexString: $hexString\n\nutf8: $utf8String';
-    SimpleAlertDialog(
+    await SimpleAlertDialog(
       titleText: 'Read first ${data.length} bytes of file',
       bodyText: '$bodyTextPrefix $fileContentExample',
     ).show(context);
