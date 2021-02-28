@@ -2,8 +2,6 @@ import 'dart:async';
 import 'dart:io';
 
 import 'package:file_picker_writable/src/file_picker_writable.dart';
-import 'package:flutter/foundation.dart';
-import 'package:flutter/widgets.dart';
 import 'package:quiver/core.dart';
 
 @Deprecated('Use [FileOpenHandler] instead.')
@@ -29,9 +27,9 @@ abstract class FilePickerEventHandler {
 class ErrorEvent {
   ErrorEvent({this.message});
   factory ErrorEvent.fromJson(Map<dynamic, dynamic> map) =>
-      ErrorEvent(message: map['message'] as String);
+      ErrorEvent(message: map['message'] as String?);
 
-  final String message;
+  final String? message;
 
   @override
   String toString() {
@@ -48,19 +46,19 @@ class FilePickerEventHandlerLambda extends FilePickerEventHandler {
   });
 
   @Deprecated('use [fileOpenHandler]')
-  final FileInfoHandler fileInfoHandler;
-  final FileOpenHandler fileOpenHandler;
-  final UriHandler uriHandler;
-  final ErrorEventHandler errorEventHandler;
+  final FileInfoHandler? fileInfoHandler;
+  final FileOpenHandler? fileOpenHandler;
+  final UriHandler? uriHandler;
+  final ErrorEventHandler? errorEventHandler;
 
   @Deprecated('replaced by [handleFileOpen]')
   @override
   Future<bool> handleFileInfo(FileInfo fileInfo) async =>
-      fileInfoHandler?.call(fileInfo) ?? false;
+      (await fileInfoHandler?.call(fileInfo)) ?? false;
 
   @override
   Future<bool> handleFileOpen(FileInfo fileInfo, File file) async =>
-      fileOpenHandler?.call(fileInfo, file) ?? false;
+      (await fileOpenHandler?.call(fileInfo, file)) ?? false;
 
   @override
   Future<bool> handleUri(Uri uri) async => uriHandler?.call(uri) ?? false;
@@ -91,15 +89,15 @@ class FilePickerEventHandlerLambda extends FilePickerEventHandler {
 abstract class FilePickerEvent {
   FilePickerEvent();
   Future<bool> dispatch(FilePickerEventHandler handler);
-  Future<void> dispose();
+  Future<void>? dispose();
   String get debugMessage;
 }
 
 class FilePickerEventLambda extends FilePickerEvent {
   FilePickerEventLambda(this.dispatchLambda, this.disposeLambda,
-      {@required this.debugMessage});
+      {required this.debugMessage});
   final Future<bool> Function(FilePickerEventHandler handler) dispatchLambda;
-  final Future<void> Function() disposeLambda;
+  final Future<void>? Function() disposeLambda;
   @override
   final String debugMessage;
 
@@ -108,7 +106,7 @@ class FilePickerEventLambda extends FilePickerEvent {
       dispatchLambda(handler);
 
   @override
-  Future<void> dispose() => disposeLambda();
+  Future<void>? dispose() => disposeLambda();
 }
 
 class FilePickerEventOpen extends FilePickerEvent {

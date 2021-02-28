@@ -3,7 +3,6 @@ import 'dart:convert';
 import 'dart:io';
 
 import 'package:file_picker_writable/src/event_handling.dart';
-import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 import 'package:logging/logging.dart';
 import 'package:path/path.dart' as path;
@@ -15,20 +14,19 @@ final _logger = Logger('file_picker_writable');
 /// Contains information about a user selected file.
 class FileInfo {
   FileInfo({
-    @required this.file,
-    @required this.identifier,
-    @required this.persistable,
-    @required this.uri,
+    required this.file,
+    required this.identifier,
+    required this.persistable,
+    required this.uri,
     this.fileName,
-  })  : assert(identifier != null),
-        assert(uri != null);
+  });
 
   static FileInfo fromJson(Map<String, dynamic> json) => FileInfo(
         file: File(json['path'] as String),
         identifier: json['identifier'] as String,
-        persistable: (json['persistable'] as String) == 'true',
+        persistable: (json['persistable'] as String?) == 'true',
         uri: json['uri'] as String,
-        fileName: json['fileName'] as String,
+        fileName: json['fileName'] as String?,
       );
 
   static FileInfo fromJsonString(String jsonString) =>
@@ -68,7 +66,7 @@ class FileInfo {
   /// an actual file name in the content uri.
   ///
   /// Might be null.
-  final String fileName;
+  final String? fileName;
 
   @override
   String toString() {
@@ -154,7 +152,7 @@ class FilePickerWritable {
   }
 
   @Deprecated('use [openFile] instead.')
-  Future<FileInfo> openFilePicker() async {
+  Future<FileInfo?> openFilePicker() async {
     _logger.finest('openFilePicker()');
     final result =
         await _channel.invokeMapMethod<String, String>('openFilePicker');
@@ -168,7 +166,7 @@ class FilePickerWritable {
 
   /// Use [openFileForCreate] instead.
   @Deprecated('Use [openFileForCreate] instead.')
-  Future<FileInfo> openFilePickerForCreate(File file) async {
+  Future<FileInfo?> openFilePickerForCreate(File file) async {
     _logger.finest('openFilePickerForCreate($file)');
     final result = await _channel.invokeMapMethod<String, String>(
         'openFilePickerForCreate', {'path': file.absolute.path});
@@ -182,7 +180,7 @@ class FilePickerWritable {
 
   /// Shows a file picker so the user can select a file and calls [reader]
   /// afterwards.
-  Future<T> openFile<T>(FileReader<T> reader) async {
+  Future<T?> openFile<T>(FileReader<T> reader) async {
     _logger.finest('openFilePicker()');
     final result =
         await _channel.invokeMapMethod<String, String>('openFilePicker');
@@ -192,10 +190,6 @@ class FilePickerWritable {
       return null;
     }
     final fileInfo = _resultToFileInfo(result);
-    if (fileInfo == null) {
-      // user canceled.
-      return null;
-    }
     // ignore: deprecated_member_use_from_same_package
     final file = fileInfo.file;
     try {
@@ -211,9 +205,9 @@ class FilePickerWritable {
   ///
   /// Will return a [FileInfo] which allows future access to the file or
   /// `null` if the user cancelled the file picker.
-  Future<FileInfo> openFileForCreate({
-    @required String fileName,
-    @required Future<void> Function(File tempFile) writer,
+  Future<FileInfo?> openFileForCreate({
+    required String fileName,
+    required Future<void> Function(File tempFile) writer,
   }) async {
     _logger.finest('openFilePickerForCreate($fileName)');
     return _createFileInNewTempDirectory(fileName, (tempFile) async {
@@ -236,8 +230,9 @@ class FilePickerWritable {
   @Deprecated('Use [readFile] instead.')
   Future<FileInfo> readFileWithIdentifier(String identifier) async {
     _logger.finest('readFileWithIdentifier()');
-    final result = await _channel.invokeMapMethod<String, String>(
-        'readFileWithIdentifier', {'identifier': identifier});
+    final result = await (_channel.invokeMapMethod<String, String>(
+            'readFileWithIdentifier', {'identifier': identifier})
+        as FutureOr<Map<String, String>>);
     return _resultToFileInfo(result);
   }
 
@@ -245,11 +240,9 @@ class FilePickerWritable {
   /// Expects a [FileInfo.identifier] string for [identifier].
   ///
   Future<T> readFile<T>({
-    @required String identifier,
-    @required FileReader<T> reader,
+    required String identifier,
+    required FileReader<T> reader,
   }) async {
-    assert(identifier != null);
-    assert(reader != null);
     _logger.finest('readFile()');
     final result = await _channel.invokeMapMethod<String, String>(
         'readFileWithIdentifier', {'identifier': identifier});
@@ -273,11 +266,11 @@ class FilePickerWritable {
   /// Expects a [FileInfo.identifier] string for [identifier].
   Future<FileInfo> writeFileWithIdentifier(String identifier, File file) async {
     _logger.finest('writeFileWithIdentifier(file: $file)');
-    final result = await _channel
+    final result = await (_channel
         .invokeMapMethod<String, String>('writeFileWithIdentifier', {
       'identifier': identifier,
       'path': file.absolute.path,
-    });
+    }) as FutureOr<Map<String, String>>);
     return _resultToFileInfo(result);
   }
 
@@ -287,9 +280,9 @@ class FilePickerWritable {
   /// [fileName] (if not given will be called `temp`).
   /// The temporary directory will be deleted when writing is complete.
   Future<FileInfo> writeFile({
-    @required String identifier,
+    required String identifier,
     String fileName = 'temp',
-    Future<void> Function(File file) writer,
+    required Future<void> Function(File file) writer,
   }) async {
     _logger.finest('writeFileWithIdentifier()');
     final result =
@@ -300,18 +293,17 @@ class FilePickerWritable {
         'identifier': identifier,
         'path': tempFile.absolute.path,
       });
-      return result;
+      return result!;
     });
     return _resultToFileInfo(result);
   }
 
   FileInfo _resultToFileInfo(Map<String, String> result) {
-    assert(result != null);
     return FileInfo(
-      file: File(result['path']),
-      identifier: result['identifier'],
+      file: File(result['path']!),
+      identifier: result['identifier']!,
       persistable: result['persistable'] == 'true',
-      uri: result['uri'],
+      uri: result['uri']!,
       fileName: result['fileName'],
     );
   }
@@ -345,7 +337,7 @@ class FilePickerWritable {
 /// like file opening and error handling.
 class FilePickerState {
   final List<FilePickerEventHandler> _eventHandlers = [];
-  FilePickerEvent _pendingEvent;
+  FilePickerEvent? _pendingEvent;
 
 //  void init() {
 //    FilePickerWritable().init(openFileHandler: (fileInfo) {
@@ -394,7 +386,7 @@ class FilePickerState {
     if (_pendingEvent != null) {
       _pendingEventLock.synchronized(() async {
         if (_pendingEvent != null) {
-          if (await _pendingEvent.dispatch(handler)) {
+          if (await _pendingEvent!.dispatch(handler)) {
             _pendingEvent = null;
           }
         }
@@ -449,4 +441,4 @@ class FilePickerState {
           FilePickerEventHandlerLambda(errorEventHandler: errorEventHandler));
 }
 
-void _unawaited(Future<dynamic> future) {}
+void _unawaited(Future<dynamic>? future) {}
