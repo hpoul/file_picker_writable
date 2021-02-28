@@ -1,8 +1,37 @@
+# https://gist.github.com/hpoul/b78f7a1b3cde988f3ce4d12e954367eb
+#
+# IDEA: Allow some configuration, which is shared across users.
+
+.idea/*
+!.idea/runConfigurations
+!.idea/runConfigurations/*
+!.idea/vcs.xml
+!.idea/dictionaries
+!.idea/dictionaries/*
+!.idea/inspectionProfiles/*
+!.idea/codeStyles
+!.idea/codeStyles/*
 *.iml
-.gradle
-/local.properties
-/.idea/workspace.xml
-/.idea/libraries
-.DS_Store
+
+# Java/Kotlin/Android
+
+/.gradle
 /build
-/captures
+/out
+
+# JavaScript/Node.JS
+
+/node_modules
+
+#### project specific ignores below
+
+.DS_Store
+.dart_tool/
+
+.packages
+.pub/
+
+build/
+
+/example/ios/Flutter/.last_build_id
+
