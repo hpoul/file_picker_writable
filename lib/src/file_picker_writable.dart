@@ -14,7 +14,6 @@ final _logger = Logger('file_picker_writable');
 /// Contains information about a user selected file.
 class FileInfo {
   FileInfo({
-    required this.file,
     required this.identifier,
     required this.persistable,
     required this.uri,
@@ -22,7 +21,6 @@ class FileInfo {
   });
 
   static FileInfo fromJson(Map<String, dynamic> json) => FileInfo(
-        file: File(json['path'] as String),
         identifier: json['identifier'] as String,
         persistable: (json['persistable'] as String?) == 'true',
         uri: json['uri'] as String,
@@ -31,15 +29,6 @@ class FileInfo {
 
   static FileInfo fromJsonString(String jsonString) =>
       fromJson(json.decode(jsonString) as Map<String, dynamic>);
-
-  /// Temporary file which can be used for reading.
-  /// Can (usually) be used during the lifetime of your app instance.
-  /// Should typically be only read once, if you later need to access it again
-  /// use the [identifier] to read it with
-  /// [FilePickerWritable.read].
-  @Deprecated('Should no longer be used, with [FilePickerWritable.read] '
-      'this will be removed immediately.')
-  final File file;
 
   /// Identifier which can be used for reading at a later time, or used for
   /// writing back data. See [persistable] for details on the valid lifetime of
@@ -74,8 +63,6 @@ class FileInfo {
   }
 
   Map<String, dynamic> toJson() => <String, dynamic>{
-        // ignore: deprecated_member_use_from_same_package
-        'path': file.path,
         'identifier': identifier,
         'persistable': persistable.toString(),
         'uri': uri,
@@ -108,8 +95,11 @@ class FilePickerWritable {
       _logger.fine('Got method call: {$call}');
       try {
         if (call.method == 'openFile') {
-          await _filePickerState._fireFileOpenHandlers(_resultToFileInfo(
-              (call.arguments as Map<dynamic, dynamic>).cast()));
+          final result =
+              (call.arguments as Map<dynamic, dynamic>).cast<String, String>();
+          final fileInfo = _resultToFileInfo(result);
+          final file = File(result['path']!);
+          await _filePickerState._fireFileOpenHandlers(fileInfo, file);
           return true;
         } else if (call.method == 'handleUri') {
           await _filePickerState
@@ -190,8 +180,7 @@ class FilePickerWritable {
       return null;
     }
     final fileInfo = _resultToFileInfo(result);
-    // ignore: deprecated_member_use_from_same_package
-    final file = fileInfo.file;
+    final file = File(result['path']!);
     try {
       return await reader(fileInfo, file);
     } finally {
@@ -226,19 +215,6 @@ class FilePickerWritable {
   /// Reads the file previously picked by the user.
   /// Expects a [FileInfo.identifier] string for [identifier].
   ///
-  /// Use [readFile] instead.
-  @Deprecated('Use [readFile] instead.')
-  Future<FileInfo> readFileWithIdentifier(String identifier) async {
-    _logger.finest('readFileWithIdentifier()');
-    final result = await (_channel.invokeMapMethod<String, String>(
-            'readFileWithIdentifier', {'identifier': identifier})
-        as FutureOr<Map<String, String>>);
-    return _resultToFileInfo(result);
-  }
-
-  /// Reads the file previously picked by the user.
-  /// Expects a [FileInfo.identifier] string for [identifier].
-  ///
   Future<T> readFile<T>({
     required String identifier,
     required FileReader<T> reader,
@@ -250,8 +226,7 @@ class FilePickerWritable {
       throw StateError('Error while reading file with identifier $identifier');
     }
     final fileInfo = _resultToFileInfo(result);
-    // ignore: deprecated_member_use_from_same_package
-    final file = fileInfo.file;
+    final file = File(result['path']!);
     try {
       return await reader(fileInfo, file);
     } catch (e, stackTrace) {
@@ -300,7 +275,6 @@ class FilePickerWritable {
 
   FileInfo _resultToFileInfo(Map<String, String> result) {
     return FileInfo(
-      file: File(result['path']!),
       identifier: result['identifier']!,
       persistable: result['persistable'] == 'true',
       uri: result['uri']!,
@@ -347,8 +321,8 @@ class FilePickerState {
 //    });
 //  }
 
-  Future<bool> _fireFileOpenHandlers(FileInfo fileInfo) async {
-    return await _fireEvent(FilePickerEventOpen(fileInfo));
+  Future<bool> _fireFileOpenHandlers(FileInfo fileInfo, File file) async {
+    return await _fireEvent(FilePickerEventOpen(fileInfo, file));
   }
 
   Future<bool> _fireErrorEvent(ErrorEvent errorEvent) async {

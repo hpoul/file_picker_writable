@@ -110,9 +110,10 @@ class FilePickerEventLambda extends FilePickerEvent {
 }
 
 class FilePickerEventOpen extends FilePickerEvent {
-  FilePickerEventOpen(this._fileInfo);
+  FilePickerEventOpen(this._fileInfo, this._file);
 
   final FileInfo _fileInfo;
+  final File _file;
 
   bool noCleanupDeprecatedFileInfo = false;
 
@@ -122,7 +123,7 @@ class FilePickerEventOpen extends FilePickerEvent {
   @override
   Future<bool> dispatch(FilePickerEventHandler handler) async {
     // ignore: deprecated_member_use_from_same_package
-    if (await handler.handleFileOpen(_fileInfo, _fileInfo.file)) {
+    if (await handler.handleFileOpen(_fileInfo, _file)) {
       return true;
     }
     // as a fallback invoke deprecated `handleFileInfo`.
@@ -138,7 +139,7 @@ class FilePickerEventOpen extends FilePickerEvent {
   Future<void> dispose() async {
     if (!noCleanupDeprecatedFileInfo) {
       // ignore: deprecated_member_use_from_same_package
-      await _fileInfo.file.delete();
+      await _file.delete();
     }
   }
 }
