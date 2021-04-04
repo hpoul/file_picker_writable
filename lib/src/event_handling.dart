@@ -122,7 +122,6 @@ class FilePickerEventOpen extends FilePickerEvent {
 
   @override
   Future<bool> dispatch(FilePickerEventHandler handler) async {
-    // ignore: deprecated_member_use_from_same_package
     if (await handler.handleFileOpen(_fileInfo, _file)) {
       return true;
     }
@@ -138,7 +137,6 @@ class FilePickerEventOpen extends FilePickerEvent {
   @override
   Future<void> dispose() async {
     if (!noCleanupDeprecatedFileInfo) {
-      // ignore: deprecated_member_use_from_same_package
       await _file.delete();
     }
   }
