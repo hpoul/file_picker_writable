@@ -98,7 +98,7 @@ class FilePickerWritable {
           final result =
               (call.arguments as Map<dynamic, dynamic>).cast<String, String>();
           final fileInfo = _resultToFileInfo(result);
-          final file = File(result['path']!);
+          final file = _resultToFile(result);
           await _filePickerState._fireFileOpenHandlers(fileInfo, file);
           return true;
         } else if (call.method == 'handleUri') {
@@ -180,7 +180,7 @@ class FilePickerWritable {
       return null;
     }
     final fileInfo = _resultToFileInfo(result);
-    final file = File(result['path']!);
+    final file = _resultToFile(result);
     try {
       return await reader(fileInfo, file);
     } finally {
@@ -226,7 +226,7 @@ class FilePickerWritable {
       throw StateError('Error while reading file with identifier $identifier');
     }
     final fileInfo = _resultToFileInfo(result);
-    final file = File(result['path']!);
+    final file = _resultToFile(result);
     try {
       return await reader(fileInfo, file);
     } catch (e, stackTrace) {
@@ -280,6 +280,10 @@ class FilePickerWritable {
       uri: result['uri']!,
       fileName: result['fileName'],
     );
+  }
+
+  File _resultToFile(Map<String, String> result) {
+    return File(result['path']!);
   }
 
   Future<T> _createFileInNewTempDirectory<T>(
