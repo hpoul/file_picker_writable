@@ -181,14 +181,36 @@ public class SwiftFilePickerWritablePlugin: NSObject, FlutterPlugin {
     private func _copyToTempDirectory(url: URL) throws -> URL {
         let tempDir = NSURL.fileURL(withPath: NSTemporaryDirectory(), isDirectory: true)
         let tempFile = tempDir.appendingPathComponent("\(UUID().uuidString)_\(url.lastPathComponent)")
-        // Copy the file.
-        do {
-            try FileManager.default.copyItem(at: url, to: tempFile)
-            return tempFile
-        } catch let error {
-            NSLog("Unable to copy file: \(error)")
-            throw error
+        // Copy the file with coordination to ensure e.g. cloud documents are
+        // downloaded or updated with the latest content
+        var coordError: NSError? = nil
+        var copyError: Error? = nil
+        NSFileCoordinator().coordinate(readingItemAt: url, error: &coordError) { url in
+            do {
+                // This is the best, safest place to do the copy
+                try FileManager.default.copyItem(at: url, to: tempFile)
+            } catch let error {
+                copyError = error
+            }
         }
+        if let coordError = coordError {
+            logDebug("Error coordinating access to \(url): \(coordError)")
+            copyError = nil
+            // Try again without coordination because e.g. if the device is
+            // offline and the content provider is cloud-based then the
+            // coordination will fail but we might still be able to access a
+            // cached copy of the file
+            do {
+                try FileManager.default.copyItem(at: url, to: tempFile)
+            } catch let error {
+                copyError = error
+            }
+        }
+        if let copyError = copyError {
+            NSLog("Unable to copy file: \(copyError)")
+            throw copyError
+        }
+        return tempFile
     }
     
     private func _prepareUrlForReading(url: URL, persistable: Bool) throws -> [String: String] {
