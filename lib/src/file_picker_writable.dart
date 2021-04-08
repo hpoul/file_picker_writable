@@ -290,6 +290,51 @@ class FilePickerWritable {
     }
   }
 
+  /// Get info for the immediate parent directory of [fileIdentifier], making
+  /// use of access permissions to [rootIdentifier] some arbitrary number of
+  /// levels higher in the hierarchy.
+  ///
+  /// [rootIdentifier] should be a [DirectoryInfo.identifier] obtained from
+  /// [pickDirectory]. [fileIdentifier] should be a [FileInfo.identifier].
+  Future<DirectoryInfo> getDirectory({
+    required String rootIdentifier,
+    required String fileIdentifier,
+  }) async {
+    _logger.finest('getDirectory()');
+    final result = await _channel.invokeMapMethod<String, String>(
+        'getDirectory',
+        {'rootIdentifier': rootIdentifier, 'fileIdentifier': fileIdentifier});
+    if (result == null) {
+      throw StateError(
+          'Error while getting directory of $fileIdentifier relative to $rootIdentifier');
+    }
+    return DirectoryInfo.fromJson(result);
+  }
+
+  /// Get info for the entity identified by [relativePath] starting from
+  /// [directoryIdentifier].
+  ///
+  /// [directoryIdentifier] should be a [DirectoryInfo.identifier] obtained from
+  /// [pickDirectory] or [getDirectory].
+  Future<EntityInfo> resolveRelativePath({
+    required String directoryIdentifier,
+    required String relativePath,
+  }) async {
+    _logger.finest('resolveRelativePath()');
+    final result = await _channel.invokeMapMethod<String, String>(
+        'resolveRelativePath', {
+      'directoryIdentifier': directoryIdentifier,
+      'relativePath': relativePath
+    });
+    if (result == null) {
+      throw StateError(
+          'Error while resolving relative path $relativePath from directory $directoryIdentifier');
+    }
+    return result['isDirectory'] == 'true'
+        ? DirectoryInfo.fromJson(result)
+        : FileInfo.fromJson(result);
+  }
+
   /// Writes the file previously picked by the user.
   /// Expects a [FileInfo.identifier] string for [identifier].
   Future<FileInfo> writeFileWithIdentifier(String identifier, File file) async {

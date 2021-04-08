@@ -81,6 +81,22 @@ public class SwiftFilePickerWritablePlugin: NSObject, FlutterPlugin {
                         throw FilePickerError.invalidArguments(message: "Expected 'identifier'")
                 }
                 try readFile(identifier: identifier, result: result)
+            case "getDirectory":
+                guard
+                    let args = call.arguments as? Dictionary<String, Any>,
+                    let rootIdentifier = args["rootIdentifier"] as? String,
+                    let fileIdentifier = args["fileIdentifier"] as? String else {
+                        throw FilePickerError.invalidArguments(message: "Expected 'rootIdentifier' and 'fileIdentifier'")
+                }
+                try getDirectory(rootIdentifier: rootIdentifier, fileIdentifier: fileIdentifier, result: result)
+            case "resolveRelativePath":
+                guard
+                    let args = call.arguments as? Dictionary<String, Any>,
+                    let directoryIdentifier = args["directoryIdentifier"] as? String,
+                    let relativePath = args["relativePath"] as? String else {
+                        throw FilePickerError.invalidArguments(message: "Expected 'directoryIdentifier' and 'relativePath'")
+                }
+                try resolveRelativePath(directoryIdentifier: directoryIdentifier, relativePath: relativePath, result: result)
             case "writeFileWithIdentifier":
                 guard let args = call.arguments as? Dictionary<String, Any>,
                     let identifier = args["identifier"] as? String,
@@ -122,6 +138,48 @@ public class SwiftFilePickerWritablePlugin: NSObject, FlutterPlugin {
         result(_fileInfoResult(tempFile: copiedFile, originalURL: url, bookmark: bookmark))
     }
     
+    func getDirectory(rootIdentifier: String, fileIdentifier: String, result: @escaping FlutterResult) throws {
+        // In principle these URLs could be opaque like on Android, in which
+        // case this analysis would not work. But it seems that URLs even for
+        // cloud-based content providers are always file:// (tested with iCloud
+        // Drive, Google Drive, Dropbox, FileBrowser)
+        guard let rootUrl = restoreUrl(from: rootIdentifier) else {
+            result(FlutterError(code: "InvalidDataError", message: "Unable to decode root bookmark.", details: nil))
+            return
+        }
+        guard let fileUrl = restoreUrl(from: fileIdentifier) else {
+            result(FlutterError(code: "InvalidDataError", message: "Unable to decode file bookmark.", details: nil))
+            return
+        }
+        guard fileUrl.absoluteString.starts(with: rootUrl.absoluteString) else {
+            result(FlutterError(code: "InvalidArguments", message: "The supplied file \(fileUrl) is not a child of \(rootUrl)", details: nil))
+            return
+        }
+        let dirUrl = fileUrl.deletingLastPathComponent()
+        result([
+            "identifier": try dirUrl.bookmarkData().base64EncodedString(),
+            "persistable": "true",
+            "uri": dirUrl.absoluteString,
+            "fileName": dirUrl.lastPathComponent,
+        ])
+    }
+
+    func resolveRelativePath(directoryIdentifier: String, relativePath: String, result: @escaping FlutterResult) throws {
+        guard let url = restoreUrl(from: directoryIdentifier) else {
+            result(FlutterError(code: "InvalidDataError", message: "Unable to restore URL from identifier.", details: nil))
+            return
+        }
+        let childUrl = url.appendingPathComponent(relativePath).standardized
+        logDebug("Resolved to \(childUrl)")
+        result([
+            "identifier": try childUrl.bookmarkData().base64EncodedString(),
+            "persistable": "true",
+            "uri": childUrl.absoluteString,
+            "fileName": childUrl.lastPathComponent,
+            "isDirectory": "\(isDirectory(childUrl))",
+        ])
+    }
+
     func writeFile(identifier: String, path: String, result: @escaping FlutterResult) throws {
         guard let bookmark = Data(base64Encoded: identifier) else {
             throw FilePickerError.invalidArguments(message: "Unable to decode bookmark/identifier.")
@@ -344,6 +402,17 @@ extension SwiftFilePickerWritablePlugin : UIDocumentPickerDelegate {
         }
     }
 
+    private func restoreUrl(from identifier: String) -> URL? {
+        guard let bookmark = Data(base64Encoded: identifier) else {
+            return nil
+        }
+        var isStale: Bool = false
+        guard let url = try? URL(resolvingBookmarkData: bookmark, bookmarkDataIsStale: &isStale) else {
+            return nil
+        }
+        logDebug("url: \(url) / isStale: \(isStale)");
+        return url
+    }
 }
 
 // application delegate methods..

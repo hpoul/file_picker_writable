@@ -261,6 +261,70 @@ class FilePickerWritableImpl(
     copyContentUriAndReturn(result, Uri.parse(identifier))
   }
 
+  @RequiresApi(Build.VERSION_CODES.LOLLIPOP)
+  @MainThread
+  suspend fun getDirectory(
+    result: MethodChannel.Result,
+    rootUri: String,
+    fileUri: String
+  ) {
+    val activity = requireActivity()
+
+    val root = Uri.parse(rootUri)
+    val leaf = Uri.parse(fileUri)
+    val leafUnderRoot = DocumentsContract.buildDocumentUriUsingTree(
+      root,
+      DocumentsContract.getDocumentId(leaf)
+    )
+
+    if (!fileExists(leafUnderRoot, activity.applicationContext.contentResolver)) {
+      result.error(
+        "InvalidArguments",
+        "The supplied fileUri $fileUri is not a child of $rootUri",
+        null
+      )
+      return
+    }
+
+    val ret = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+      getParent(leafUnderRoot, activity.applicationContext)
+    } else {
+      null
+    } ?: findParent(root, leaf, activity.applicationContext)
+
+
+    result.success(mapOf(
+      "identifier" to ret.toString(),
+      "persistable" to "true",
+      "uri" to ret.toString()
+    ))
+  }
+
+  @RequiresApi(Build.VERSION_CODES.LOLLIPOP)
+  @MainThread
+  suspend fun resolveRelativePath(
+    result: MethodChannel.Result,
+    parentIdentifier: String,
+    relativePath: String
+  ) {
+    val activity = requireActivity()
+
+    val resolvedUri = resolveRelativePath(Uri.parse(parentIdentifier), relativePath, activity.applicationContext)
+    if (resolvedUri != null) {
+      val displayName = getDisplayName(resolvedUri, activity.applicationContext.contentResolver)
+      val isDirectory = isDirectory(resolvedUri, activity.applicationContext.contentResolver)
+      result.success(mapOf(
+        "identifier" to resolvedUri.toString(),
+        "persistable" to "true",
+        "fileName" to displayName,
+        "uri" to resolvedUri.toString(),
+        "isDirectory" to isDirectory.toString()
+      ))
+    } else {
+      result.error("FileNotFound", "$relativePath could not be located relative to $parentIdentifier", null)
+    }
+  }
+
   @MainThread
   private suspend fun copyContentUriAndReturn(
     result: MethodChannel.Result,

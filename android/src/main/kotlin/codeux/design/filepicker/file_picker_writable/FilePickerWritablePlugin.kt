@@ -128,6 +128,28 @@ class FilePickerWritablePlugin : FlutterPlugin, MethodCallHandler,
               ?: throw FilePickerException("Expected argument 'identifier'")
             impl.readFileWithIdentifier(result, identifier)
           }
+          "getDirectory" -> {
+            val rootIdentifier = call.argument<String>("rootIdentifier")
+              ?: throw FilePickerException("Expected argument 'rootIdentifier'")
+            val fileIdentifier = call.argument<String>("fileIdentifier")
+              ?: throw FilePickerException("Expected argument 'fileIdentifier'")
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
+              impl.getDirectory(result, rootIdentifier, fileIdentifier)
+            } else {
+              throw FilePickerException("${call.method} is not supported on Android ${Build.VERSION.RELEASE}")
+            }
+          }
+          "resolveRelativePath" -> {
+            val directoryIdentifier = call.argument<String>("directoryIdentifier")
+              ?: throw FilePickerException("Expected argument 'directoryIdentifier'")
+            val relativePath = call.argument<String>("relativePath")
+              ?: throw FilePickerException("Expected argument 'relativePath'")
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
+              impl.resolveRelativePath(result, directoryIdentifier, relativePath)
+            } else {
+              throw FilePickerException("${call.method} is not supported on Android ${Build.VERSION.RELEASE}")
+            }
+          }
           "writeFileWithIdentifier" -> {
             val identifier = call.argument<String>("identifier")
               ?: throw FilePickerException("Expected argument 'identifier'")
