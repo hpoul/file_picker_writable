@@ -247,6 +247,24 @@ class FilePickerWritable {
     });
   }
 
+  /// Shows a directory picker so the user can select a directory.
+  ///
+  /// [initialDirUri] is the URI indicating where the picker should start by
+  /// default. This is only honored on a best-effort basis and even then is not
+  /// supported on all systems. It can be a [FileInfo.uri] or a
+  /// [DirectoryInfo.uri].
+  Future<DirectoryInfo?> openDirectory({String? initialDirUri}) async {
+    _logger.finest('openDirectoryPicker()');
+    final result = await _channel.invokeMapMethod<String, String>(
+        'openDirectoryPicker', {'initialDirUri': initialDirUri});
+    if (result == null) {
+      // User cancelled.
+      _logger.finer('User cancelled directory picker.');
+      return null;
+    }
+    return DirectoryInfo.fromJson(result);
+  }
+
   /// Reads the file previously picked by the user.
   /// Expects a [FileInfo.identifier] string for [identifier].
   ///

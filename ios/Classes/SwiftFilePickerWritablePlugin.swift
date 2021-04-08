@@ -69,6 +69,11 @@ public class SwiftFilePickerWritablePlugin: NSObject, FlutterPlugin {
                         throw FilePickerError.invalidArguments(message: "Expected 'args'")
                 }
                 openFilePickerForCreate(path: path, result: result)
+            case "openDirectoryPicker":
+                guard let args = call.arguments as? Dictionary<String, Any> else {
+                    throw FilePickerError.invalidArguments(message: "Expected 'args'")
+                }
+                openDirectoryPicker(result: result, initialDirUrl: args["initialDirUri"] as? String)
             case "readFileWithIdentifier":
                 guard
                     let args = call.arguments as? Dictionary<String, Any>,
@@ -181,6 +186,24 @@ public class SwiftFilePickerWritablePlugin: NSObject, FlutterPlugin {
         _viewController.present(ctrl, animated: true, completion: nil)
     }
 
+    func openDirectoryPicker(result: @escaping FlutterResult, initialDirUrl: String?) {
+        if (_filePickerResult != nil) {
+            result(FlutterError(code: "DuplicatedCall", message: "Only one file open call at a time.", details: nil))
+            return
+        }
+        _filePickerResult = result
+        _filePickerPath = nil
+        let ctrl = UIDocumentPickerViewController(documentTypes: [kUTTypeFolder as String], in: .open)
+        ctrl.delegate = self
+        if #available(iOS 13.0, *) {
+            if let initialDirUrl = initialDirUrl {
+                ctrl.directoryURL = URL(string: initialDirUrl)
+            }
+        }
+        ctrl.modalPresentationStyle = .currentContext
+        _viewController.present(ctrl, animated: true, completion: nil)
+    }
+
     private func _copyToTempDirectory(url: URL) throws -> URL {
         let tempDir = NSURL.fileURL(withPath: NSTemporaryDirectory(), isDirectory: true)
         let tempFile = tempDir.appendingPathComponent("\(UUID().uuidString)_\(url.lastPathComponent)")
@@ -231,6 +254,25 @@ public class SwiftFilePickerWritablePlugin: NSObject, FlutterPlugin {
         return _fileInfoResult(tempFile: tempFile, originalURL: url, bookmark: bookmark, persistable: persistable)
     }
     
+    private func _prepareDirUrlForReading(url: URL) throws -> [String:String] {
+        let securityScope = url.startAccessingSecurityScopedResource()
+        defer {
+            if securityScope {
+                url.stopAccessingSecurityScopedResource()
+            }
+        }
+        if !securityScope {
+            logDebug("Warning: startAccessingSecurityScopedResource is false for \(url)")
+        }
+        let bookmark = try url.bookmarkData()
+        return [
+            "identifier": bookmark.base64EncodedString(),
+            "persistable": "true",
+            "uri": url.absoluteString,
+            "fileName": url.lastPathComponent,
+        ]
+    }
+
     private func _fileInfoResult(tempFile: URL, originalURL: URL, bookmark: Data, persistable: Bool = true) -> [String: String] {
         let identifier = bookmark.base64EncodedString()
         return [
@@ -275,7 +317,11 @@ extension SwiftFilePickerWritablePlugin : UIDocumentPickerDelegate {
                 _sendFilePickerResult(_fileInfoResult(tempFile: tempFile, originalURL: targetFile, bookmark: bookmark))
                 return
             }
-            _sendFilePickerResult(try _prepareUrlForReading(url: url, persistable: true))
+            if isDirectory(url) {
+                _sendFilePickerResult(try _prepareDirUrlForReading(url: url))
+            } else {
+                _sendFilePickerResult(try _prepareUrlForReading(url: url, persistable: true))
+            }
         } catch {
             _sendFilePickerResult(FlutterError(code: "ErrorProcessingResult", message: "Error handling result url \(url): \(error)", details: nil))
             return
@@ -287,6 +333,17 @@ extension SwiftFilePickerWritablePlugin : UIDocumentPickerDelegate {
         _sendFilePickerResult(nil)
     }
     
+    private func isDirectory(_ url: URL) -> Bool {
+        if #available(iOS 9.0, *) {
+            return url.hasDirectoryPath
+        } else if let resVals = try? url.resourceValues(forKeys: [.isDirectoryKey]),
+                  let isDir = resVals.isDirectory {
+            return isDir
+        } else {
+            return false
+        }
+    }
+
 }
 
 // application delegate methods..

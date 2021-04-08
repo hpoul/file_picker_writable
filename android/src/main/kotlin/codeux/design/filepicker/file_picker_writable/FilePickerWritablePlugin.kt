@@ -2,8 +2,7 @@ package codeux.design.filepicker.file_picker_writable
 
 import android.app.Activity
 import android.net.Uri
-import android.os.Handler
-import android.os.Looper
+import android.os.Build
 import android.util.Log
 import androidx.annotation.MainThread
 import androidx.annotation.NonNull
@@ -115,6 +114,14 @@ class FilePickerWritablePlugin : FlutterPlugin, MethodCallHandler,
             val path = call.argument<String>("path")
               ?: throw FilePickerException("Expected argument 'path'")
             impl.openFilePickerForCreate(result, path)
+          }
+          "openDirectoryPicker" -> {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
+              val initialDirUri = call.argument<String>("initialDirUri")
+              impl.openDirectoryPicker(result, initialDirUri)
+            } else {
+              throw FilePickerException("${call.method} is not supported on Android ${Build.VERSION.RELEASE}")
+            }
           }
           "readFileWithIdentifier" -> {
             val identifier = call.argument<String>("identifier")

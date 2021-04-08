@@ -7,7 +7,9 @@ import android.content.ContentResolver
 import android.content.Intent
 import android.net.Uri
 import android.os.Build
+import android.provider.DocumentsContract
 import androidx.annotation.MainThread
+import androidx.annotation.RequiresApi
 import io.flutter.embedding.engine.plugins.activity.ActivityPluginBinding
 import io.flutter.plugin.common.MethodChannel
 import io.flutter.plugin.common.PluginRegistry
@@ -33,6 +35,7 @@ class FilePickerWritableImpl(
   companion object {
     const val REQUEST_CODE_OPEN_FILE = 40832
     const val REQUEST_CODE_CREATE_FILE = 40833
+    const val REQUEST_CODE_OPEN_DIRECTORY = 40834
   }
 
   private var filePickerCreateFile: File? = null
@@ -61,6 +64,42 @@ class FilePickerWritableImpl(
       result.error(
         "FilePickerNotAvailable",
         "Unable to start file picker, $e",
+        null
+      )
+    }
+  }
+
+  @RequiresApi(Build.VERSION_CODES.LOLLIPOP)
+  @MainThread
+  fun openDirectoryPicker(result: MethodChannel.Result, initialDirUri: String?) {
+    if (filePickerResult != null) {
+      throw FilePickerException("Invalid lifecycle, only one call at a time.")
+    }
+    filePickerResult = result
+    val intent = Intent(Intent.ACTION_OPEN_DOCUMENT_TREE).apply {
+      if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+        if (initialDirUri != null) {
+          val parsedUri = Uri.parse(initialDirUri).let {
+            val context = requireActivity().applicationContext
+            if (DocumentsContract.isDocumentUri(context, it)) {
+              it
+            } else {
+              DocumentsContract.buildDocumentUriUsingTree(it, DocumentsContract.getTreeDocumentId(it))
+            }
+          }
+          putExtra(DocumentsContract.EXTRA_INITIAL_URI, parsedUri)
+        }
+      }
+    }
+    val activity = requireActivity()
+    try {
+      activity.startActivityForResult(intent, REQUEST_CODE_OPEN_DIRECTORY)
+    } catch (e: ActivityNotFoundException) {
+      filePickerResult = null
+      plugin.logDebug("exception while launching directory picker", e)
+      result.error(
+        "DirectoryPickerNotAvailable",
+        "Unable to start directory picker, $e",
         null
       )
     }
@@ -99,7 +138,7 @@ class FilePickerWritableImpl(
     resultCode: Int,
     data: Intent?
   ): Boolean {
-    if (!arrayOf(REQUEST_CODE_OPEN_FILE, REQUEST_CODE_CREATE_FILE).contains(
+    if (!arrayOf(REQUEST_CODE_OPEN_FILE, REQUEST_CODE_CREATE_FILE, REQUEST_CODE_OPEN_DIRECTORY).contains(
         requestCode
       )) {
       plugin.logDebug("Unknown requestCode $requestCode - ignore")
@@ -150,6 +189,19 @@ class FilePickerWritableImpl(
               initialFileContent
             )
           }
+          REQUEST_CODE_OPEN_DIRECTORY -> {
+            val directoryUri = data?.data
+            if (Build.VERSION.SDK_INT < Build.VERSION_CODES.LOLLIPOP) {
+              throw FilePickerException("illegal state - get a directory response on an unsupported OS version")
+            }
+            if (directoryUri != null) {
+              plugin.logDebug("Got result $directoryUri")
+              handleDirectoryUriResponse(result, directoryUri)
+            } else {
+              plugin.logDebug("Got RESULT_OK with null directoryUri?")
+              result.success(null)
+            }
+          }
           else -> {
             // can never happen, we already checked the result code.
             throw IllegalStateException("Unexpected requestCode $requestCode")
@@ -188,6 +240,17 @@ class FilePickerWritableImpl(
     fileUri: Uri
   ) {
     copyContentUriAndReturn(result, fileUri)
+  }
+
+  @RequiresApi(Build.VERSION_CODES.LOLLIPOP)
+  @MainThread
+  private suspend fun handleDirectoryUriResponse(
+    result: MethodChannel.Result,
+    directoryUri: Uri
+  ) {
+    result.success(
+      getDirectoryInfo(directoryUri)
+    )
   }
 
   @MainThread
@@ -248,6 +311,37 @@ class FilePickerWritableImpl(
         "persistable" to persistable.toString(),
         "fileName" to fileName,
         "uri" to fileUri.toString()
+      )
+    }
+  }
+
+  @RequiresApi(Build.VERSION_CODES.LOLLIPOP)
+  @MainThread
+  private suspend fun getDirectoryInfo(directoryUri: Uri): Map<String, String> {
+    val activity = requireActivity()
+
+    val contentResolver = activity.applicationContext.contentResolver
+
+    return withContext(Dispatchers.IO) {
+      var persistable = false
+      try {
+        val takeFlags: Int = Intent.FLAG_GRANT_READ_URI_PERMISSION or
+          Intent.FLAG_GRANT_WRITE_URI_PERMISSION
+        contentResolver.takePersistableUriPermission(directoryUri, takeFlags)
+        persistable = true
+      } catch (e: SecurityException) {
+        plugin.logDebug("Couldn't take persistable URI permission on $directoryUri", e)
+      }
+      // URI as returned from picker is just a tree URI, but we need a document URI for getting the display name
+      val treeDocUri = DocumentsContract.buildDocumentUriUsingTree(
+        directoryUri,
+        DocumentsContract.getTreeDocumentId(directoryUri)
+      )
+      mapOf(
+        "identifier" to directoryUri.toString(),
+        "persistable" to persistable.toString(),
+        "uri" to directoryUri.toString(),
+        "fileName" to getDisplayName(treeDocUri, contentResolver)
       )
     }
   }
