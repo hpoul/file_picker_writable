@@ -59,7 +59,7 @@ class FilePickerWritableImpl(
       activity.startActivityForResult(intent, REQUEST_CODE_OPEN_FILE)
     } catch (e: ActivityNotFoundException) {
       filePickerResult = null
-      plugin.logDebug("exception while launcing file picker", e)
+      plugin.logDebug("exception while launching file picker", e)
       result.error(
         "FilePickerNotAvailable",
         "Unable to start file picker, $e",
