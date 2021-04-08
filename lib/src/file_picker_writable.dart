@@ -132,7 +132,7 @@ class FilePickerWritable {
         if (call.method == 'openFile') {
           final result =
               (call.arguments as Map<dynamic, dynamic>).cast<String, String>();
-          final fileInfo = _resultToFileInfo(result);
+          final fileInfo = FileInfo.fromJson(result);
           final file = _resultToFile(result);
           await _filePickerState._fireFileOpenHandlers(fileInfo, file);
           return true;
@@ -186,7 +186,7 @@ class FilePickerWritable {
       _logger.finer('User cancelled file picker.');
       return null;
     }
-    return _resultToFileInfo(result);
+    return FileInfo.fromJson(result);
   }
 
   /// Use [openFileForCreate] instead.
@@ -200,7 +200,7 @@ class FilePickerWritable {
       _logger.finer('User cancelled file picker.');
       return null;
     }
-    return _resultToFileInfo(result);
+    return FileInfo.fromJson(result);
   }
 
   /// Shows a file picker so the user can select a file and calls [reader]
@@ -214,7 +214,7 @@ class FilePickerWritable {
       _logger.finer('User cancelled file picker.');
       return null;
     }
-    final fileInfo = _resultToFileInfo(result);
+    final fileInfo = FileInfo.fromJson(result);
     final file = _resultToFile(result);
     try {
       return await reader(fileInfo, file);
@@ -243,7 +243,7 @@ class FilePickerWritable {
         _logger.finer('User cancelled file picker.');
         return null;
       }
-      return _resultToFileInfo(result);
+      return FileInfo.fromJson(result);
     });
   }
 
@@ -260,7 +260,7 @@ class FilePickerWritable {
     if (result == null) {
       throw StateError('Error while reading file with identifier $identifier');
     }
-    final fileInfo = _resultToFileInfo(result);
+    final fileInfo = FileInfo.fromJson(result);
     final file = _resultToFile(result);
     try {
       return await reader(fileInfo, file);
@@ -284,7 +284,7 @@ class FilePickerWritable {
     if (result == null) {
       throw StateError('Got null response for writeFileWithIdentifier');
     }
-    return _resultToFileInfo(result);
+    return FileInfo.fromJson(result);
   }
 
   /// Writes data to a file previously picked by the user.
@@ -308,7 +308,7 @@ class FilePickerWritable {
       });
       return result!;
     });
-    return _resultToFileInfo(result);
+    return FileInfo.fromJson(result);
   }
 
   /// Dispose of a persistable identifier, removing it from your app's list of
@@ -333,15 +333,6 @@ class FilePickerWritable {
   Future<void> disposeAllIdentifiers() async {
     _logger.finest('disposeAllIdentifiers()');
     return _channel.invokeMethod<void>('disposeAllIdentifiers');
-  }
-
-  FileInfo _resultToFileInfo(Map<String, String> result) {
-    return FileInfo(
-      identifier: result['identifier']!,
-      persistable: result['persistable'] == 'true',
-      uri: result['uri']!,
-      fileName: result['fileName'],
-    );
   }
 
   File _resultToFile(Map<String, String> result) {
