@@ -313,6 +313,14 @@ class FilePickerWritableImpl(
     copyContentUriAndReturn(result, fileUri)
   }
 
+  fun disposeIdentifier(identifier: String) {
+    val activity = requireActivity()
+    val contentResolver = activity.applicationContext.contentResolver
+    val takeFlags: Int = Intent.FLAG_GRANT_READ_URI_PERMISSION or
+      Intent.FLAG_GRANT_WRITE_URI_PERMISSION
+    contentResolver.releasePersistableUriPermission(Uri.parse(identifier), takeFlags)
+  }
+
   private fun requireActivity() = (plugin.activity
     ?: throw FilePickerException("Illegal state, expected activity to be there."))
 

@@ -83,6 +83,9 @@ public class SwiftFilePickerWritablePlugin: NSObject, FlutterPlugin {
                         throw FilePickerError.invalidArguments(message: "Expected 'identifier' and 'path' arguments.")
                 }
                 try writeFile(identifier: identifier, path: path, result: result)
+            case "disposeIdentifier":
+                // iOS doesn't have a concept of disposing identifiers (bookmarks)
+                result(nil)
             default:
                 result(FlutterMethodNotImplemented)
             }

@@ -128,6 +128,12 @@ class FilePickerWritablePlugin : FlutterPlugin, MethodCallHandler,
               ?: throw FilePickerException("Expected argument 'path'")
             impl.writeFileWithIdentifier(result, identifier, File(path))
           }
+          "disposeIdentifier" -> {
+            val identifier = call.argument<String>("identifier")
+              ?: throw FilePickerException("Expected argument 'identifier'")
+            impl.disposeIdentifier(identifier)
+            result.success(null)
+          }
           else -> {
             result.notImplemented()
           }

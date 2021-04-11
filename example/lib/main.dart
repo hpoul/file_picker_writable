@@ -266,6 +266,8 @@ class FileInfoDisplay extends StatelessWidget {
                   ),
                   IconButton(
                     onPressed: () async {
+                      await FilePickerWritable()
+                          .disposeIdentifier(fileInfo.identifier);
                       final appData = await appDataBloc.store.load();
                       await appDataBloc.store.save(appData.copyWith(
                           files: appData.files
