@@ -69,6 +69,8 @@ public class SwiftFilePickerWritablePlugin: NSObject, FlutterPlugin {
                         throw FilePickerError.invalidArguments(message: "Expected 'args'")
                 }
                 openFilePickerForCreate(path: path, result: result)
+            case "isDirectoryAccessSupported":
+                result(true)
             case "openDirectoryPicker":
                 guard let args = call.arguments as? Dictionary<String, Any> else {
                     throw FilePickerError.invalidArguments(message: "Expected 'args'")

@@ -247,12 +247,28 @@ class FilePickerWritable {
     });
   }
 
+  /// See if the the directory picker and directory tree access is supported on
+  /// the current platform. If this returns `false` then [openDirectory],
+  /// [getDirectory], and [resolveRelativePath] will fail with an exception.
+  Future<bool> isDirectoryAccessSupported() async {
+    _logger.finest('isDirectoryAccessSupported()');
+    final result =
+        await _channel.invokeMethod<bool>('isDirectoryAccessSupported');
+    if (result == null) {
+      throw StateError('Error while checking if directory access is supported');
+    }
+    return result;
+  }
+
   /// Shows a directory picker so the user can select a directory.
   ///
   /// [initialDirUri] is the URI indicating where the picker should start by
   /// default. This is only honored on a best-effort basis and even then is not
   /// supported on all systems. It can be a [FileInfo.uri] or a
   /// [DirectoryInfo.uri].
+  ///
+  /// An exception will be thrown if invoked on a system that does not support
+  /// directory access, i.e. if [isDirectoryAccessSupported] returns `false`.
   Future<DirectoryInfo?> openDirectory({String? initialDirUri}) async {
     _logger.finest('openDirectoryPicker()');
     final result = await _channel.invokeMapMethod<String, String>(
@@ -296,6 +312,9 @@ class FilePickerWritable {
   ///
   /// [rootIdentifier] should be a [DirectoryInfo.identifier] obtained from
   /// [pickDirectory]. [fileIdentifier] should be a [FileInfo.identifier].
+  ///
+  /// An exception will be thrown if invoked on a system that does not support
+  /// directory access, i.e. if [isDirectoryAccessSupported] returns `false`.
   Future<DirectoryInfo> getDirectory({
     required String rootIdentifier,
     required String fileIdentifier,
@@ -316,6 +335,9 @@ class FilePickerWritable {
   ///
   /// [directoryIdentifier] should be a [DirectoryInfo.identifier] obtained from
   /// [pickDirectory] or [getDirectory].
+  ///
+  /// An exception will be thrown if invoked on a system that does not support
+  /// directory access, i.e. if [isDirectoryAccessSupported] returns `false`.
   Future<EntityInfo> resolveRelativePath({
     required String directoryIdentifier,
     required String relativePath,

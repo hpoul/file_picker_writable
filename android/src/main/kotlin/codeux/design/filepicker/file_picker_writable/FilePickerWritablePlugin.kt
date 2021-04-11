@@ -115,6 +115,9 @@ class FilePickerWritablePlugin : FlutterPlugin, MethodCallHandler,
               ?: throw FilePickerException("Expected argument 'path'")
             impl.openFilePickerForCreate(result, path)
           }
+          "isDirectoryAccessSupported" -> {
+            result.success(Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP)
+          }
           "openDirectoryPicker" -> {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
               val initialDirUri = call.argument<String>("initialDirUri")
