@@ -273,6 +273,18 @@ class FilePickerWritable {
     return _resultToFileInfo(result);
   }
 
+  /// Dispose of a persistable identifier, removing it from your app's list of
+  /// accessible files. Afterwards, you will need the user to re-pick the file
+  /// in order to access it again.
+  ///
+  /// Some platforms (Android) limit how many identifiers your app can persist
+  /// at once. Use this method to remove identifiers you no longer need.
+  Future<void> disposeIdentifier(String identifier) async {
+    _logger.finest('disposeIdentifier()');
+    return _channel
+        .invokeMethod<void>('disposeIdentifier', {'identifier': identifier});
+  }
+
   FileInfo _resultToFileInfo(Map<String, String> result) {
     return FileInfo(
       identifier: result['identifier']!,
