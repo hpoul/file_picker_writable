@@ -321,6 +321,17 @@ class FilePickerWritableImpl(
     contentResolver.releasePersistableUriPermission(Uri.parse(identifier), takeFlags)
   }
 
+  fun disposeAllIdentifiers() {
+    val activity = requireActivity()
+    val contentResolver = activity.applicationContext.contentResolver
+    val takeFlags: Int = Intent.FLAG_GRANT_READ_URI_PERMISSION or
+      Intent.FLAG_GRANT_WRITE_URI_PERMISSION
+    for (permission in contentResolver.persistedUriPermissions) {
+      plugin.logDebug("Releasing identifier: $permission")
+      contentResolver.releasePersistableUriPermission(permission.uri, takeFlags)
+    }
+  }
+
   private fun requireActivity() = (plugin.activity
     ?: throw FilePickerException("Illegal state, expected activity to be there."))
 
