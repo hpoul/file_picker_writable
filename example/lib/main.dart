@@ -22,26 +22,41 @@ Future<void> main() async {
 class AppDataBloc {
   final store = SimpleJsonPersistence.getForTypeWithDefault(
     (json) => AppData.fromJson(json),
-    defaultCreator: () => AppData(files: []),
+    defaultCreator: () => AppData(files: [], directories: []),
   );
 }
 
 class AppData implements HasToJson {
-  AppData({required this.files});
+  AppData({required this.files, required this.directories});
   final List<FileInfo> files;
+  final List<DirectoryInfo> directories;
 
   static AppData fromJson(Map<String, dynamic> json) => AppData(
-      files: (json['files'] as List<dynamic>)
-          .where((dynamic element) => element != null)
-          .map((dynamic e) => FileInfo.fromJson(e as Map<String, dynamic>))
-          .toList());
+        files: (json['files'] as List<dynamic>? ?? <dynamic>[])
+            .where((dynamic element) => element != null)
+            .map((dynamic e) => FileInfo.fromJson(e as Map<String, dynamic>))
+            .toList(),
+        directories: (json['directories'] as List<dynamic>? ?? <dynamic>[])
+            .where((dynamic element) => element != null)
+            .map((dynamic e) =>
+                DirectoryInfo.fromJson(e as Map<String, dynamic>))
+            .toList(),
+      );
 
   @override
   Map<String, dynamic> toJson() => <String, dynamic>{
         'files': files,
+        'directories': directories,
       };
 
-  AppData copyWith({required List<FileInfo> files}) => AppData(files: files);
+  AppData copyWith({
+    List<FileInfo>? files,
+    List<DirectoryInfo>? directories,
+  }) =>
+      AppData(
+        files: files ?? this.files,
+        directories: directories ?? this.directories,
+      );
 }
 
 class MyApp extends StatefulWidget {
@@ -127,9 +142,7 @@ class _MainScreenState extends State<MainScreen> {
               mainAxisAlignment: MainAxisAlignment.center,
               crossAxisAlignment: CrossAxisAlignment.center,
               children: <Widget>[
-                Row(
-                  mainAxisAlignment: MainAxisAlignment.center,
-                  mainAxisSize: MainAxisSize.max,
+                Wrap(
                   children: <Widget>[
                     ElevatedButton(
                       child: const Text('Open File Picker'),
@@ -140,14 +153,25 @@ class _MainScreenState extends State<MainScreen> {
                       child: const Text('Create New File'),
                       onPressed: _openFilePickerForCreate,
                     ),
+                    const SizedBox(width: 32),
+                    ElevatedButton(
+                      child: const Text('Open Directory Picker'),
+                      onPressed: _openDirectoryPicker,
+                    ),
                   ],
                 ),
-                ...?(!snapshot.hasData
-                    ? null
-                    : snapshot.data!.files.map((fileInfo) => FileInfoDisplay(
-                          fileInfo: fileInfo,
-                          appDataBloc: _appDataBloc,
-                        ))),
+                if (snapshot.hasData)
+                  for (final fileInfo in snapshot.data!.files)
+                    EntityInfoDisplay(
+                      entityInfo: fileInfo,
+                      appDataBloc: _appDataBloc,
+                    ),
+                if (snapshot.hasData)
+                  for (final directoryInfo in snapshot.data!.directories)
+                    EntityInfoDisplay(
+                      entityInfo: directoryInfo,
+                      appDataBloc: _appDataBloc,
+                    ),
               ],
             ),
           ),
@@ -187,17 +211,29 @@ class _MainScreenState extends State<MainScreen> {
     await _appDataBloc.store
         .save(data.copyWith(files: data.files + [fileInfo]));
   }
+
+  Future<void> _openDirectoryPicker() async {
+    final directoryInfo = await FilePickerWritable().openDirectory();
+    if (directoryInfo == null) {
+      _logger.fine('User cancelled.');
+    } else {
+      _logger.fine('Got picker result: $directoryInfo');
+      final data = await _appDataBloc.store.load();
+      await _appDataBloc.store
+          .save(data.copyWith(directories: data.directories + [directoryInfo]));
+    }
+  }
 }
 
-class FileInfoDisplay extends StatelessWidget {
-  const FileInfoDisplay({
+class EntityInfoDisplay extends StatelessWidget {
+  const EntityInfoDisplay({
     Key? key,
-    required this.fileInfo,
+    required this.entityInfo,
     required this.appDataBloc,
   }) : super(key: key);
 
   final AppDataBloc appDataBloc;
-  final FileInfo fileInfo;
+  final EntityInfo entityInfo;
 
   @override
   Widget build(BuildContext context) {
@@ -210,26 +246,28 @@ class FileInfoDisplay extends StatelessWidget {
           padding: const EdgeInsets.all(16.0),
           child: Column(
             children: <Widget>[
-              const Text('Selected File:'),
+              if (entityInfo is FileInfo) const Text('Selected File:'),
+              if (entityInfo is DirectoryInfo)
+                const Text('Selected Directory:'),
               Text(
-                fileInfo.fileName ?? 'null',
+                entityInfo.fileName ?? 'null',
                 maxLines: 4,
                 overflow: TextOverflow.ellipsis,
                 style: theme.textTheme.caption!.apply(fontSizeFactor: 0.75),
               ),
               Text(
-                fileInfo.identifier,
+                entityInfo.identifier,
                 maxLines: 1,
                 overflow: TextOverflow.ellipsis,
               ),
               Text(
-                'uri:${fileInfo.uri}',
+                'uri:${entityInfo.uri}',
                 style: theme.textTheme.bodyText2!
                     .apply(fontSizeFactor: 0.7)
                     .copyWith(fontWeight: FontWeight.bold),
               ),
               Text(
-                'fileName: ${fileInfo.fileName}',
+                'fileName: ${entityInfo.fileName}',
                 style: theme.textTheme.bodyText2!
                     .apply(fontSizeFactor: 0.7)
                     .copyWith(fontWeight: FontWeight.bold),
@@ -237,42 +275,62 @@ class FileInfoDisplay extends StatelessWidget {
               ButtonBar(
                 alignment: MainAxisAlignment.end,
                 children: <Widget>[
-                  TextButton(
-                    onPressed: () async {
-                      await FilePickerWritable().readFile(
-                          identifier: fileInfo.identifier,
-                          reader: (fileInfo, file) async {
-                            await SimpleAlertDialog
-                                .readFileContentsAndShowDialog(
-                                    fileInfo, file, context);
-                          });
-                    },
-                    child: const Text('Read'),
-                  ),
-                  TextButton(
-                    onPressed: () async {
-                      await FilePickerWritable().writeFile(
-                          identifier: fileInfo.identifier,
-                          writer: (file) async {
-                            final content =
-                                'New Content written at ${DateTime.now()}.\n\n';
-                            await file.writeAsString(content);
-                            await SimpleAlertDialog(
-                              bodyText: 'Written: $content',
-                            ).show(context);
-                          });
-                    },
-                    child: const Text('Overwrite'),
-                  ),
+                  if (entityInfo is FileInfo) ...[
+                    TextButton(
+                      onPressed: () async {
+                        await FilePickerWritable().readFile(
+                            identifier: entityInfo.identifier,
+                            reader: (fileInfo, file) async {
+                              await SimpleAlertDialog
+                                  .readFileContentsAndShowDialog(
+                                      fileInfo, file, context);
+                            });
+                      },
+                      child: const Text('Read'),
+                    ),
+                    TextButton(
+                      onPressed: () async {
+                        await FilePickerWritable().writeFile(
+                            identifier: entityInfo.identifier,
+                            writer: (file) async {
+                              final content =
+                                  'New Content written at ${DateTime.now()}.\n\n';
+                              await file.writeAsString(content);
+                              await SimpleAlertDialog(
+                                bodyText: 'Written: $content',
+                              ).show(context);
+                            });
+                      },
+                      child: const Text('Overwrite'),
+                    ),
+                    TextButton(
+                      onPressed: () async {
+                        final directoryInfo = await FilePickerWritable()
+                            .openDirectory(initialDirUri: entityInfo.uri);
+                        if (directoryInfo != null) {
+                          final data = await appDataBloc.store.load();
+                          await appDataBloc.store.save(data.copyWith(
+                              directories: data.directories + [directoryInfo]));
+                        }
+                      },
+                      child: const Text('Pick dir'),
+                    ),
+                  ],
                   IconButton(
                     onPressed: () async {
                       await FilePickerWritable()
-                          .disposeIdentifier(fileInfo.identifier);
+                          .disposeIdentifier(entityInfo.identifier);
                       final appData = await appDataBloc.store.load();
-                      await appDataBloc.store.save(appData.copyWith(
+                      await appDataBloc.store.save(
+                        appData.copyWith(
                           files: appData.files
-                              .where((element) => element != fileInfo)
-                              .toList()));
+                              .where((element) => element != entityInfo)
+                              .toList(),
+                          directories: appData.directories
+                              .where((element) => element != entityInfo)
+                              .toList(),
+                        ),
+                      );
                     },
                     icon: const Icon(Icons.remove_circle_outline),
                   ),
