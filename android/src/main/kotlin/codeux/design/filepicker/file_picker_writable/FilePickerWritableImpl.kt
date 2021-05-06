@@ -79,15 +79,22 @@ class FilePickerWritableImpl(
     val intent = Intent(Intent.ACTION_OPEN_DOCUMENT_TREE).apply {
       if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
         if (initialDirUri != null) {
-          val parsedUri = Uri.parse(initialDirUri).let {
-            val context = requireActivity().applicationContext
-            if (DocumentsContract.isDocumentUri(context, it)) {
-              it
-            } else {
-              DocumentsContract.buildDocumentUriUsingTree(it, DocumentsContract.getTreeDocumentId(it))
+          try {
+            val parsedUri = Uri.parse(initialDirUri).let {
+              val context = requireActivity().applicationContext
+              if (DocumentsContract.isDocumentUri(context, it)) {
+                it
+              } else {
+                DocumentsContract.buildDocumentUriUsingTree(
+                  it,
+                  DocumentsContract.getTreeDocumentId(it)
+                )
+              }
             }
+            putExtra(DocumentsContract.EXTRA_INITIAL_URI, parsedUri)
+          } catch (e: Exception) {
+            plugin.logDebug("exception while preparing document picker initial dir", e)
           }
-          putExtra(DocumentsContract.EXTRA_INITIAL_URI, parsedUri)
         }
       }
     }
