@@ -241,11 +241,14 @@ class FilePickerWritable {
   /// Expects a [FileInfo.identifier] string for [identifier].
   Future<FileInfo> writeFileWithIdentifier(String identifier, File file) async {
     _logger.finest('writeFileWithIdentifier(file: $file)');
-    final result = await (_channel
+    final result = await _channel
         .invokeMapMethod<String, String>('writeFileWithIdentifier', {
       'identifier': identifier,
       'path': file.absolute.path,
-    }) as FutureOr<Map<String, String>>);
+    });
+    if (result == null) {
+      throw StateError('Got null response for writeFileWithIdentifier');
+    }
     return _resultToFileInfo(result);
   }
 

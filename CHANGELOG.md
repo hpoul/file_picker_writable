@@ -1,3 +1,7 @@
+## 2.0.0+1
+
+* Minor code cleanup.
+
 ## 2.0.0
 
 * Stable null safety release
