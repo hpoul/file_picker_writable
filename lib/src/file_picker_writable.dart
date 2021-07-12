@@ -288,6 +288,18 @@ class FilePickerWritable {
         .invokeMethod<void>('disposeIdentifier', {'identifier': identifier});
   }
 
+  /// Dispose of all identifiers persisted for your app. Afterwards, you will
+  /// need the user to re-pick any files in order to access them.
+  ///
+  /// Some platforms (Android) limit how many identifiers your app can persist
+  /// at once. Use this method to ensure that all identifiers are disposed, even
+  /// in the case where e.g. you have lost track of an identifier and so cannot
+  /// call [disposeIdentifier] on it.
+  Future<void> disposeAllIdentifiers() async {
+    _logger.finest('disposeAllIdentifiers()');
+    return _channel.invokeMethod<void>('disposeAllIdentifiers');
+  }
+
   FileInfo _resultToFileInfo(Map<String, String> result) {
     return FileInfo(
       identifier: result['identifier']!,

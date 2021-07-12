@@ -127,9 +127,7 @@ class _MainScreenState extends State<MainScreen> {
               mainAxisAlignment: MainAxisAlignment.center,
               crossAxisAlignment: CrossAxisAlignment.center,
               children: <Widget>[
-                Row(
-                  mainAxisAlignment: MainAxisAlignment.center,
-                  mainAxisSize: MainAxisSize.max,
+                Wrap(
                   children: <Widget>[
                     ElevatedButton(
                       child: const Text('Open File Picker'),
@@ -139,6 +137,11 @@ class _MainScreenState extends State<MainScreen> {
                     ElevatedButton(
                       child: const Text('Create New File'),
                       onPressed: _openFilePickerForCreate,
+                    ),
+                    const SizedBox(width: 32),
+                    ElevatedButton(
+                      child: const Text('Dispose All IDs'),
+                      onPressed: FilePickerWritable().disposeAllIdentifiers,
                     ),
                   ],
                 ),
@@ -239,13 +242,17 @@ class FileInfoDisplay extends StatelessWidget {
                 children: <Widget>[
                   TextButton(
                     onPressed: () async {
-                      await FilePickerWritable().readFile(
-                          identifier: fileInfo.identifier,
-                          reader: (fileInfo, file) async {
-                            await SimpleAlertDialog
-                                .readFileContentsAndShowDialog(
-                                    fileInfo, file, context);
-                          });
+                      try {
+                        await FilePickerWritable().readFile(
+                            identifier: fileInfo.identifier,
+                            reader: (fileInfo, file) async {
+                              await SimpleAlertDialog
+                                  .readFileContentsAndShowDialog(
+                                      fileInfo, file, context);
+                            });
+                      } on Exception catch (e) {
+                        await SimpleAlertDialog.showErrorDialog(e, context);
+                      }
                     },
                     child: const Text('Read'),
                   ),
@@ -266,8 +273,12 @@ class FileInfoDisplay extends StatelessWidget {
                   ),
                   IconButton(
                     onPressed: () async {
-                      await FilePickerWritable()
-                          .disposeIdentifier(fileInfo.identifier);
+                      try {
+                        await FilePickerWritable()
+                            .disposeIdentifier(fileInfo.identifier);
+                      } on Exception catch (e) {
+                        await SimpleAlertDialog.showErrorDialog(e, context);
+                      }
                       final appData = await appDataBloc.store.load();
                       await appDataBloc.store.save(appData.copyWith(
                           files: appData.files
@@ -325,6 +336,13 @@ class SimpleAlertDialog extends StatelessWidget {
     await SimpleAlertDialog(
       titleText: 'Read first ${data.length} bytes of file',
       bodyText: '$bodyTextPrefix $fileContentExample',
+    ).show(context);
+  }
+
+  static Future showErrorDialog(Exception e, BuildContext context) async {
+    await SimpleAlertDialog(
+      titleText: 'Error',
+      bodyText: e.toString(),
     ).show(context);
   }
 }

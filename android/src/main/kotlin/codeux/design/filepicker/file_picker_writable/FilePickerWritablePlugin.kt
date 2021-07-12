@@ -134,6 +134,10 @@ class FilePickerWritablePlugin : FlutterPlugin, MethodCallHandler,
             impl.disposeIdentifier(identifier)
             result.success(null)
           }
+          "disposeAllIdentifiers" -> {
+            impl.disposeAllIdentifiers()
+            result.success(null)
+          }
           else -> {
             result.notImplemented()
           }
