@@ -303,7 +303,7 @@ class FilePickerWritableImpl(
     val activity = requireActivity()
     val contentResolver = activity.contentResolver
     withContext(Dispatchers.IO) {
-      contentResolver.openOutputStream(fileUri, "w").use { output ->
+      contentResolver.openOutputStream(fileUri, "wt").use { output ->
         require(output != null)
         file.inputStream().use { input ->
           input.copyTo(output)
