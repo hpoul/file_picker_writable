@@ -7,6 +7,7 @@ import android.content.ContentResolver
 import android.content.Intent
 import android.database.Cursor
 import android.net.Uri
+import android.os.Build
 import android.provider.OpenableColumns
 import androidx.annotation.MainThread
 import io.flutter.embedding.engine.plugins.activity.ActivityPluginBinding
@@ -303,7 +304,11 @@ class FilePickerWritableImpl(
     val activity = requireActivity()
     val contentResolver = activity.contentResolver
     withContext(Dispatchers.IO) {
-      contentResolver.openOutputStream(fileUri, "w").use { output ->
+      // with Android 10 and later, use wt
+      // https://issuetracker.google.com/issues/135714729?pli=1
+      // https://github.com/hpoul/file_picker_writable/issues/23
+      val writeMode = "wt".takeIf { Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q } ?: "w"
+      contentResolver.openOutputStream(fileUri, writeMode).use { output ->
         require(output != null)
         file.inputStream().use { input ->
           input.copyTo(output)
