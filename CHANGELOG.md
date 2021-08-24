@@ -1,4 +1,4 @@
-## 2.0.1-dev.1
+## 2.0.1
 
 * Android: Use `wt` file mode for writing on Android 10 or later.
   [#23](https://github.com/hpoul/file_picker_writable/issues/23)
