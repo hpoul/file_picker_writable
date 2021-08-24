@@ -1,3 +1,7 @@
+## Unreleased
+
+* Add `disposeAllIdentifiers` thanks @amake [#21](https://github.com/hpoul/file_picker_writable/pull/21)
+
 ## 2.0.1
 
 * Android: Use `wt` file mode for writing on Android 10 or later.
