@@ -325,8 +325,9 @@ public class SwiftFilePickerWritablePlugin: NSObject, FlutterPlugin {
         if !securityScope {
             logDebug("Warning: startAccessingSecurityScopedResource is false for \(url)")
         }
-        let bookmark = try url.bookmarkData()
         let tempFile = try _copyToTempDirectory(url: url)
+        // Get bookmark *after* ensuring file has been materialized to local device!
+        let bookmark = try url.bookmarkData()
         return _fileInfoResult(tempFile: tempFile, originalURL: url, bookmark: bookmark, persistable: persistable)
     }
     
@@ -388,8 +389,9 @@ extension SwiftFilePickerWritablePlugin : UIDocumentPickerDelegate {
 //                }
                 try _writeFile(path: path, destination: targetFile, skipDestinationStartAccess: true)
                 
-                let bookmark = try targetFile.bookmarkData()
                 let tempFile = try _copyToTempDirectory(url: targetFile)
+                // Get bookmark *after* ensuring file has been created!
+                let bookmark = try targetFile.bookmarkData()
                 _sendFilePickerResult(_fileInfoResult(tempFile: tempFile, originalURL: targetFile, bookmark: bookmark))
                 return
             }
