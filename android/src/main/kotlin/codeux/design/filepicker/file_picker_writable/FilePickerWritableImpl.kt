@@ -482,7 +482,7 @@ class FilePickerWritableImpl(
     ContentResolver.SCHEME_ANDROID_RESOURCE
   )
 
-  override fun onNewIntent(intent: Intent?): Boolean {
+  override fun onNewIntent(intent: Intent): Boolean {
     val data = intent?.data
     val scheme = data?.scheme
 
