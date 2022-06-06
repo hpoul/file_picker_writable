@@ -1,6 +1,7 @@
-## Unreleased
+## 2.0.2-dev.1
 
 * Add `disposeAllIdentifiers` thanks @amake [#21](https://github.com/hpoul/file_picker_writable/pull/21)
+* Support for Flutter 3, upgrade various dependencies.
 
 ## 2.0.1
 

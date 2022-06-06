@@ -346,8 +346,8 @@ class FilePickerWritableImpl(
     ContentResolver.SCHEME_ANDROID_RESOURCE
   )
 
-  override fun onNewIntent(intent: Intent?): Boolean {
-    val data = intent?.data
+  override fun onNewIntent(intent: Intent): Boolean {
+    val data = intent.data
     val scheme = data?.scheme
 
     plugin.logDebug("onNewIntent($data)")
