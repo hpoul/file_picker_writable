@@ -89,8 +89,12 @@ suspend fun getParent(
       throw Exception("Unknown URI type")
     }
   }
-  val path = DocumentsContract.findDocumentPath(context.contentResolver, uri)
-    ?: return@withContext null
+  val path = try {
+    DocumentsContract.findDocumentPath(context.contentResolver, uri)
+  } catch (_: UnsupportedOperationException) {
+    // Some providers don't support this method
+    null
+  } ?: return@withContext null
   val parents = path.path
   if (parents.size < 2) {
     return@withContext null
