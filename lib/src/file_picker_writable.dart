@@ -315,9 +315,6 @@ class FilePickerWritable {
 
   Future<T> _createFileInNewTempDirectory<T>(
       String baseName, Future<T> Function(File tempFile) callback) async {
-    if (baseName.length > 30) {
-      baseName = baseName.substring(0, 30);
-    }
     final tempDirBase = await getTemporaryDirectory();
 
     final tempDir = await tempDirBase.createTemp('file_picker_writable');
