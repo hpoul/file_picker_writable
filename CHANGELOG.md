@@ -1,3 +1,7 @@
+## 2.1.0
+
+* Android: Update kotlin, gradle 
+
 ## 2.0.3
 
 * iOS: Obtain iOS bookmark only after ensuring the file exists locally
