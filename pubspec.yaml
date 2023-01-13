@@ -2,7 +2,7 @@ name: file_picker_writable
 description: |
   Flutter plugin to allow users to open files/documents which can be read, and written back at a
   later time as well as creating new files on external media.
-version: 2.0.1
+version: 2.0.3
 homepage: https://github.com/hpoul/file_picker_writable
 
 environment:
@@ -22,7 +22,7 @@ dependencies:
 dev_dependencies:
   flutter_test:
     sdk: flutter
-  pedantic: ^1.11.0
+  flutter_lints: ^2.0.1
 
 
 flutter:

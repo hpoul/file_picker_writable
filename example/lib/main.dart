@@ -16,13 +16,14 @@ Future<void> main() async {
   Logger.root.level = Level.ALL;
   PrintAppender().attachToLogger(Logger.root);
 
-  runApp(MyApp());
+  runApp(const MyApp());
 }
 
 class AppDataBloc {
   final store = SimpleJsonPersistence.getForTypeWithDefault(
     (json) => AppData.fromJson(json),
     defaultCreator: () => AppData(files: [], directories: []),
+    name: 'AppData',
   );
 }
 
@@ -60,11 +61,13 @@ class AppData implements HasToJson {
 }
 
 class MyApp extends StatefulWidget {
+  const MyApp({Key? key}) : super(key: key);
+
   @override
-  _MyAppState createState() => _MyAppState();
+  MyAppState createState() => MyAppState();
 }
 
-class _MyAppState extends State<MyApp> {
+class MyAppState extends State<MyApp> {
   final AppDataBloc _appDataBloc = AppDataBloc();
 
   @override
@@ -82,10 +85,10 @@ class MainScreen extends StatefulWidget {
   final AppDataBloc appDataBloc;
 
   @override
-  _MainScreenState createState() => _MainScreenState();
+  MainScreenState createState() => MainScreenState();
 }
 
-class _MainScreenState extends State<MainScreen> {
+class MainScreenState extends State<MainScreen> {
   AppDataBloc get _appDataBloc => widget.appDataBloc;
 
   @override
@@ -134,7 +137,7 @@ class _MainScreenState extends State<MainScreen> {
         title: const Text('File Picker Example'),
       ),
       body: SingleChildScrollView(
-        child: Container(
+        child: SizedBox(
           width: double.infinity,
           child: StreamBuilder<AppData>(
             stream: _appDataBloc.store.onValueChangedAndLoad,
@@ -145,23 +148,23 @@ class _MainScreenState extends State<MainScreen> {
                 Wrap(
                   children: <Widget>[
                     ElevatedButton(
-                      child: const Text('Open File Picker'),
                       onPressed: _openFilePicker,
+                      child: const Text('Open File Picker'),
                     ),
                     const SizedBox(width: 32),
                     ElevatedButton(
-                      child: const Text('Create New File'),
                       onPressed: _openFilePickerForCreate,
+                      child: const Text('Create New File'),
                     ),
                     const SizedBox(width: 32),
                     ElevatedButton(
-                      child: const Text('Dispose All IDs'),
                       onPressed: FilePickerWritable().disposeAllIdentifiers,
+                      child: const Text('Dispose All IDs'),
                     ),
                     const SizedBox(width: 32),
                     ElevatedButton(
-                      child: const Text('Open Directory Picker'),
                       onPressed: _openDirectoryPicker,
+                      child: const Text('Open Directory Picker'),
                     ),
                   ],
                 ),
@@ -305,6 +308,7 @@ class EntityInfoDisplay extends StatelessWidget {
                               final content =
                                   'New Content written at ${DateTime.now()}.\n\n';
                               await file.writeAsString(content);
+                              // ignore: use_build_context_synchronously
                               await SimpleAlertDialog(
                                 bodyText: 'Written: $content',
                               ).show(context);
@@ -393,6 +397,8 @@ class SimpleAlertDialog extends StatelessWidget {
     final hexString = hex.encode(data);
     final utf8String = utf8.decode(data, allowMalformed: true);
     final fileContentExample = 'hexString: $hexString\n\nutf8: $utf8String';
+
+    // ignore: use_build_context_synchronously
     await SimpleAlertDialog(
       titleText: 'Read first ${data.length} bytes of file',
       bodyText: '$bodyTextPrefix $fileContentExample',

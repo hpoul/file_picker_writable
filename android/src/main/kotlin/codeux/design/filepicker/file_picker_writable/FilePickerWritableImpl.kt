@@ -483,7 +483,7 @@ class FilePickerWritableImpl(
   )
 
   override fun onNewIntent(intent: Intent): Boolean {
-    val data = intent?.data
+    val data = intent.data
     val scheme = data?.scheme
 
     plugin.logDebug("onNewIntent($data)")

@@ -1,6 +1,12 @@
-## Unreleased
+## 2.0.3
+
+* iOS: Obtain iOS bookmark only after ensuring the file exists locally
+  [#29](https://github.com/hpoul/file_picker_writable/pull/29) (thanks @amake)
+
+## 2.0.2
 
 * Add `disposeAllIdentifiers` thanks @amake [#21](https://github.com/hpoul/file_picker_writable/pull/21)
+* Support for Flutter 3, upgrade various dependencies.
 
 ## 2.0.1
 

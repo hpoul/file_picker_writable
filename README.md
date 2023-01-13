@@ -31,7 +31,6 @@ other apps. In the same way it will also handle arbitrary URLs and pass them bac
 
 * Android 4.4 (API Level 4.4)
 * Only supports [plugin api v2](https://flutter.dev/go/android-project-migration).
-  * (v1 is implemented but untested)
 
 ### Support for file handlers
 
@@ -98,3 +97,28 @@ Future<void> persistChanges(FileInfo fileInfo, Uint8List newContent) async {
       });
 }
 ```
+
+Create a new file by letting the user choose a directory and file name:
+
+```dart
+final rand = Random().nextInt(10000000);
+final fileInfo = await FilePickerWritable().openFileForCreate(
+  fileName: 'newfile.$rand.codeux',
+  writer: (file) async {
+    final content = 'File created at ${DateTime.now()}\n\n';
+    await file.writeAsString(content);
+  },
+);
+if (fileInfo == null) {
+  _logger.info('User canceled.');
+  return;
+}
+final data = await _appDataBloc.store.load();
+await _appDataBloc.store
+    .save(data.copyWith(files: data.files + [fileInfo]));
+}
+```
+
+This will open the following screen on Android:
+
+![create file screenshot](doc/Screenshot_1655543951.png)
