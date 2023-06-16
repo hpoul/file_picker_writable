@@ -5,6 +5,7 @@ import android.app.Activity.RESULT_OK
 import android.content.ActivityNotFoundException
 import android.content.ContentResolver
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.database.Cursor
 import android.net.Uri
 import android.os.Build
@@ -50,16 +51,24 @@ class FilePickerWritableImpl(
       throw FilePickerException("Invalid lifecycle, only one call at a time.")
     }
     filePickerResult = result
-    val intent = Intent(Intent.ACTION_OPEN_DOCUMENT).apply {
+    var intent = Intent(Intent.ACTION_OPEN_DOCUMENT).apply {
       addCategory(Intent.CATEGORY_OPENABLE)
       type = "*/*"
     }
+    if (!intentIsValid(intent)) {
+      plugin.logDebug("Cannot launch file picker using Intent.ACTION_OPEN_DOCUMENT, falling back to Intent.ACTION_GET_CONTENT")
+      intent = Intent(Intent.ACTION_GET_CONTENT).apply {
+        addCategory(Intent.CATEGORY_OPENABLE)
+        type = "*/*"
+      }
+    }
+    
     val activity = requireActivity()
     try {
       activity.startActivityForResult(intent, REQUEST_CODE_OPEN_FILE)
     } catch (e: ActivityNotFoundException) {
       filePickerResult = null
-      plugin.logDebug("exception while launcing file picker", e)
+      plugin.logDebug("exception while launching file picker", e)
       result.error(
         "FilePickerNotAvailable",
         "Unable to start file picker, $e",
@@ -87,7 +96,7 @@ class FilePickerWritableImpl(
       activity.startActivityForResult(intent, REQUEST_CODE_CREATE_FILE)
     } catch (e: ActivityNotFoundException) {
       filePickerResult = null
-      plugin.logDebug("exception while launcing file picker", e)
+      plugin.logDebug("exception while launching file picker", e)
       result.error(
         "FilePickerNotAvailable",
         "Unable to start file picker, $e",
@@ -390,6 +399,14 @@ class FilePickerWritableImpl(
     } else {
       plugin.handleOpenUri(uri)
     }
+  }
+
+  @MainThread
+  private fun intentIsValid(intent: Intent): Boolean {
+    val activity = requireActivity()
+    val list = activity.packageManager.queryIntentActivities(intent, 
+            PackageManager.MATCH_DEFAULT_ONLY)
+    return list.size > 0
   }
 
 }
