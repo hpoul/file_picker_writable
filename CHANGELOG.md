@@ -1,3 +1,8 @@
+## 2.1.0
+
+* Android: Upgrade to AGP 8.1.0, remove deprecated plugin registration, upgrade dependencies, etc.
+
+
 ## 2.0.3
 
 * iOS: Obtain iOS bookmark only after ensuring the file exists locally
