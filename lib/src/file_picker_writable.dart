@@ -219,7 +219,7 @@ class FilePickerWritable {
     try {
       return await reader(fileInfo, file);
     } finally {
-      _unawaited(file.delete());
+      unawaited(file.delete());
     }
   }
 
@@ -302,7 +302,7 @@ class FilePickerWritable {
       _logger.warning('Error while calling reader method.', e, stackTrace);
       rethrow;
     } finally {
-      _unawaited(file.delete());
+      unawaited(file.delete());
     }
   }
 
@@ -440,11 +440,13 @@ class FilePickerWritable {
     try {
       return await callback(tempFile);
     } finally {
-      _unawaited(tempDir
-          .delete(recursive: true)
-          .catchError((dynamic error, StackTrace stackTrace) {
-        _logger.warning('Error while deleting temp dir.', error, stackTrace);
-      }));
+      unawaited((() async {
+        try {
+          await tempDir.delete(recursive: true);
+        } catch (error, stackTrace) {
+          _logger.warning('Error while deleting temp dir.', error, stackTrace);
+        }
+      })());
     }
   }
 }
@@ -480,12 +482,12 @@ class FilePickerState {
     try {
       for (final handler in _eventHandlers) {
         if (await event.dispatch(handler)) {
-          _unawaited(event.dispose());
+          unawaited(event.dispose());
           return true;
         }
       }
       if (_pendingEvent != null) {
-        _unawaited(_pendingEvent?.dispose());
+        unawaited(_pendingEvent?.dispose());
       }
       _pendingEvent = event;
       return false;
@@ -556,5 +558,3 @@ class FilePickerState {
       _eventHandlers.remove(
           FilePickerEventHandlerLambda(errorEventHandler: errorEventHandler));
 }
-
-void _unawaited(Future<dynamic>? future) {}

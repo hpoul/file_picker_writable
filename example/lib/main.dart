@@ -261,7 +261,7 @@ class EntityInfoDisplay extends StatelessWidget {
                 entityInfo.fileName ?? 'null',
                 maxLines: 4,
                 overflow: TextOverflow.ellipsis,
-                style: theme.textTheme.caption!.apply(fontSizeFactor: 0.75),
+                style: theme.textTheme.bodySmall?.apply(fontSizeFactor: 0.75),
               ),
               Text(
                 entityInfo.identifier,
@@ -270,14 +270,14 @@ class EntityInfoDisplay extends StatelessWidget {
               ),
               Text(
                 'uri:${entityInfo.uri}',
-                style: theme.textTheme.bodyText2!
-                    .apply(fontSizeFactor: 0.7)
+                style: theme.textTheme.bodyMedium
+                    ?.apply(fontSizeFactor: 0.7)
                     .copyWith(fontWeight: FontWeight.bold),
               ),
               Text(
                 'fileName: ${entityInfo.fileName}',
-                style: theme.textTheme.bodyText2!
-                    .apply(fontSizeFactor: 0.7)
+                style: theme.textTheme.bodyMedium
+                    ?.apply(fontSizeFactor: 0.7)
                     .copyWith(fontWeight: FontWeight.bold),
               ),
               ButtonBar(
@@ -295,7 +295,9 @@ class EntityInfoDisplay extends StatelessWidget {
                                         fileInfo, file, context);
                               });
                         } on Exception catch (e) {
-                          await SimpleAlertDialog.showErrorDialog(e, context);
+                          if (context.mounted) {
+                            await SimpleAlertDialog.showErrorDialog(e, context);
+                          }
                         }
                       },
                       child: const Text('Read'),
@@ -335,6 +337,9 @@ class EntityInfoDisplay extends StatelessWidget {
                         await FilePickerWritable()
                             .disposeIdentifier(entityInfo.identifier);
                       } on Exception catch (e) {
+                        if (!context.mounted) {
+                          return;
+                        }
                         await SimpleAlertDialog.showErrorDialog(e, context);
                       }
                       final appData = await appDataBloc.store.load();
@@ -386,7 +391,7 @@ class SimpleAlertDialog extends StatelessWidget {
     );
   }
 
-  static Future readFileContentsAndShowDialog(
+  static Future<void> readFileContentsAndShowDialog(
     FileInfo fi,
     File file,
     BuildContext context, {
@@ -405,7 +410,7 @@ class SimpleAlertDialog extends StatelessWidget {
     ).show(context);
   }
 
-  static Future showErrorDialog(Exception e, BuildContext context) async {
+  static Future<void> showErrorDialog(Exception e, BuildContext context) async {
     await SimpleAlertDialog(
       titleText: 'Error',
       bodyText: e.toString(),

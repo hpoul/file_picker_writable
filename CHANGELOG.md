@@ -1,3 +1,13 @@
+## 2.1.0+1
+
+* Android: require `compileSdk 33`
+
+## 2.1.0
+
+* Android: Upgrade to AGP 8.1.0, remove deprecated plugin registration, upgrade dependencies, etc.
+* Require Dart >= 3.0.0
+* Analyzer warning cleanup.
+
 ## 2.0.3
 
 * iOS: Obtain iOS bookmark only after ensuring the file exists locally
