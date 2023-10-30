@@ -11,50 +11,50 @@ import 'package:synchronized/synchronized.dart';
 
 final _logger = Logger('file_picker_writable');
 
-/// Contains information about a user selected file.
-class FileInfo {
-  FileInfo({
+/// Contains information about a user-selected filesystem entity, e.g. a
+/// [FileInfo] or [DirectoryInfo].
+abstract class EntityInfo {
+  EntityInfo({
     required this.identifier,
     required this.persistable,
     required this.uri,
     this.fileName,
   });
 
-  static FileInfo fromJson(Map<String, dynamic> json) => FileInfo(
-        identifier: json['identifier'] as String,
-        persistable: (json['persistable'] as String?) == 'true',
-        uri: json['uri'] as String,
-        fileName: json['fileName'] as String?,
-      );
+  EntityInfo.fromJson(Map<String, dynamic> json)
+      : this(
+          identifier: json['identifier'] as String,
+          persistable: (json['persistable'] as String?) == 'true',
+          uri: json['uri'] as String,
+          fileName: json['fileName'] as String?,
+        );
 
-  static FileInfo fromJsonString(String jsonString) =>
-      fromJson(json.decode(jsonString) as Map<String, dynamic>);
+  EntityInfo.fromJsonString(String jsonString)
+      : this.fromJson(json.decode(jsonString) as Map<String, dynamic>);
 
-  /// Identifier which can be used for reading at a later time, or used for
-  /// writing back data. See [persistable] for details on the valid lifetime of
-  /// the identifier.
+  /// Identifier which can be used for accessing at a later time, or, for files,
+  /// used for writing back data. See [persistable] for details on the valid
+  /// lifetime of the identifier.
   final String identifier;
 
   /// Indicates whether [identifier] is persistable. When true, it is safe to
   /// retain this identifier for access at any later time.
   ///
-  /// When false, you cannot assume that access will be granted in the
-  /// future. In particular, for files received from outside the app, the
-  /// identifier may only be valid until the [FileOpenHandler] returns.
+  /// When false, you cannot assume that access will be granted in the future.
+  /// In particular, for files received from outside the app, the identifier may
+  /// only be valid until the [FileOpenHandler] returns.
   final bool persistable;
 
-  /// Platform dependent URI.
-  /// - On android either content:// or file:// url.
+  /// Platform-dependent URI.
+  /// - On Android either content:// or file:// url.
   /// - On iOS a file:// URL below a document provider (like iCloud).
   ///   Not a really user friendly name.
   final String uri;
 
-  /// If available, contains the file name of the original file.
-  /// (ie. most of the time the last path segment). Especially useful
-  /// with android content providers which typically do not contain
-  /// an actual file name in the content uri.
-  ///
-  /// Might be null.
+  /// If available, contains the name of the original file or directory (i.e.
+  /// most of the time the last path segment). Especially useful with Android
+  /// content providers which typically do not contain an actual file name in
+  /// the content URI.
   final String? fileName;
 
   @override
@@ -72,6 +72,41 @@ class FileInfo {
   /// Serializes this data into a json string for easy serialization.
   /// Can be read back using [fromJsonString].
   String toJsonString() => json.encode(toJson());
+}
+
+class FileInfo extends EntityInfo {
+  FileInfo({
+    required String identifier,
+    required bool persistable,
+    required String uri,
+    String? fileName,
+  }) : super(
+          identifier: identifier,
+          persistable: persistable,
+          uri: uri,
+          fileName: fileName,
+        );
+
+  FileInfo.fromJson(Map<String, dynamic> json) : super.fromJson(json);
+  FileInfo.fromJsonString(String jsonString) : super.fromJsonString(jsonString);
+}
+
+class DirectoryInfo extends EntityInfo {
+  DirectoryInfo({
+    required String identifier,
+    required bool persistable,
+    required String uri,
+    String? fileName,
+  }) : super(
+          identifier: identifier,
+          persistable: persistable,
+          uri: uri,
+          fileName: fileName,
+        );
+
+  DirectoryInfo.fromJson(Map<String, dynamic> json) : super.fromJson(json);
+  DirectoryInfo.fromJsonString(String jsonString)
+      : super.fromJsonString(jsonString);
 }
 
 typedef FileReader<T> = Future<T> Function(FileInfo fileInfo, File file);
@@ -97,7 +132,7 @@ class FilePickerWritable {
         if (call.method == 'openFile') {
           final result =
               (call.arguments as Map<dynamic, dynamic>).cast<String, String>();
-          final fileInfo = _resultToFileInfo(result);
+          final fileInfo = FileInfo.fromJson(result);
           final file = _resultToFile(result);
           await _filePickerState._fireFileOpenHandlers(fileInfo, file);
           return true;
@@ -151,7 +186,7 @@ class FilePickerWritable {
       _logger.finer('User cancelled file picker.');
       return null;
     }
-    return _resultToFileInfo(result);
+    return FileInfo.fromJson(result);
   }
 
   /// Use [openFileForCreate] instead.
@@ -165,7 +200,7 @@ class FilePickerWritable {
       _logger.finer('User cancelled file picker.');
       return null;
     }
-    return _resultToFileInfo(result);
+    return FileInfo.fromJson(result);
   }
 
   /// Shows a file picker so the user can select a file and calls [reader]
@@ -179,7 +214,7 @@ class FilePickerWritable {
       _logger.finer('User cancelled file picker.');
       return null;
     }
-    final fileInfo = _resultToFileInfo(result);
+    final fileInfo = FileInfo.fromJson(result);
     final file = _resultToFile(result);
     try {
       return await reader(fileInfo, file);
@@ -208,8 +243,42 @@ class FilePickerWritable {
         _logger.finer('User cancelled file picker.');
         return null;
       }
-      return _resultToFileInfo(result);
+      return FileInfo.fromJson(result);
     });
+  }
+
+  /// See if the the directory picker and directory tree access is supported on
+  /// the current platform. If this returns `false` then [openDirectory],
+  /// [getDirectory], and [resolveRelativePath] will fail with an exception.
+  Future<bool> isDirectoryAccessSupported() async {
+    _logger.finest('isDirectoryAccessSupported()');
+    final result =
+        await _channel.invokeMethod<bool>('isDirectoryAccessSupported');
+    if (result == null) {
+      throw StateError('Error while checking if directory access is supported');
+    }
+    return result;
+  }
+
+  /// Shows a directory picker so the user can select a directory.
+  ///
+  /// [initialDirUri] is the URI indicating where the picker should start by
+  /// default. This is only honored on a best-effort basis and even then is not
+  /// supported on all systems. It can be a [FileInfo.uri] or a
+  /// [DirectoryInfo.uri].
+  ///
+  /// An exception will be thrown if invoked on a system that does not support
+  /// directory access, i.e. if [isDirectoryAccessSupported] returns `false`.
+  Future<DirectoryInfo?> openDirectory({String? initialDirUri}) async {
+    _logger.finest('openDirectoryPicker()');
+    final result = await _channel.invokeMapMethod<String, String>(
+        'openDirectoryPicker', {'initialDirUri': initialDirUri});
+    if (result == null) {
+      // User cancelled.
+      _logger.finer('User cancelled directory picker.');
+      return null;
+    }
+    return DirectoryInfo.fromJson(result);
   }
 
   /// Reads the file previously picked by the user.
@@ -225,7 +294,7 @@ class FilePickerWritable {
     if (result == null) {
       throw StateError('Error while reading file with identifier $identifier');
     }
-    final fileInfo = _resultToFileInfo(result);
+    final fileInfo = FileInfo.fromJson(result);
     final file = _resultToFile(result);
     try {
       return await reader(fileInfo, file);
@@ -235,6 +304,57 @@ class FilePickerWritable {
     } finally {
       unawaited(file.delete());
     }
+  }
+
+  /// Get info for the immediate parent directory of [fileIdentifier], making
+  /// use of access permissions to [rootIdentifier] some arbitrary number of
+  /// levels higher in the hierarchy.
+  ///
+  /// [rootIdentifier] should be a [DirectoryInfo.identifier] obtained from
+  /// [pickDirectory]. [fileIdentifier] should be a [FileInfo.identifier].
+  ///
+  /// An exception will be thrown if invoked on a system that does not support
+  /// directory access, i.e. if [isDirectoryAccessSupported] returns `false`.
+  Future<DirectoryInfo> getDirectory({
+    required String rootIdentifier,
+    required String fileIdentifier,
+  }) async {
+    _logger.finest('getDirectory()');
+    final result = await _channel.invokeMapMethod<String, String>(
+        'getDirectory',
+        {'rootIdentifier': rootIdentifier, 'fileIdentifier': fileIdentifier});
+    if (result == null) {
+      throw StateError(
+          'Error while getting directory of $fileIdentifier relative to $rootIdentifier');
+    }
+    return DirectoryInfo.fromJson(result);
+  }
+
+  /// Get info for the entity identified by [relativePath] starting from
+  /// [directoryIdentifier].
+  ///
+  /// [directoryIdentifier] should be a [DirectoryInfo.identifier] obtained from
+  /// [pickDirectory] or [getDirectory].
+  ///
+  /// An exception will be thrown if invoked on a system that does not support
+  /// directory access, i.e. if [isDirectoryAccessSupported] returns `false`.
+  Future<EntityInfo> resolveRelativePath({
+    required String directoryIdentifier,
+    required String relativePath,
+  }) async {
+    _logger.finest('resolveRelativePath()');
+    final result = await _channel.invokeMapMethod<String, String>(
+        'resolveRelativePath', {
+      'directoryIdentifier': directoryIdentifier,
+      'relativePath': relativePath
+    });
+    if (result == null) {
+      throw StateError(
+          'Error while resolving relative path $relativePath from directory $directoryIdentifier');
+    }
+    return result['isDirectory'] == 'true'
+        ? DirectoryInfo.fromJson(result)
+        : FileInfo.fromJson(result);
   }
 
   /// Writes the file previously picked by the user.
@@ -249,7 +369,7 @@ class FilePickerWritable {
     if (result == null) {
       throw StateError('Got null response for writeFileWithIdentifier');
     }
-    return _resultToFileInfo(result);
+    return FileInfo.fromJson(result);
   }
 
   /// Writes data to a file previously picked by the user.
@@ -273,7 +393,7 @@ class FilePickerWritable {
       });
       return result!;
     });
-    return _resultToFileInfo(result);
+    return FileInfo.fromJson(result);
   }
 
   /// Dispose of a persistable identifier, removing it from your app's list of
@@ -298,15 +418,6 @@ class FilePickerWritable {
   Future<void> disposeAllIdentifiers() async {
     _logger.finest('disposeAllIdentifiers()');
     return _channel.invokeMethod<void>('disposeAllIdentifiers');
-  }
-
-  FileInfo _resultToFileInfo(Map<String, String> result) {
-    return FileInfo(
-      identifier: result['identifier']!,
-      persistable: result['persistable'] == 'true',
-      uri: result['uri']!,
-      fileName: result['fileName'],
-    );
   }
 
   File _resultToFile(Map<String, String> result) {

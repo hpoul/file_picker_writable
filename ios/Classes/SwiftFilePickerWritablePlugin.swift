@@ -69,6 +69,13 @@ public class SwiftFilePickerWritablePlugin: NSObject, FlutterPlugin {
                         throw FilePickerError.invalidArguments(message: "Expected 'args'")
                 }
                 openFilePickerForCreate(path: path, result: result)
+            case "isDirectoryAccessSupported":
+                result(true)
+            case "openDirectoryPicker":
+                guard let args = call.arguments as? Dictionary<String, Any> else {
+                    throw FilePickerError.invalidArguments(message: "Expected 'args'")
+                }
+                openDirectoryPicker(result: result, initialDirUrl: args["initialDirUri"] as? String)
             case "readFileWithIdentifier":
                 guard
                     let args = call.arguments as? Dictionary<String, Any>,
@@ -76,6 +83,22 @@ public class SwiftFilePickerWritablePlugin: NSObject, FlutterPlugin {
                         throw FilePickerError.invalidArguments(message: "Expected 'identifier'")
                 }
                 try readFile(identifier: identifier, result: result)
+            case "getDirectory":
+                guard
+                    let args = call.arguments as? Dictionary<String, Any>,
+                    let rootIdentifier = args["rootIdentifier"] as? String,
+                    let fileIdentifier = args["fileIdentifier"] as? String else {
+                        throw FilePickerError.invalidArguments(message: "Expected 'rootIdentifier' and 'fileIdentifier'")
+                }
+                try getDirectory(rootIdentifier: rootIdentifier, fileIdentifier: fileIdentifier, result: result)
+            case "resolveRelativePath":
+                guard
+                    let args = call.arguments as? Dictionary<String, Any>,
+                    let directoryIdentifier = args["directoryIdentifier"] as? String,
+                    let relativePath = args["relativePath"] as? String else {
+                        throw FilePickerError.invalidArguments(message: "Expected 'directoryIdentifier' and 'relativePath'")
+                }
+                try resolveRelativePath(directoryIdentifier: directoryIdentifier, relativePath: relativePath, result: result)
             case "writeFileWithIdentifier":
                 guard let args = call.arguments as? Dictionary<String, Any>,
                     let identifier = args["identifier"] as? String,
@@ -117,6 +140,64 @@ public class SwiftFilePickerWritablePlugin: NSObject, FlutterPlugin {
         result(_fileInfoResult(tempFile: copiedFile, originalURL: url, bookmark: bookmark))
     }
     
+    func getDirectory(rootIdentifier: String, fileIdentifier: String, result: @escaping FlutterResult) throws {
+        // In principle these URLs could be opaque like on Android, in which
+        // case this analysis would not work. But it seems that URLs even for
+        // cloud-based content providers are always file:// (tested with iCloud
+        // Drive, Google Drive, Dropbox, FileBrowser)
+        guard let rootUrl = restoreUrl(from: rootIdentifier) else {
+            result(FlutterError(code: "InvalidDataError", message: "Unable to decode root bookmark.", details: nil))
+            return
+        }
+        guard let fileUrl = restoreUrl(from: fileIdentifier) else {
+            result(FlutterError(code: "InvalidDataError", message: "Unable to decode file bookmark.", details: nil))
+            return
+        }
+        guard fileUrl.absoluteString.starts(with: rootUrl.absoluteString) else {
+            result(FlutterError(code: "InvalidArguments", message: "The supplied file \(fileUrl) is not a child of \(rootUrl)", details: nil))
+            return
+        }
+        let dirUrl = fileUrl.deletingLastPathComponent()
+        result([
+            "identifier": try dirUrl.bookmarkData().base64EncodedString(),
+            "persistable": "true",
+            "uri": dirUrl.absoluteString,
+            "fileName": dirUrl.lastPathComponent,
+        ])
+    }
+
+    func resolveRelativePath(directoryIdentifier: String, relativePath: String, result: @escaping FlutterResult) throws {
+        guard let url = restoreUrl(from: directoryIdentifier) else {
+            result(FlutterError(code: "InvalidDataError", message: "Unable to restore URL from identifier.", details: nil))
+            return
+        }
+        let childUrl = url.appendingPathComponent(relativePath).standardized
+        logDebug("Resolved to \(childUrl)")
+        var coordError: NSError? = nil
+        var bookmarkError: Error? = nil
+        var identifier: String? = nil
+        // Coordinate reading the item here because it might be a
+        // not-yet-downloaded file, in which case we can't get a bookmark for
+        // it--bookmarkData() fails with a "file doesn't exist" error
+        NSFileCoordinator().coordinate(readingItemAt: childUrl, error: &coordError) { url in
+            do {
+                identifier = try childUrl.bookmarkData().base64EncodedString()
+            } catch let error {
+                bookmarkError = error
+            }
+        }
+        if let error = coordError ?? bookmarkError {
+            throw error
+        }
+        result([
+            "identifier": identifier,
+            "persistable": "true",
+            "uri": childUrl.absoluteString,
+            "fileName": childUrl.lastPathComponent,
+            "isDirectory": "\(isDirectory(childUrl))",
+        ])
+    }
+
     func writeFile(identifier: String, path: String, result: @escaping FlutterResult) throws {
         guard let bookmark = Data(base64Encoded: identifier) else {
             throw FilePickerError.invalidArguments(message: "Unable to decode bookmark/identifier.")
@@ -181,6 +262,24 @@ public class SwiftFilePickerWritablePlugin: NSObject, FlutterPlugin {
         _viewController.present(ctrl, animated: true, completion: nil)
     }
 
+    func openDirectoryPicker(result: @escaping FlutterResult, initialDirUrl: String?) {
+        if (_filePickerResult != nil) {
+            result(FlutterError(code: "DuplicatedCall", message: "Only one file open call at a time.", details: nil))
+            return
+        }
+        _filePickerResult = result
+        _filePickerPath = nil
+        let ctrl = UIDocumentPickerViewController(documentTypes: [kUTTypeFolder as String], in: .open)
+        ctrl.delegate = self
+        if #available(iOS 13.0, *) {
+            if let initialDirUrl = initialDirUrl {
+                ctrl.directoryURL = URL(string: initialDirUrl)
+            }
+        }
+        ctrl.modalPresentationStyle = .currentContext
+        _viewController.present(ctrl, animated: true, completion: nil)
+    }
+
     private func _copyToTempDirectory(url: URL) throws -> URL {
         let tempDir = NSURL.fileURL(withPath: NSTemporaryDirectory(), isDirectory: true)
         let tempFile = tempDir.appendingPathComponent("\(UUID().uuidString)_\(url.lastPathComponent)")
@@ -232,6 +331,25 @@ public class SwiftFilePickerWritablePlugin: NSObject, FlutterPlugin {
         return _fileInfoResult(tempFile: tempFile, originalURL: url, bookmark: bookmark, persistable: persistable)
     }
     
+    private func _prepareDirUrlForReading(url: URL) throws -> [String:String] {
+        let securityScope = url.startAccessingSecurityScopedResource()
+        defer {
+            if securityScope {
+                url.stopAccessingSecurityScopedResource()
+            }
+        }
+        if !securityScope {
+            logDebug("Warning: startAccessingSecurityScopedResource is false for \(url)")
+        }
+        let bookmark = try url.bookmarkData()
+        return [
+            "identifier": bookmark.base64EncodedString(),
+            "persistable": "true",
+            "uri": url.absoluteString,
+            "fileName": url.lastPathComponent,
+        ]
+    }
+
     private func _fileInfoResult(tempFile: URL, originalURL: URL, bookmark: Data, persistable: Bool = true) -> [String: String] {
         let identifier = bookmark.base64EncodedString()
         return [
@@ -277,7 +395,11 @@ extension SwiftFilePickerWritablePlugin : UIDocumentPickerDelegate {
                 _sendFilePickerResult(_fileInfoResult(tempFile: tempFile, originalURL: targetFile, bookmark: bookmark))
                 return
             }
-            _sendFilePickerResult(try _prepareUrlForReading(url: url, persistable: true))
+            if isDirectory(url) {
+                _sendFilePickerResult(try _prepareDirUrlForReading(url: url))
+            } else {
+                _sendFilePickerResult(try _prepareUrlForReading(url: url, persistable: true))
+            }
         } catch {
             _sendFilePickerResult(FlutterError(code: "ErrorProcessingResult", message: "Error handling result url \(url): \(error)", details: nil))
             return
@@ -289,6 +411,28 @@ extension SwiftFilePickerWritablePlugin : UIDocumentPickerDelegate {
         _sendFilePickerResult(nil)
     }
     
+    private func isDirectory(_ url: URL) -> Bool {
+        if #available(iOS 9.0, *) {
+            return url.hasDirectoryPath
+        } else if let resVals = try? url.resourceValues(forKeys: [.isDirectoryKey]),
+                  let isDir = resVals.isDirectory {
+            return isDir
+        } else {
+            return false
+        }
+    }
+
+    private func restoreUrl(from identifier: String) -> URL? {
+        guard let bookmark = Data(base64Encoded: identifier) else {
+            return nil
+        }
+        var isStale: Bool = false
+        guard let url = try? URL(resolvingBookmarkData: bookmark, bookmarkDataIsStale: &isStale) else {
+            return nil
+        }
+        logDebug("url: \(url) / isStale: \(isStale)");
+        return url
+    }
 }
 
 // application delegate methods..
