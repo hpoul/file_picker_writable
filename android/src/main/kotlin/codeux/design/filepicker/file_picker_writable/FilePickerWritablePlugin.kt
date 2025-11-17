@@ -1,6 +1,7 @@
 package codeux.design.filepicker.file_picker_writable
 
 import android.app.Activity
+import android.content.Context
 import android.net.Uri
 import android.util.Log
 import androidx.annotation.MainThread
@@ -8,7 +9,6 @@ import androidx.annotation.NonNull
 import io.flutter.embedding.engine.plugins.FlutterPlugin
 import io.flutter.embedding.engine.plugins.activity.ActivityAware
 import io.flutter.embedding.engine.plugins.activity.ActivityPluginBinding
-import io.flutter.plugin.common.BinaryMessenger
 import io.flutter.plugin.common.EventChannel
 import io.flutter.plugin.common.MethodCall
 import io.flutter.plugin.common.MethodChannel
@@ -25,7 +25,7 @@ private const val TAG = "FilePickerWritable"
 /** FilePickerWritablePlugin */
 class FilePickerWritablePlugin : FlutterPlugin, MethodCallHandler,
   ActivityAware,
-  ActivityProvider, CoroutineScope by MainScope() {
+  ContextProvider, CoroutineScope by MainScope() {
   /// The MethodChannel that will the communication between Flutter and native Android
   ///
   /// This local reference serves to register the plugin with the Flutter Engine and unregister it
@@ -34,23 +34,26 @@ class FilePickerWritablePlugin : FlutterPlugin, MethodCallHandler,
   private val impl: FilePickerWritableImpl = FilePickerWritableImpl(this)
   private var currentBinding: ActivityPluginBinding? = null
 
+  override var applicationContext: Context? = null
+
   private val eventQueue = LinkedList<Map<String, String>>()
   private var eventSink: EventChannel.EventSink? = null
 
   override fun onAttachedToEngine(
     @NonNull flutterPluginBinding: FlutterPlugin.FlutterPluginBinding
   ) {
-    initializePlugin(flutterPluginBinding.binaryMessenger)
+    initializePlugin(flutterPluginBinding)
   }
 
-  private fun initializePlugin(binaryMessenger: BinaryMessenger) {
+  private fun initializePlugin(flutterPluginBinding: FlutterPlugin.FlutterPluginBinding) {
+    applicationContext = flutterPluginBinding.applicationContext
     channel = MethodChannel(
-      binaryMessenger,
+      flutterPluginBinding.binaryMessenger,
       "design.codeux.file_picker_writable"
     )
     channel.setMethodCallHandler(this)
     EventChannel(
-      binaryMessenger,
+      flutterPluginBinding.binaryMessenger,
       "design.codeux.file_picker_writable/events"
     ).setStreamHandler(object :
       EventChannel.StreamHandler {
