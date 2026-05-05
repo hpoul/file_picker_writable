@@ -58,6 +58,7 @@ public class FilePickerWritablePlugin: NSObject, FlutterPlugin {
 
     registrar.addMethodCallDelegate(self, channel: channel)
     registrar.addApplicationDelegate(self)
+    registrar.addSceneDelegate(self)
 
     let eventChannel = FlutterEventChannel(name: "design.codeux.file_picker_writable/events", binaryMessenger: registrar.messenger())
     eventChannel.setStreamHandler(self)
@@ -339,7 +340,7 @@ extension FilePickerWritablePlugin: UIDocumentPickerDelegate {
 }
 
 // application delegate methods..
-extension FilePickerWritablePlugin: FlutterApplicationLifeCycleDelegate {
+extension FilePickerWritablePlugin: FlutterApplicationLifeCycleDelegate, FlutterSceneLifeCycleDelegate {
   public func application(_ application: UIApplication, open url: URL, options: [UIApplication.OpenURLOptionsKey: Any] = [:]) -> Bool {
     logDebug("Opening URL \(url) - options: \(options)")
     let persistable: Bool
@@ -371,6 +372,28 @@ extension FilePickerWritablePlugin: FlutterApplicationLifeCycleDelegate {
     logDebug("continue userActivity webpageURL: \(incomingURL)")
     // TODO: Confirm that persistable should be true here
     return _handle(url: incomingURL, persistable: true)
+  }
+
+  public func scene(_ scene: UIScene, willConnectTo session: UISceneSession, options connectionOptions: UIScene.ConnectionOptions?) -> Bool {
+    logDebug("scene will connect with \(connectionOptions?.urlContexts.count ?? 0) URLContexts")
+    var handled = false
+    if let urlContexts = connectionOptions?.urlContexts {
+      for context in urlContexts {
+        logDebug("attempting to handle \(context.url)")
+        handled = _handle(url: context.url, persistable: context.options.openInPlace) || handled
+      }
+    }
+    return handled
+  }
+
+  public func scene(_ scene: UIScene, openURLContexts URLContexts: Set<UIOpenURLContext>) -> Bool {
+    var handled = false
+    logDebug("openURLContexts for \(URLContexts.count) items")
+    for context in URLContexts {
+      logDebug("attempting to handle \(context.url)")
+      handled = _handle(url: context.url, persistable: context.options.openInPlace) || handled
+    }
+    return handled
   }
     
   private func _handle(url: URL, persistable: Bool) -> Bool {
