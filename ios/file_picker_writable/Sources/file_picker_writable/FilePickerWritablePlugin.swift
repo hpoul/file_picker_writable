@@ -16,7 +16,19 @@ enum FilePickerError: Error {
 public class FilePickerWritablePlugin: NSObject, FlutterPlugin {
   private var _viewController: UIViewController {
     get throws {
-      guard let vc = UIApplication.shared.delegate?.window??.rootViewController else {
+      var vc: UIViewController?
+      if #available(iOS 13, *) {
+        for scene in UIApplication.shared.connectedScenes {
+          guard let scene = scene as? UIWindowScene else { continue }
+          for window in scene.windows {
+            guard window.isKeyWindow else { continue }
+            vc = window.rootViewController
+          }
+        }
+      } else {
+        vc = UIApplication.shared.keyWindow?.rootViewController
+      }
+      guard let vc = vc else {
         throw FilePickerError.noViewController
       }
       return vc
