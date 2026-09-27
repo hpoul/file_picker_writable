@@ -1,22 +1,16 @@
 PODS:
-  - file_picker_writable (0.0.1):
-    - FlutterMacOS
   - FlutterMacOS (1.0.0)
 
 DEPENDENCIES:
-  - file_picker_writable (from `Flutter/ephemeral/.symlinks/plugins/file_picker_writable/macos`)
   - FlutterMacOS (from `Flutter/ephemeral`)
 
 EXTERNAL SOURCES:
-  file_picker_writable:
-    :path: Flutter/ephemeral/.symlinks/plugins/file_picker_writable/macos
   FlutterMacOS:
     :path: Flutter/ephemeral
 
 SPEC CHECKSUMS:
-  file_picker_writable: 016b61062ce0bfdd9f4e6cc43109a9d12c5023e7
-  FlutterMacOS: d0db08ddef1a9af05a5ec4b724367152bb0500b1
+  FlutterMacOS: c232990155153907050900a2e175c7773903ba4e
 
-PODFILE CHECKSUM: 54d867c82ac51cbd61b565781b9fada492027009
+PODFILE CHECKSUM: 1e95c36afbfd1cb6423ceca4de7a8e1b256fb6ac
 
 COCOAPODS: 1.16.2

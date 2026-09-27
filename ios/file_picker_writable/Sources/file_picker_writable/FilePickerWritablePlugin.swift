@@ -13,7 +13,7 @@ enum FilePickerError: Error {
   case noViewController
 }
 
-public class SwiftFilePickerWritablePlugin: NSObject, FlutterPlugin {
+public class FilePickerWritablePlugin: NSObject, FlutterPlugin {
   private var _viewController: UIViewController {
     get throws {
       guard let vc = UIApplication.shared.delegate?.window??.rootViewController else {
@@ -31,8 +31,11 @@ public class SwiftFilePickerWritablePlugin: NSObject, FlutterPlugin {
   private var _eventSink: FlutterEventSink?
   private var _eventQueue: [[String: String]] = []
 
+  // Exposed to Objective-C so the (ObjC) plugin registrant can call it
+  // when this plugin is integrated via CocoaPods.
+  @objc(registerWithRegistrar:)
   public static func register(with registrar: FlutterPluginRegistrar) {
-    _ = SwiftFilePickerWritablePlugin(registrar: registrar)
+    _ = FilePickerWritablePlugin(registrar: registrar)
   }
 
   public init(registrar: FlutterPluginRegistrar) {
@@ -286,7 +289,7 @@ public class SwiftFilePickerWritablePlugin: NSObject, FlutterPlugin {
   }
 }
 
-extension SwiftFilePickerWritablePlugin: UIDocumentPickerDelegate {
+extension FilePickerWritablePlugin: UIDocumentPickerDelegate {
   public func documentPicker(_ controller: UIDocumentPickerViewController, didPickDocumentAt url: URL) {
     do {
       if let path = _filePickerPath {
@@ -324,7 +327,7 @@ extension SwiftFilePickerWritablePlugin: UIDocumentPickerDelegate {
 }
 
 // application delegate methods..
-extension SwiftFilePickerWritablePlugin: FlutterApplicationLifeCycleDelegate {
+extension FilePickerWritablePlugin: FlutterApplicationLifeCycleDelegate {
   public func application(_ application: UIApplication, open url: URL, options: [UIApplication.OpenURLOptionsKey: Any] = [:]) -> Bool {
     logDebug("Opening URL \(url) - options: \(options)")
     let persistable: Bool
@@ -409,7 +412,7 @@ extension SwiftFilePickerWritablePlugin: FlutterApplicationLifeCycleDelegate {
   }
 }
 
-extension SwiftFilePickerWritablePlugin: FlutterStreamHandler {
+extension FilePickerWritablePlugin: FlutterStreamHandler {
   public func onListen(withArguments arguments: Any?, eventSink events: @escaping FlutterEventSink) -> FlutterError? {
     _eventSink = events
     let queue = _eventQueue

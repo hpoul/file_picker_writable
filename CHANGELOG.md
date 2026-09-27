@@ -13,6 +13,10 @@
   widget test. Add `FileInfo` JSON unit tests; `flutter analyze` is clean.
 * Verified: example runs on Android (API 36 emulator) and iOS (simulator)
   with Flutter 3.47.
+* Add Swift Package Manager support for iOS and macOS (CocoaPods still
+  supported). Native sources moved to `ios`/`macos/file_picker_writable`;
+  the Objective-C shim is removed and the Swift plugin class is now
+  `FilePickerWritablePlugin`.
 
 ## 2.1.0+1
 
