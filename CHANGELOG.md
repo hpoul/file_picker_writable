@@ -19,6 +19,11 @@
   `FilePickerWritablePlugin`.
 * SPM: exclude the unreferenced PrivacyInfo.xcprivacy from targets to silence
   SwiftPM unhandled-file warnings.
+* Add drag-and-drop file intake on Android: drops onto the app window are
+  delivered grouped as FileInfo + temp files via registerDropHandler, with
+  registerDropHoverHandler for drop-target highlighting. Every dropped file
+  is copied before drop permissions are released; items without a file URI
+  are skipped. The example gains a drop-target demo.
 
 ## 2.1.0+1
 

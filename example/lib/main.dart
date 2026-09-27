@@ -75,11 +75,13 @@ class MainScreen extends StatefulWidget {
 
 class MainScreenState extends State<MainScreen> {
   AppDataBloc get _appDataBloc => widget.appDataBloc;
+  late final FilePickerState _pickerState;
 
   @override
   void initState() {
     super.initState();
     final state = FilePickerWritable().init();
+    _pickerState = state;
     state.registerFileOpenHandler((fileInfo, file) async {
       _logger.fine('got file info. we are mounted:$mounted');
       if (!mounted) {
@@ -148,6 +150,7 @@ class MainScreenState extends State<MainScreen> {
                     ),
                   ],
                 ),
+                DropTargetDemo(pickerState: _pickerState),
                 ...?(!snapshot.hasData
                     ? null
                     : snapshot.data!.files.map((fileInfo) => FileInfoDisplay(
@@ -360,5 +363,106 @@ class SimpleAlertDialog extends StatelessWidget {
       titleText: 'Error',
       bodyText: e.toString(),
     ).show(context);
+  }
+}
+
+class DropTargetDemo extends StatefulWidget {
+  const DropTargetDemo({super.key, required this.pickerState});
+  final FilePickerState pickerState;
+
+  @override
+  DropTargetDemoState createState() => DropTargetDemoState();
+}
+
+class DropTargetDemoState extends State<DropTargetDemo> {
+  bool _hovering = false;
+  final List<String> _drops = [];
+
+  @override
+  void initState() {
+    super.initState();
+    widget.pickerState.registerDropHandler(_onDrop);
+    widget.pickerState.registerDropHoverHandler(_onHover);
+  }
+
+  @override
+  void dispose() {
+    widget.pickerState.removeDropHandler(_onDrop);
+    widget.pickerState.removeDropHoverHandler(_onHover);
+    super.dispose();
+  }
+
+  Future<bool> _onDrop(DropEvent drop) async {
+    final summaries = <String>[];
+    for (final item in drop.items) {
+      final bytes = await item.file.readAsBytes();
+      summaries.add(
+          '${item.fileInfo.fileName ?? 'unnamed'} (${bytes.length} bytes)');
+      _logger.fine('Drop: ${item.fileInfo}');
+    }
+    if (!mounted) {
+      return true;
+    }
+    setState(() {
+      _drops.addAll(summaries);
+    });
+    return true;
+  }
+
+  void _onHover(bool entered) {
+    setState(() {
+      _hovering = entered;
+    });
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    return Padding(
+      padding: const EdgeInsets.all(8.0),
+      child: Card(
+        elevation: 2,
+        child: Padding(
+          padding: const EdgeInsets.all(16.0),
+          child: Column(
+            children: <Widget>[
+              const Text('Drop target (Android)'),
+              const SizedBox(height: 8),
+              AnimatedContainer(
+                duration: const Duration(milliseconds: 150),
+                width: double.infinity,
+                padding: const EdgeInsets.all(24.0),
+                decoration: BoxDecoration(
+                  border: Border.all(
+                    color: _hovering
+                        ? theme.colorScheme.primary
+                        : theme.colorScheme.outline,
+                    width: _hovering ? 3.0 : 1.0,
+                  ),
+                  borderRadius: BorderRadius.circular(8.0),
+                ),
+                child: Text(
+                  _hovering
+                      ? 'Release to drop!'
+                      : 'Drop files anywhere in the window.',
+                  textAlign: TextAlign.center,
+                ),
+              ),
+              ..._drops.map((summary) => Text(
+                    summary,
+                    style: theme.textTheme.bodySmall,
+                  )),
+              if (_drops.isEmpty)
+                ...[
+                  Text(
+                    'No drops yet.',
+                    style: theme.textTheme.bodySmall,
+                  ),
+                ],
+            ],
+          ),
+        ),
+      ),
+    );
   }
 }
