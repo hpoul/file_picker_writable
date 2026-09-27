@@ -181,6 +181,26 @@ class FilePickerWritablePlugin : FlutterPlugin, MethodCallHandler,
     channel.invokeMethod("handleUri", uri.toString())
   }
 
+  @MainThread
+  override fun handleDrop(files: List<Map<String, String>>) {
+    channel.invokeMethod("handleDrop", mapOf("files" to files))
+  }
+
+  @MainThread
+  override fun dragEntered() {
+    channel.invokeMethod("dragEntered", null)
+  }
+
+  @MainThread
+  override fun dragExited() {
+    channel.invokeMethod("dragExited", null)
+  }
+
+  @MainThread
+  override fun sendError(message: String) {
+    channel.invokeMethod("handleError", mapOf("message" to message))
+  }
+
   private fun sendEvent(event: Map<String, String>) {
     launch(Dispatchers.Main) {
       eventSink?.success(event) ?: eventQueue.add(event)

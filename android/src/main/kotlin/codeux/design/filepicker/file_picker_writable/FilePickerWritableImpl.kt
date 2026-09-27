@@ -3,12 +3,15 @@ package codeux.design.filepicker.file_picker_writable
 import android.app.Activity
 import android.app.Activity.RESULT_OK
 import android.content.ActivityNotFoundException
+import android.content.ClipData
 import android.content.ContentResolver
 import android.content.Intent
 import android.database.Cursor
 import android.net.Uri
 import android.os.Build
 import android.provider.OpenableColumns
+import android.view.DragEvent
+import android.view.View
 import androidx.annotation.MainThread
 import io.flutter.embedding.engine.plugins.activity.ActivityPluginBinding
 import io.flutter.plugin.common.MethodChannel
@@ -26,6 +29,14 @@ interface ActivityProvider : CoroutineScope {
   fun openFile(fileInfo: Map<String, String>)
   @MainThread
   fun handleOpenUri(uri: Uri)
+  @MainThread
+  fun handleDrop(files: List<Map<String, String>>)
+  @MainThread
+  fun dragEntered()
+  @MainThread
+  fun dragExited()
+  @MainThread
+  fun sendError(message: String)
 }
 
 class FilePickerWritableImpl(
@@ -212,23 +223,38 @@ class FilePickerWritableImpl(
   }
 
   @MainThread
-  private suspend fun copyContentUriAndReturnFileInfo(fileUri: Uri): Map<String, String> {
+  private suspend fun copyContentUriAndReturnFileInfo(
+    fileUri: Uri,
+    attemptPersistablePermission: Boolean = true,
+    fileNameFallback: String? = null
+  ): Map<String, String> {
     val activity = requireActivity()
 
     val contentResolver = activity.applicationContext.contentResolver
 
     return withContext(Dispatchers.IO) {
       var persistable = false
-      try {
-        val takeFlags: Int = Intent.FLAG_GRANT_READ_URI_PERMISSION or
-          Intent.FLAG_GRANT_WRITE_URI_PERMISSION
-        contentResolver.takePersistableUriPermission(fileUri, takeFlags)
-        persistable = true
-      } catch (e: SecurityException) {
-        plugin.logDebug("Couldn't take persistable URI permission on $fileUri", e)
+      if (attemptPersistablePermission) {
+        try {
+          val takeFlags: Int = Intent.FLAG_GRANT_READ_URI_PERMISSION or
+            Intent.FLAG_GRANT_WRITE_URI_PERMISSION
+          contentResolver.takePersistableUriPermission(fileUri, takeFlags)
+          persistable = true
+        } catch (e: SecurityException) {
+          plugin.logDebug("Couldn't take persistable URI permission on $fileUri", e)
+        }
       }
 
-      val fileName = readFileInfo(fileUri, contentResolver)
+      val fileName = if (fileNameFallback != null) {
+        try {
+          readFileInfo(fileUri, contentResolver)
+        } catch (e: Exception) {
+          plugin.logDebug("Couldn't read display name for $fileUri, using fallback.", e)
+          fileNameFallback
+        }
+      } else {
+        readFileInfo(fileUri, contentResolver)
+      }
 
       val tempFile =
         File.createTempFile(
@@ -283,11 +309,13 @@ class FilePickerWritableImpl(
 
   fun onDetachedFromActivity(binding: ActivityPluginBinding) {
     binding.removeActivityResultListener(this)
+    detachDropIntake()
   }
 
   fun onAttachedToActivity(binding: ActivityPluginBinding) {
     binding.addActivityResultListener(this)
     binding.addOnNewIntentListener(this)
+    attachDropIntake(binding.activity)
     onNewIntent(binding.activity.intent)
   }
 
@@ -390,6 +418,96 @@ class FilePickerWritableImpl(
     } else {
       plugin.handleOpenUri(uri)
     }
+  }
+
+  // Drop intake: the whole window is the drop target. No filtering or
+  // classifying here; every drag is reported and callers decide.
+
+  private var dragTargetView: View? = null
+
+  private val dropIntakeListener = View.OnDragListener { _, event ->
+    when (event.action) {
+      DragEvent.ACTION_DRAG_STARTED -> plugin.logDebug("Drop intake: drag started.")
+      DragEvent.ACTION_DRAG_ENTERED -> plugin.dragEntered()
+      DragEvent.ACTION_DRAG_EXITED -> plugin.dragExited()
+      DragEvent.ACTION_DROP -> handleDrop(event)
+      // LOCATION and ENDED carry nothing the Dart side needs.
+      else -> {}
+    }
+    // Always accept: returning true for STARTED is required to receive DROP.
+    true
+  }
+
+  private fun attachDropIntake(activity: Activity) {
+    detachDropIntake()
+    val content = activity.findViewById<View>(android.R.id.content)
+    if (content == null) {
+      plugin.logDebug("Drop intake: no content view, drag and drop disabled.")
+      return
+    }
+    dragTargetView = content
+    content.setOnDragListener(dropIntakeListener)
+  }
+
+  private fun detachDropIntake() {
+    dragTargetView?.setOnDragListener(null)
+    dragTargetView = null
+  }
+
+  private fun handleDrop(event: DragEvent) {
+    val clipData = event.clipData
+    if (clipData == null) {
+      plugin.logDebug("Drop intake: drop without ClipData, ignoring.")
+      return
+    }
+    val uriCount = (0 until clipData.itemCount).count { clipData.getItemAt(it).uri != null }
+    if (uriCount == 0) {
+      plugin.logDebug("Drop intake: no file URIs in drop of ${clipData.itemCount} item(s), ignoring.")
+      return
+    }
+    // Request drop permissions synchronously on the UI thread. Every copy
+    // below must complete before permissions.release() runs: Dart only ever
+    // receives paths to temp copies, never URIs we already let go of.
+    val permissions = requireActivity().requestDragAndDropPermissions(event)
+    plugin.launch {
+      try {
+        val files = copyDropItems(clipData)
+        if (files.isEmpty()) {
+          plugin.sendError("Drop intake: failed to copy $uriCount dropped file(s).")
+        } else {
+          if (files.size < uriCount) {
+            plugin.logDebug("Drop intake: copied ${files.size} of $uriCount file(s).")
+          }
+          plugin.handleDrop(files)
+        }
+      } catch (e: Exception) {
+        plugin.logDebug("Drop intake: error handling drop.", e)
+      } finally {
+        permissions?.release()
+      }
+    }
+  }
+
+  private suspend fun copyDropItems(clipData: ClipData): List<Map<String, String>> {
+    val files = mutableListOf<Map<String, String>>()
+    for (i in 0 until clipData.itemCount) {
+      val uri = clipData.getItemAt(i).uri
+      if (uri == null) {
+        plugin.logDebug("Drop intake: skipping item $i without URI.")
+        continue
+      }
+      try {
+        files += copyContentUriAndReturnFileInfo(
+          uri,
+          // Drop permissions are transient and cannot be persisted.
+          attemptPersistablePermission = false,
+          fileNameFallback = uri.lastPathSegment?.takeIf { it.isNotBlank() } ?: "dropped-file-$i"
+        )
+      } catch (e: Exception) {
+        plugin.logDebug("Drop intake: failed to copy $uri.", e)
+      }
+    }
+    return files
   }
 
 }
