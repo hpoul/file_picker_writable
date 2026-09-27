@@ -108,6 +108,23 @@ class FilePickerWritable {
         } else if (call.method == 'handleError') {
           await _filePickerState._fireErrorEvent(
               ErrorEvent.fromJson(call.arguments as Map<dynamic, dynamic>));
+        } else if (call.method == 'handleDrop') {
+          final files = ((call.arguments as Map)['files'] as List)
+              .map((dynamic f) => (f as Map).cast<String, String>());
+          final items = files
+              .map((result) => DropItem(
+                    fileInfo: _resultToFileInfo(result),
+                    file: _resultToFile(result),
+                  ))
+              .toList();
+          await _filePickerState._fireDropHandlers(DropEvent(items));
+          return true;
+        } else if (call.method == 'dragEntered') {
+          _filePickerState._fireDropHover(true);
+          return true;
+        } else if (call.method == 'dragExited') {
+          _filePickerState._fireDropHover(false);
+          return true;
         } else {
           throw PlatformException(
               code: 'MethodNotImplemented',
@@ -446,4 +463,38 @@ class FilePickerState {
   void removeErrorEventHandler(ErrorEventHandler errorEventHandler) =>
       _eventHandlers.remove(
           FilePickerEventHandlerLambda(errorEventHandler: errorEventHandler));
+
+  /// Registers [dropHandler] to be called with every file dropped onto the
+  /// app window, grouped into one [DropEvent] per drag session.
+  /// Temp files are deleted once the drop is handled.
+  /// Currently delivered on Android only.
+  void registerDropHandler(DropHandler dropHandler) =>
+      _registerFilePickerEventHandler(
+          FilePickerEventHandlerLambda(dropHandler: dropHandler));
+
+  /// Removes the given [dropHandler].
+  bool removeDropHandler(DropHandler dropHandler) => _eventHandlers
+      .remove(FilePickerEventHandlerLambda(dropHandler: dropHandler));
+
+  Future<bool> _fireDropHandlers(DropEvent drop) =>
+      _fireEvent(FilePickerEventDrop(drop));
+
+  final List<DropHoverHandler> _dropHoverHandlers = [];
+
+  /// Registers [hoverHandler] to be called when a drag hovers over (`true`)
+  /// or leaves (`false`) the app window.
+  /// Currently delivered on Android only.
+  void registerDropHoverHandler(DropHoverHandler hoverHandler) {
+    _dropHoverHandlers.add(hoverHandler);
+  }
+
+  /// Removes the given [hoverHandler].
+  bool removeDropHoverHandler(DropHoverHandler hoverHandler) =>
+      _dropHoverHandlers.remove(hoverHandler);
+
+  void _fireDropHover(bool entered) {
+    for (final handler in _dropHoverHandlers) {
+      handler(entered);
+    }
+  }
 }
