@@ -13,7 +13,9 @@ A new flutter plugin project.
   s.license          = { :file => '../LICENSE' }
   s.author           = { 'Your Company' => 'email@example.com' }
   s.source           = { :path => '.' }
-  s.source_files     = 'Classes/**/*'
+  s.source_files     = 'file_picker_writable/Sources/file_picker_writable/**/*'
+  # PrivacyInfo.xcprivacy is only used by Swift Package Manager.
+  s.exclude_files    = 'file_picker_writable/Sources/file_picker_writable/PrivacyInfo.xcprivacy'
   s.dependency 'FlutterMacOS'
 
   s.platform = :osx, '12.0'
