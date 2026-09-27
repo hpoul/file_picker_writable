@@ -17,6 +17,8 @@
   supported). Native sources moved to `ios`/`macos/file_picker_writable`;
   the Objective-C shim is removed and the Swift plugin class is now
   `FilePickerWritablePlugin`.
+* SPM: exclude the unreferenced PrivacyInfo.xcprivacy from targets to silence
+  SwiftPM unhandled-file warnings.
 
 ## 2.1.0+1
 
