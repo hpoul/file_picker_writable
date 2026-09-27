@@ -410,6 +410,7 @@ class DropTargetDemoState extends State<DropTargetDemo> {
   }
 
   void _onHover(bool entered) {
+    _logger.fine('Drop hover: $entered');
     setState(() {
       _hovering = entered;
     });
