@@ -10,11 +10,13 @@ other apps. In the same way it will also handle arbitrary URLs and pass them bac
 
 # Requirements
 
+Verified with Flutter 3.47 (stable): the example runs on Android
+(API 36 emulator) and iOS (simulator).
 
 ## iOS
 
-* iOS 8 + Swift 5
-* Only tested on iOS 13+, so let me know ;-)
+* iOS 15+
+* Swift 5
 
 ### Support for file handlers
 
@@ -29,7 +31,7 @@ other apps. In the same way it will also handle arbitrary URLs and pass them bac
 
 ## Android
 
-* Android 4.4 (API Level 4.4)
+* Android 7.0 (API level 24) or later
 * Only supports [plugin api v2](https://flutter.dev/go/android-project-migration).
 
 ### Support for file handlers

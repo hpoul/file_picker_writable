@@ -46,7 +46,7 @@ class AppData implements HasToJson {
 }
 
 class MyApp extends StatefulWidget {
-  const MyApp({Key? key}) : super(key: key);
+  const MyApp({super.key});
 
   @override
   MyAppState createState() => MyAppState();
@@ -66,7 +66,7 @@ class MyAppState extends State<MyApp> {
 }
 
 class MainScreen extends StatefulWidget {
-  const MainScreen({Key? key, required this.appDataBloc}) : super(key: key);
+  const MainScreen({super.key, required this.appDataBloc});
   final AppDataBloc appDataBloc;
 
   @override
@@ -197,10 +197,10 @@ class MainScreenState extends State<MainScreen> {
 
 class FileInfoDisplay extends StatelessWidget {
   const FileInfoDisplay({
-    Key? key,
+    super.key,
     required this.fileInfo,
     required this.appDataBloc,
-  }) : super(key: key);
+  });
 
   final AppDataBloc appDataBloc;
   final FileInfo fileInfo;
@@ -240,7 +240,7 @@ class FileInfoDisplay extends StatelessWidget {
                     ?.apply(fontSizeFactor: 0.7)
                     .copyWith(fontWeight: FontWeight.bold),
               ),
-              ButtonBar(
+              OverflowBar(
                 alignment: MainAxisAlignment.end,
                 children: <Widget>[
                   TextButton(
@@ -270,7 +270,9 @@ class FileInfoDisplay extends StatelessWidget {
                             final content =
                                 'New Content written at ${DateTime.now()}.\n\n';
                             await file.writeAsString(content);
-                            // ignore: use_build_context_synchronously
+                            if (!context.mounted) {
+                              return;
+                            }
                             await SimpleAlertDialog(
                               bodyText: 'Written: $content',
                             ).show(context);
@@ -308,8 +310,8 @@ class FileInfoDisplay extends StatelessWidget {
 }
 
 class SimpleAlertDialog extends StatelessWidget {
-  const SimpleAlertDialog({Key? key, this.titleText, required this.bodyText})
-      : super(key: key);
+  const SimpleAlertDialog(
+      {super.key, this.titleText, required this.bodyText});
   final String? titleText;
   final String bodyText;
 
@@ -344,7 +346,9 @@ class SimpleAlertDialog extends StatelessWidget {
     final utf8String = utf8.decode(data, allowMalformed: true);
     final fileContentExample = 'hexString: $hexString\n\nutf8: $utf8String';
 
-    // ignore: use_build_context_synchronously
+    if (!context.mounted) {
+      return;
+    }
     await SimpleAlertDialog(
       titleText: 'Read first ${data.length} bytes of file',
       bodyText: '$bodyTextPrefix $fileContentExample',

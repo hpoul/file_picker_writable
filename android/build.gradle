@@ -2,14 +2,14 @@ group 'codeux.design.filepicker.file_picker_writable'
 version '1.0-SNAPSHOT'
 
 buildscript {
-    ext.kotlin_version = '1.8.10'
+    ext.kotlin_version = '2.4.0'
     repositories {
         google()
         mavenCentral()
     }
 
     dependencies {
-        classpath 'com.android.tools.build:gradle:8.1.0'
+        classpath 'com.android.tools.build:gradle:9.1.0'
         classpath "org.jetbrains.kotlin:kotlin-gradle-plugin:$kotlin_version"
     }
 }
@@ -23,23 +23,22 @@ rootProject.allprojects {
 
 apply plugin: 'com.android.library'
 
-def agpMajor = com.android.Version.ANDROID_GRADLE_PLUGIN_VERSION.tokenize('.')[0] as int
-
-if (agpMajor < 9) {
-   apply plugin: 'kotlin-android'
-}
-
 android {
     namespace "codeux.design.filepicker.file_picker_writable"
-    compileSdk 33
+    compileSdk 36
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
 
     sourceSets {
         main.java.srcDirs += 'src/main/kotlin'
     }
     defaultConfig {
-        minSdkVersion 19
+        minSdkVersion 24
     }
-    lintOptions {
+    lint {
         disable 'InvalidPackage'
     }
 }

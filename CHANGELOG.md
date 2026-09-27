@@ -1,3 +1,18 @@
+## Unreleased
+
+* Modernize Android build for current stable Flutter: AGP 9.1.0, Kotlin 2.4.0,
+  Gradle 9.3.1, compileSdk/targetSdk 36, minSdk 24 (Android 7.0+). The example
+  app uses the declarative Gradle plugins DSL; the Kotlin plugin is no longer
+  applied explicitly (the Flutter Gradle plugin applies it).
+* iOS: raise minimum deployment target to 15.0; the example adopts the
+  Flutter tool's implicit-engine AppDelegate and scene manifest migration;
+  replace the deprecated `VALID_ARCHS` simulator restriction with
+  `EXCLUDED_ARCHS` (fixes Apple Silicon simulator builds).
+* Example: fix analyzer warnings, update stale SDK constraints, fix the
+  widget test. Add `FileInfo` JSON unit tests; `flutter analyze` is clean.
+* Verified: example runs on Android (API 36 emulator) and iOS (simulator)
+  with Flutter 3.47.
+
 ## 2.1.0+1
 
 * Android: require `compileSdk 33`
