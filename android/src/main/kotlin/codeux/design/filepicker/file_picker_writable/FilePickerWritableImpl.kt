@@ -425,17 +425,32 @@ class FilePickerWritableImpl(
 
   private var dragTargetView: View? = null
 
+  private var dragInsideWindow = false
+
   private val dropIntakeListener = View.OnDragListener { _, event ->
     when (event.action) {
       DragEvent.ACTION_DRAG_STARTED -> plugin.logDebug("Drop intake: drag started.")
-      DragEvent.ACTION_DRAG_ENTERED -> plugin.dragEntered()
-      DragEvent.ACTION_DRAG_EXITED -> plugin.dragExited()
+      DragEvent.ACTION_DRAG_ENTERED -> {
+        dragInsideWindow = true
+        plugin.dragEntered()
+      }
+      DragEvent.ACTION_DRAG_EXITED -> exitDrag()
+      // After a drop the framework sends DROP then ENDED with no EXITED;
+      // ENDED is also the only signal when the drag ends outside our window.
+      DragEvent.ACTION_DRAG_ENDED -> exitDrag()
       DragEvent.ACTION_DROP -> handleDrop(event)
-      // LOCATION and ENDED carry nothing the Dart side needs.
+      // LOCATION carries nothing the Dart side needs.
       else -> {}
     }
     // Always accept: returning true for STARTED is required to receive DROP.
     true
+  }
+
+  // Callbacks run on the main thread, so no synchronization is needed.
+  private fun exitDrag() {
+    if (!dragInsideWindow) return
+    dragInsideWindow = false
+    plugin.dragExited()
   }
 
   private fun attachDropIntake(activity: Activity) {
