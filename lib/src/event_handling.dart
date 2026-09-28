@@ -23,6 +23,10 @@ typedef ErrorEventHandler = Future<bool> Function(ErrorEvent errorEvent);
 /// session. Temp files are deleted once the drop is handled, so copy them
 /// elsewhere first to keep them.
 ///
+/// A group may hold fewer files than the drag carried when individual
+/// copies fail; such a partial delivery is additionally reported as an
+/// error event.
+///
 /// The handler must return `true` if it has handled the drop.
 ///
 /// Currently delivered on Android only.
@@ -43,7 +47,7 @@ class DropItem {
 
 /// All files of one drag-and-drop session, delivered as a group.
 class DropEvent {
-  DropEvent(this.items);
+  DropEvent(List<DropItem> items) : items = List.unmodifiable(items);
   final List<DropItem> items;
 }
 
@@ -51,7 +55,7 @@ abstract class FilePickerEventHandler {
   @Deprecated('Use [handleFileOpen] instead')
   Future<bool> handleFileInfo(FileInfo fileInfo) async => false;
   Future<bool> handleFileOpen(FileInfo fileInfo, File file);
-  Future<bool> handleDrop(DropEvent drop);
+  Future<bool> handleDrop(DropEvent drop) async => false;
   Future<bool> handleUri(Uri uri);
   Future<bool> handleErrorEvent(ErrorEvent errorEvent) async => false;
 }

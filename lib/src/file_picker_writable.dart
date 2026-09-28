@@ -361,7 +361,11 @@ class FilePickerWritable {
 /// like file opening and error handling.
 class FilePickerState {
   final List<FilePickerEventHandler> _eventHandlers = [];
-  FilePickerEvent? _pendingEvent;
+
+  /// Events that arrived while no handler accepted them, in arrival order.
+  /// Each registration offers the queued events, oldest first, to the new
+  /// handler; handled ones are disposed and dropped from the queue.
+  final List<FilePickerEvent> _pendingEvents = [];
 
 //  void init() {
 //    FilePickerWritable().init(openFileHandler: (fileInfo) {
@@ -386,16 +390,13 @@ class FilePickerState {
 
   Future<bool> _fireEvent(FilePickerEvent event) async {
     try {
-      for (final handler in _eventHandlers) {
+      for (final handler in _eventHandlers.toList()) {
         if (await event.dispatch(handler)) {
           unawaited(event.dispose());
           return true;
         }
       }
-      if (_pendingEvent != null) {
-        unawaited(_pendingEvent?.dispose());
-      }
-      _pendingEvent = event;
+      _pendingEvents.add(event);
       return false;
     } catch (e, stackTrace) {
       _logger.severe('Error while dispatching ${event.debugMessage} event.', e,
@@ -407,11 +408,12 @@ class FilePickerState {
   final _pendingEventLock = Lock();
 
   void _registerFilePickerEventHandler(FilePickerEventHandler handler) {
-    if (_pendingEvent != null) {
+    if (_pendingEvents.isNotEmpty) {
       _pendingEventLock.synchronized(() async {
-        if (_pendingEvent != null) {
-          if (await _pendingEvent!.dispatch(handler)) {
-            _pendingEvent = null;
+        for (final pending in _pendingEvents.toList()) {
+          if (await pending.dispatch(handler)) {
+            _pendingEvents.remove(pending);
+            unawaited(pending.dispose());
           }
         }
       });
@@ -466,7 +468,10 @@ class FilePickerState {
 
   /// Registers [dropHandler] to be called with every file dropped onto the
   /// app window, grouped into one [DropEvent] per drag session.
-  /// Temp files are deleted once the drop is handled.
+  /// Temp files are deleted once the drop is handled, so copy them
+  /// elsewhere first to keep them.
+  /// Drops that arrive before any handler is registered wait in a queue
+  /// and are delivered, oldest first, when a handler registers.
   /// Currently delivered on Android only.
   void registerDropHandler(DropHandler dropHandler) =>
       _registerFilePickerEventHandler(
@@ -493,7 +498,7 @@ class FilePickerState {
       _dropHoverHandlers.remove(hoverHandler);
 
   void _fireDropHover(bool entered) {
-    for (final handler in _dropHoverHandlers) {
+    for (final handler in _dropHoverHandlers.toList()) {
       handler(entered);
     }
   }

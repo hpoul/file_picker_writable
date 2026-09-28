@@ -1,8 +1,8 @@
 // Faked-backend channel tests for drop intake.
 //
 // The native side is faked: these tests prove the Dart contract (grouped
-// delivery, FileInfo shape, hover callbacks, temp cleanup, pending
-// delivery) — not the Android behavior. Only a real device/emulator drop
+// delivery, FileInfo shape, hover callbacks, temp cleanup, pending queue)
+// — not the Android behavior. Only a real device/emulator drop
 // can prove:
 // - the activity content view receives drag events (STARTED accepted),
 // - requestDragAndDropPermissions grants readable URIs and every copy
@@ -156,7 +156,8 @@ void main() {
   });
 
   test('delivers pending drops to late handlers', () async {
-    await fireDrop([dropFile('late.txt', 'late')]);
+    final late = dropFile('late.txt', 'late');
+    await fireDrop([late]);
 
     final received = <DropEvent>[];
     Future<bool> onDrop(DropEvent drop) async {
@@ -168,6 +169,57 @@ void main() {
       await waitFor(() => received.isNotEmpty,
           description: 'pending drop delivery');
       expect(received.single.items.single.fileInfo.fileName, 'late.txt');
+      // The pending path must clean up exactly like direct dispatch.
+      await waitFor(() => !File(late['path']!).existsSync(),
+          description: 'pending temp file deletion');
+    } finally {
+      pickerState.removeDropHandler(onDrop);
+    }
+  });
+
+  test('queues drops that arrive before any handler registers', () async {
+    await fireDrop([dropFile('first.txt', 'first')]);
+    await fireDrop([dropFile('second.txt', 'second')]);
+
+    final received = <DropEvent>[];
+    Future<bool> onDrop(DropEvent drop) async {
+      received.add(drop);
+      return true;
+    }
+    pickerState.registerDropHandler(onDrop);
+    try {
+      await waitFor(() => received.length == 2,
+          description: 'queued drop delivery');
+      expect(
+          received.map((drop) => drop.items.single.fileInfo.fileName),
+          ['first.txt', 'second.txt']);
+    } finally {
+      pickerState.removeDropHandler(onDrop);
+    }
+  });
+
+  test('passes identifiers through unfiltered', () async {
+    final file = File('${tempDir.path}/odd.bin')
+      ..writeAsStringSync('odd');
+    final received = <DropEvent>[];
+    Future<bool> onDrop(DropEvent drop) async {
+      received.add(drop);
+      return true;
+    }
+    pickerState.registerDropHandler(onDrop);
+    try {
+      await fireDrop([
+        <String, String>{
+          'path': file.path,
+          'identifier': 'weird-scheme://odd?x=1#frag',
+          'persistable': 'false',
+          'uri': 'content://odd/provider',
+        },
+      ]);
+      final fileInfo = received.single.items.single.fileInfo;
+      expect(fileInfo.identifier, 'weird-scheme://odd?x=1#frag');
+      expect(fileInfo.uri, 'content://odd/provider');
+      expect(fileInfo.fileName, isNull);
     } finally {
       pickerState.removeDropHandler(onDrop);
     }

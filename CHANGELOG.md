@@ -23,7 +23,9 @@
   delivered grouped as FileInfo + temp files via registerDropHandler, with
   registerDropHoverHandler for drop-target highlighting. Every dropped file
   is copied before drop permissions are released; items without a file URI
-  are skipped. The example gains a drop-target demo.
+  are skipped, and a drop carrying no file URIs at all is ignored silently.
+  A partial group (some copies failed) is delivered together with an error
+  event. The example gains a drop-target demo.
 
 ## 2.1.0+1
 

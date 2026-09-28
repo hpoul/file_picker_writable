@@ -256,19 +256,22 @@ class FilePickerWritableImpl(
         readFileInfo(fileUri, contentResolver)
       }
 
-      val tempFile =
-        File.createTempFile(
-          // use a maximum of 20 characters.
-          // It's just a temp file name so does not really matter.
-          fileName.take(20),
-          null, activity.cacheDir
-        )
+      // createTempFile requires a prefix of at least 3 characters; a
+      // one- or two-character display name would throw here.
+      val tempPrefix = fileName.take(20).padEnd(3, '_')
+      val tempFile = File.createTempFile(tempPrefix, null, activity.cacheDir)
       plugin.logDebug("Copy file $fileUri to $tempFile")
-      contentResolver.openInputStream(fileUri).use { input ->
-        requireNotNull(input)
-        tempFile.outputStream().use { output ->
-          input.copyTo(output)
+      try {
+        contentResolver.openInputStream(fileUri).use { input ->
+          requireNotNull(input)
+          tempFile.outputStream().use { output ->
+            input.copyTo(output)
+          }
         }
+      } catch (e: Exception) {
+        // Don't orphan the temp file when the copy fails.
+        tempFile.delete()
+        throw e
       }
       mapOf(
         "path" to tempFile.absolutePath,
@@ -453,6 +456,9 @@ class FilePickerWritableImpl(
     plugin.dragExited()
   }
 
+  // Takes over the content view's OnDragListener. View offers no getter
+  // for a previously set listener, so a host-set listener cannot be
+  // preserved or restored; detach clears ours back to null.
   private fun attachDropIntake(activity: Activity) {
     detachDropIntake()
     val content = activity.findViewById<View>(android.R.id.content)
@@ -467,6 +473,8 @@ class FilePickerWritableImpl(
   private fun detachDropIntake() {
     dragTargetView?.setOnDragListener(null)
     dragTargetView = null
+    // The removed listener never sees ENDED; close the hover state here.
+    exitDrag()
   }
 
   private fun handleDrop(event: DragEvent) {
@@ -490,10 +498,12 @@ class FilePickerWritableImpl(
         if (files.isEmpty()) {
           plugin.sendError("Drop intake: failed to copy $uriCount dropped file(s).")
         } else {
-          if (files.size < uriCount) {
-            plugin.logDebug("Drop intake: copied ${files.size} of $uriCount file(s).")
-          }
+          // Deliver the subset first, then report the shortfall so callers
+          // can tell a partial group from a complete one.
           plugin.handleDrop(files)
+          if (files.size < uriCount) {
+            plugin.sendError("Drop intake: copied ${files.size} of $uriCount file(s).")
+          }
         }
       } catch (e: Exception) {
         plugin.logDebug("Drop intake: error handling drop.", e)
