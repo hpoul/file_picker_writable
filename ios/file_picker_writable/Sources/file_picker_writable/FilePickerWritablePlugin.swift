@@ -468,12 +468,14 @@ extension FilePickerWritablePlugin: FlutterStreamHandler {
   }
     
   private func sendEvent(event: [String: String]) {
-    if let _eventSink = _eventSink {
-      DispatchQueue.main.async {
+    // Whole body on main: callers may be on a background queue, and both
+    // the sink and the queue are also touched from onListen/onCancel.
+    DispatchQueue.main.async { [self] in
+      if let _eventSink = _eventSink {
         _eventSink(event)
+      } else {
+        _eventQueue.append(event)
       }
-    } else {
-      _eventQueue.append(event)
     }
   }
 }

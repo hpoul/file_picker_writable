@@ -32,9 +32,10 @@
 * iOS: look up view controllers from the key window's scene on iOS 13+
   (fixes scene-based apps), handle launch-time and runtime URLs through
   the scene delegate, and stop consuming universal links so they reach
-  Flutter's own deep linking and other plugins (fixes #38). Long-running
-  file work now runs off the UI thread with results delivered on the main
-  thread. Thanks @amake (rollup of #50, #53, #48, #43).
+  Flutter's own deep linking and other plugins (fixes #38). Bookmark
+  reads and document-picker file work now run off the UI thread with
+  results delivered on the main thread. Thanks @amake (rollup of #50,
+  #53, #48, #43).
 * Android: file read/write/dispose no longer require an Activity and fall
   back to the application context, e.g. when invoked from background
   tasks. Thanks @amake (rollup of #52).
