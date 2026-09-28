@@ -153,17 +153,27 @@ public class FilePickerWritablePlugin: NSObject, FlutterPlugin {
     var isStale = false
     let url = try URL(resolvingBookmarkData: bookmark, bookmarkDataIsStale: &isStale)
     logDebug("url: \(url) / isStale: \(isStale)")
-    let securityScope = url.startAccessingSecurityScopedResource()
-    defer {
-      if securityScope {
-        url.stopAccessingSecurityScopedResource()
+    DispatchQueue.global(qos: .userInitiated).async { [self] in
+      let securityScope = url.startAccessingSecurityScopedResource()
+      defer {
+        if securityScope {
+          url.stopAccessingSecurityScopedResource()
+        }
+      }
+      if !securityScope {
+        logDebug("Warning: startAccessingSecurityScopedResource is false for \(url).")
+      }
+      do {
+        let copiedFile = try _copyToTempDirectory(url: url)
+        DispatchQueue.main.async { [self] in
+          result(_fileInfoResult(tempFile: copiedFile, originalURL: url, bookmark: bookmark))
+        }
+      } catch {
+        DispatchQueue.main.async {
+          result(FlutterError(code: "UnknownError", message: "\(error)", details: nil))
+        }
       }
     }
-    if !securityScope {
-      logDebug("Warning: startAccessingSecurityScopedResource is false for \(url).")
-    }
-    let copiedFile = try _copyToTempDirectory(url: url)
-    result(_fileInfoResult(tempFile: copiedFile, originalURL: url, bookmark: bookmark))
   }
     
   func writeFile(identifier: String, path: String, result: @escaping FlutterResult) throws {
@@ -295,44 +305,48 @@ public class FilePickerWritablePlugin: NSObject, FlutterPlugin {
   }
 
   private func _sendFilePickerResult(_ result: Any?) {
-    if let _result = _filePickerResult {
-      _result(result)
+    DispatchQueue.main.async { [self] in
+      if let _result = _filePickerResult {
+        _result(result)
+      }
+      _filePickerResult = nil
     }
-    _filePickerResult = nil
   }
 }
 
 extension FilePickerWritablePlugin: UIDocumentPickerDelegate {
   public func documentPicker(_ controller: UIDocumentPickerViewController, didPickDocumentAt url: URL) {
-    do {
-      if let path = _filePickerPath {
-        _filePickerPath = nil
-        guard url.startAccessingSecurityScopedResource() else {
-          throw FilePickerError.readError(message: "Unable to acquire acces to \(url)")
+    DispatchQueue.global(qos: .userInitiated).async { [self] in
+      do {
+        if let path = _filePickerPath {
+          _filePickerPath = nil
+          guard url.startAccessingSecurityScopedResource() else {
+            throw FilePickerError.readError(message: "Unable to acquire acces to \(url)")
+          }
+          logDebug("Need to write \(path) to \(url)")
+          let sourceFile = URL(fileURLWithPath: path)
+          let targetFile = url.appendingPathComponent(sourceFile.lastPathComponent)
+          //                if !targetFile.startAccessingSecurityScopedResource() {
+          //                    logDebug("Warning: Unnable to acquire acces to \(targetFile)")
+          //                }
+          //                defer {
+          //                    targetFile.stopAccessingSecurityScopedResource()
+          //                }
+          try _writeFile(path: path, destination: targetFile, skipDestinationStartAccess: true)
+
+          let tempFile = try _copyToTempDirectory(url: targetFile)
+          // Get bookmark *after* ensuring file has been created!
+          let bookmark = try targetFile.bookmarkData()
+          _sendFilePickerResult(_fileInfoResult(tempFile: tempFile, originalURL: targetFile, bookmark: bookmark))
+          return
         }
-        logDebug("Need to write \(path) to \(url)")
-        let sourceFile = URL(fileURLWithPath: path)
-        let targetFile = url.appendingPathComponent(sourceFile.lastPathComponent)
-//                if !targetFile.startAccessingSecurityScopedResource() {
-//                    logDebug("Warning: Unnable to acquire acces to \(targetFile)")
-//                }
-//                defer {
-//                    targetFile.stopAccessingSecurityScopedResource()
-//                }
-        try _writeFile(path: path, destination: targetFile, skipDestinationStartAccess: true)
-                
-        let tempFile = try _copyToTempDirectory(url: targetFile)
-        // Get bookmark *after* ensuring file has been created!
-        let bookmark = try targetFile.bookmarkData()
-        _sendFilePickerResult(_fileInfoResult(tempFile: tempFile, originalURL: targetFile, bookmark: bookmark))
+        try _sendFilePickerResult(_prepareUrlForReading(url: url, persistable: true))
+      } catch {
+        _sendFilePickerResult(FlutterError(code: "ErrorProcessingResult", message: "Error handling result url \(url): \(error)", details: nil))
         return
       }
-      try _sendFilePickerResult(_prepareUrlForReading(url: url, persistable: true))
-    } catch {
-      _sendFilePickerResult(FlutterError(code: "ErrorProcessingResult", message: "Error handling result url \(url): \(error)", details: nil))
-      return
     }
-   }
+  }
         
   public func documentPickerWasCancelled(_ controller: UIDocumentPickerViewController) {
     _sendFilePickerResult(nil)
@@ -455,7 +469,9 @@ extension FilePickerWritablePlugin: FlutterStreamHandler {
     
   private func sendEvent(event: [String: String]) {
     if let _eventSink = _eventSink {
-      _eventSink(event)
+      DispatchQueue.main.async {
+        _eventSink(event)
+      }
     } else {
       _eventQueue.append(event)
     }
