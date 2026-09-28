@@ -18,11 +18,14 @@ public class FilePickerWritablePlugin: NSObject, FlutterPlugin {
     get throws {
       var vc: UIViewController?
       if #available(iOS 13, *) {
-        for scene in UIApplication.shared.connectedScenes {
+        // connectedScenes is unordered and each scene can have its own key
+        // window: take the first key window that has a root controller.
+      sceneLoop: for scene in UIApplication.shared.connectedScenes {
           guard let scene = scene as? UIWindowScene else { continue }
           for window in scene.windows {
-            guard window.isKeyWindow else { continue }
-            vc = window.rootViewController
+            guard window.isKeyWindow, let root = window.rootViewController else { continue }
+            vc = root
+            break sceneLoop
           }
         }
       } else {
@@ -39,7 +42,7 @@ public class FilePickerWritablePlugin: NSObject, FlutterPlugin {
   private var _filePickerResult: FlutterResult?
   private var _filePickerPath: String?
   private var isInitialized = false
-  private var _initOpen: (url: URL, persistable: Bool)?
+  private var _initOpen: [(url: URL, persistable: Bool)] = []
   private var _eventSink: FlutterEventSink?
   private var _eventQueue: [[String: String]] = []
 
@@ -101,10 +104,10 @@ public class FilePickerWritablePlugin: NSObject, FlutterPlugin {
       switch call.method {
       case "init":
         isInitialized = true
-        if let (openUrl, persistable) = _initOpen {
-          _handleUrl(url: openUrl, persistable: persistable)
-          _initOpen = nil
+        for pending in _initOpen {
+          _handleUrl(url: pending.url, persistable: pending.persistable)
         }
+        _initOpen = []
         result(true)
       case "openFilePicker":
         try openFilePicker(result: result)
@@ -406,7 +409,7 @@ extension FilePickerWritablePlugin: FlutterApplicationLifeCycleDelegate, Flutter
 //            return false
 //        }
     if !isInitialized {
-      _initOpen = (url, persistable)
+      _initOpen.append((url, persistable))
       return true
     }
     _handleUrl(url: url, persistable: persistable)
