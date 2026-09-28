@@ -39,6 +39,9 @@
 * Android: file read/write/dispose no longer require an Activity and fall
   back to the application context, e.g. when invoked from background
   tasks. Thanks @amake (rollup of #52).
+* iOS: also run file writes and incoming-file intake (copy + bookmark)
+  off the UI thread, with results and errors delivered on the main
+  thread. Intake stays in arrival order via a serial queue.
 
 ## 2.1.0+1
 

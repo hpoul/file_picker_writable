@@ -45,6 +45,8 @@ public class FilePickerWritablePlugin: NSObject, FlutterPlugin {
   private var _initOpen: [(url: URL, persistable: Bool)] = []
   private var _eventSink: FlutterEventSink?
   private var _eventQueue: [[String: String]] = []
+  // Serial: intake copies run off main but stay in arrival order.
+  private let _intakeQueue = DispatchQueue(label: "design.codeux.file_picker_writable.intake", qos: .userInitiated)
 
   // Exposed to Objective-C so the (ObjC) plugin registrant can call it
   // when this plugin is integrated via CocoaPods.
@@ -186,9 +188,19 @@ public class FilePickerWritablePlugin: NSObject, FlutterPlugin {
     var isStale = false
     let url = try URL(resolvingBookmarkData: bookmark, bookmarkDataIsStale: &isStale)
     logDebug("url: \(url) / isStale: \(isStale)")
-    try _writeFile(path: path, destination: url)
-    let sourceFile = URL(fileURLWithPath: path)
-    result(_fileInfoResult(tempFile: sourceFile, originalURL: url, bookmark: bookmark))
+    DispatchQueue.global(qos: .userInitiated).async { [self] in
+      do {
+        try _writeFile(path: path, destination: url)
+        let sourceFile = URL(fileURLWithPath: path)
+        DispatchQueue.main.async { [self] in
+          result(_fileInfoResult(tempFile: sourceFile, originalURL: url, bookmark: bookmark))
+        }
+      } catch {
+        DispatchQueue.main.async {
+          result(FlutterError(code: "UnknownError", message: "\(error)", details: nil))
+        }
+      }
+    }
   }
     
   // TODO: skipDestinationStartAccess is not doing anything right now. maybe get rid of it.
@@ -417,31 +429,38 @@ extension FilePickerWritablePlugin: FlutterApplicationLifeCycleDelegate, Flutter
   }
     
   private func _handleUrl(url: URL, persistable: Bool) {
-    do {
-      if url.isFileURL {
-        try _channel.invokeMethod("openFile", arguments: _prepareUrlForReading(url: url, persistable: persistable)) { _ in
-          guard !persistable else {
-            // Persistable files don't need cleanup
-            return
-          }
-          if self._isInboxFile(url) {
-            do {
-              try FileManager.default.removeItem(at: url)
-            } catch {
-              self.logError("Failed to delete inbox file \(url); error: \(error)")
+    guard url.isFileURL else {
+      _channel.invokeMethod("handleUri", arguments: url.absoluteString)
+      return
+    }
+    _intakeQueue.async { [self] in
+      do {
+        let arguments = try _prepareUrlForReading(url: url, persistable: persistable)
+        DispatchQueue.main.async { [self] in
+          _channel.invokeMethod("openFile", arguments: arguments) { _ in
+            guard !persistable else {
+              // Persistable files don't need cleanup
+              return
             }
-          } else {
-            self.logError("Unexpected non-persistable file \(url)")
+            if self._isInboxFile(url) {
+              do {
+                try FileManager.default.removeItem(at: url)
+              } catch {
+                self.logError("Failed to delete inbox file \(url); error: \(error)")
+              }
+            } else {
+              self.logError("Unexpected non-persistable file \(url)")
+            }
           }
         }
-      } else {
-        _channel.invokeMethod("handleUri", arguments: url.absoluteString)
+      } catch {
+        DispatchQueue.main.async { [self] in
+          logError("Error handling open url for \(url): \(error)")
+          _channel.invokeMethod("handleError", arguments: [
+            "message": "Error while handling openUrl for isFileURL=\(url.isFileURL): \(error)",
+          ])
+        }
       }
-    } catch {
-      logError("Error handling open url for \(url): \(error)")
-      _channel.invokeMethod("handleError", arguments: [
-        "message": "Error while handling openUrl for isFileURL=\(url.isFileURL): \(error)",
-      ])
     }
   }
 
