@@ -359,20 +359,10 @@ extension FilePickerWritablePlugin: FlutterApplicationLifeCycleDelegate, Flutter
     // This is an old API predating open-in-place support(?)
     return _handle(url: url, persistable: false)
   }
-    
-  public func application(_ application: UIApplication, continue userActivity: NSUserActivity, restorationHandler: @escaping ([Any]) -> Void) -> Bool {
-    // (handle universal links)
-    // Get URL components from the incoming user activity
-    guard userActivity.activityType == NSUserActivityTypeBrowsingWeb,
-          let incomingURL = userActivity.webpageURL
-    else {
-      logDebug("Unsupported user activity. \(userActivity)")
-      return false
-    }
-    logDebug("continue userActivity webpageURL: \(incomingURL)")
-    // TODO: Confirm that persistable should be true here
-    return _handle(url: incomingURL, persistable: true)
-  }
+
+  // NOTE: this plugin deliberately does not implement
+  // application(_:continue:restorationHandler:), so universal links are left
+  // to Flutter's own deep linking and other plugins (cf. issue #38).
 
   public func scene(_ scene: UIScene, willConnectTo session: UISceneSession, options connectionOptions: UIScene.ConnectionOptions?) -> Bool {
     logDebug("scene will connect with \(connectionOptions?.urlContexts.count ?? 0) URLContexts")
