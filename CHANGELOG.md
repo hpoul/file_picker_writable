@@ -26,6 +26,9 @@
   are skipped, and a drop carrying no file URIs at all is ignored silently.
   A partial group (some copies failed) is delivered together with an error
   event. The example gains a drop-target demo.
+* Events that arrive before a handler is registered (file opens, URIs,
+  errors, drops) now queue up and are delivered oldest-first instead of
+  last-event-wins; handled queued events are disposed on delivery.
 
 ## 2.1.0+1
 
