@@ -45,7 +45,7 @@ public class FilePickerWritablePlugin: NSObject, FlutterPlugin {
   private var _initOpen: [(url: URL, persistable: Bool)] = []
   private var _eventSink: FlutterEventSink?
   private var _eventQueue: [[String: String]] = []
-  // Serial: intake copies run off main but stay in arrival order.
+  // Serial: intake copies run off main in caller order (callers sort first).
   private let _intakeQueue = DispatchQueue(label: "design.codeux.file_picker_writable.intake", qos: .userInitiated)
 
   // Exposed to Objective-C so the (ObjC) plugin registrant can call it
@@ -397,7 +397,8 @@ extension FilePickerWritablePlugin: FlutterApplicationLifeCycleDelegate, Flutter
     logDebug("scene will connect with \(connectionOptions?.urlContexts.count ?? 0) URLContexts")
     var handled = false
     if let urlContexts = connectionOptions?.urlContexts {
-      for context in urlContexts {
+      // Set order is undefined: sort for deterministic processing order.
+      for context in urlContexts.sorted(by: { $0.url.absoluteString < $1.url.absoluteString }) {
         logDebug("attempting to handle \(context.url)")
         handled = _handle(url: context.url, persistable: context.options.openInPlace) || handled
       }
@@ -408,7 +409,8 @@ extension FilePickerWritablePlugin: FlutterApplicationLifeCycleDelegate, Flutter
   public func scene(_ scene: UIScene, openURLContexts URLContexts: Set<UIOpenURLContext>) -> Bool {
     var handled = false
     logDebug("openURLContexts for \(URLContexts.count) items")
-    for context in URLContexts {
+    // Set order is undefined: sort for deterministic processing order.
+    for context in URLContexts.sorted(by: { $0.url.absoluteString < $1.url.absoluteString }) {
       logDebug("attempting to handle \(context.url)")
       handled = _handle(url: context.url, persistable: context.options.openInPlace) || handled
     }

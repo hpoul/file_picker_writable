@@ -41,7 +41,8 @@
   tasks. Thanks @amake (rollup of #52).
 * iOS: also run file writes and incoming-file intake (copy + bookmark)
   off the UI thread, with results and errors delivered on the main
-  thread. File intake stays in arrival order via a serial queue.
+  thread. File intake is processed in deterministic order via a serial
+  queue.
 
 ## 2.1.0+1
 
