@@ -10,10 +10,15 @@ import android.content.Intent
 import android.database.Cursor
 import android.net.Uri
 import android.os.Build
+import android.os.Environment
+import android.os.Looper
+import android.os.storage.StorageManager
+import android.provider.DocumentsContract
 import android.provider.OpenableColumns
 import android.view.DragEvent
 import android.view.View
 import androidx.annotation.MainThread
+import androidx.annotation.WorkerThread
 import io.flutter.embedding.engine.plugins.activity.ActivityPluginBinding
 import io.flutter.plugin.common.MethodChannel
 import io.flutter.plugin.common.PluginRegistry
@@ -29,6 +34,7 @@ interface ContextProvider : CoroutineScope {
   val applicationContext: Context?
 
   fun logDebug(message: String, e: Throwable? = null)
+  fun logWarning(message: String)
   @MainThread
   fun openFile(fileInfo: Map<String, String>)
   @MainThread
@@ -50,13 +56,22 @@ class FilePickerWritableImpl(
   companion object {
     const val REQUEST_CODE_OPEN_FILE = 40832
     const val REQUEST_CODE_CREATE_FILE = 40833
+    const val REQUEST_CODE_OPEN_DIRECTORY = 40834
   }
 
+  // Every mutable field below is touched on the main hop only, except the
+  // thread-safe `scopes`: the control verbs run on a concurrent TaskQueue
+  // and hop to main for any of this state.
   private var filePickerCreateFile: File? = null
   private var filePickerResult: MethodChannel.Result? = null
 
-  private var isInitialized = false
-  private var initOpenUrl: Uri? = null
+  private val launchUrls = LaunchUrlGate<Uri> {
+    check(Looper.myLooper() == Looper.getMainLooper()) {
+      "Launch URLs are main-thread confined."
+    }
+  }
+
+  private val scopes = ScopeTokens()
 
 
   @MainThread
@@ -111,14 +126,39 @@ class FilePickerWritableImpl(
     }
   }
 
+  @MainThread
+  fun openDirectory(result: MethodChannel.Result) {
+    if (filePickerResult != null) {
+      throw FilePickerException("Invalid lifecycle, only one call at a time.")
+    }
+    val activity = requireActivity()
+    filePickerResult = result
+    try {
+      activity.startActivityForResult(
+        Intent(Intent.ACTION_OPEN_DOCUMENT_TREE),
+        REQUEST_CODE_OPEN_DIRECTORY
+      )
+    } catch (e: ActivityNotFoundException) {
+      filePickerResult = null
+      plugin.logDebug("exception while launching directory picker", e)
+      result.error(
+        "FilePickerNotAvailable",
+        "Unable to start directory picker, $e",
+        null
+      )
+    }
+  }
+
   override fun onActivityResult(
     requestCode: Int,
     resultCode: Int,
     data: Intent?
   ): Boolean {
-    if (!arrayOf(REQUEST_CODE_OPEN_FILE, REQUEST_CODE_CREATE_FILE).contains(
-        requestCode
-      )) {
+    if (!arrayOf(
+        REQUEST_CODE_OPEN_FILE,
+        REQUEST_CODE_CREATE_FILE,
+        REQUEST_CODE_OPEN_DIRECTORY
+      ).contains(requestCode)) {
       plugin.logDebug("Unknown requestCode $requestCode - ignore")
       return false
     }
@@ -142,6 +182,20 @@ class FilePickerWritableImpl(
       )
       return true
     }
+    if (requestCode == REQUEST_CODE_OPEN_DIRECTORY) {
+      plugin.launch {
+        try {
+          val treeUri = data?.data
+            ?: throw FilePickerException("RESULT_OK without a tree URI $data")
+          plugin.logDebug("Got directory $treeUri")
+          result.success(withContext(Dispatchers.IO) { takeDirectory(treeUri) })
+        } catch (e: Exception) {
+          plugin.logDebug("Error during handling directory picker result.", e)
+          result.taxonomyError(e)
+        }
+      }
+      return true
+    }
     plugin.launch {
       try {
         when (requestCode) {
@@ -149,7 +203,9 @@ class FilePickerWritableImpl(
             val fileUri = data?.data
             if (fileUri != null) {
               plugin.logDebug("Got result $fileUri")
-              handleFileUriResponse(result, fileUri)
+              result.success(withContext(Dispatchers.IO) {
+                copyContentUriAndReturnFileInfo(fileUri)
+              })
             } else {
               plugin.logDebug("Got RESULT_OK with null fileUri?")
               result.success(null)
@@ -161,11 +217,9 @@ class FilePickerWritableImpl(
             val fileUri =
               requireNotNull(data?.data) { "RESULT_OK with null file uri $data" }
             plugin.logDebug("Got result $fileUri")
-            handleFileUriCreateResponse(
-              result,
-              fileUri,
-              initialFileContent
-            )
+            result.success(withContext(Dispatchers.IO) {
+              takeCreatedFile(fileUri, initialFileContent)
+            })
           }
           else -> {
             // can never happen, we already checked the result code.
@@ -184,59 +238,38 @@ class FilePickerWritableImpl(
     return true
   }
 
-  @MainThread
-  private suspend fun handleFileUriCreateResponse(
-    result: MethodChannel.Result,
+  @WorkerThread
+  private fun takeCreatedFile(
     fileUri: Uri,
     initialFileContent: File
-  ) {
-    val context = requireContext()
-    val contentResolver = context.applicationContext.contentResolver
+  ): Map<String, String> {
+    val contentResolver = requireContext().contentResolver
     val takeFlags: Int = Intent.FLAG_GRANT_READ_URI_PERMISSION or
       Intent.FLAG_GRANT_WRITE_URI_PERMISSION
     contentResolver.takePersistableUriPermission(fileUri, takeFlags)
 
-    writeFileWithIdentifier(result, fileUri.toString(), initialFileContent)
+    return writeAndReturnFileInfo(fileUri, initialFileContent)
   }
 
-  @MainThread
-  private suspend fun handleFileUriResponse(
-    result: MethodChannel.Result,
-    fileUri: Uri
-  ) {
-    copyContentUriAndReturn(result, fileUri)
-  }
-
-  @MainThread
-  suspend fun readFileWithIdentifier(
+  @WorkerThread
+  fun readFileWithIdentifier(
     result: MethodChannel.Result,
     identifier: String
   ) {
-    copyContentUriAndReturn(result, Uri.parse(identifier))
+    result.success(copyContentUriAndReturnFileInfo(Uri.parse(identifier)))
   }
 
-  @MainThread
-  private suspend fun copyContentUriAndReturn(
-    result: MethodChannel.Result,
-    fileUri: Uri
-  ) {
-
-    result.success(
-      copyContentUriAndReturnFileInfo(fileUri)
-    )
-  }
-
-  @MainThread
-  private suspend fun copyContentUriAndReturnFileInfo(
+  @WorkerThread
+  private fun copyContentUriAndReturnFileInfo(
     fileUri: Uri,
     attemptPersistablePermission: Boolean = true,
     fileNameFallback: String? = null
   ): Map<String, String> {
     val context = requireContext()
 
-    val contentResolver = context.applicationContext.contentResolver
+    val contentResolver = context.contentResolver
 
-    return withContext(Dispatchers.IO) {
+    return run {
       var persistable = false
       if (attemptPersistablePermission) {
         try {
@@ -287,10 +320,23 @@ class FilePickerWritableImpl(
     }
   }
 
-  private suspend fun readFileInfo(
+  @WorkerThread
+  private fun readFileInfo(
     uri: Uri,
     contentResolver: ContentResolver
-  ): String = withContext(Dispatchers.IO) {
+  ): String = queryDisplayName(uri, contentResolver)
+    ?: throw FilePickerException("Unable to load file info from $uri")
+
+  /**
+   * The display name of the document at [uri], or null when the provider
+   * has no row for it: a missing document reads as a null cursor, since
+   * `DocumentsProvider.query` swallows its `FileNotFoundException`.
+   */
+  @WorkerThread
+  private fun queryDisplayName(
+    uri: Uri,
+    contentResolver: ContentResolver
+  ): String? {
     // The query, because it only applies to a single document, returns only
     // one row. There's no need to filter, sort, or select fields,
     // because we want all fields for one document.
@@ -298,20 +344,18 @@ class FilePickerWritableImpl(
       uri, null, null, null, null, null
     )
 
-    cursor?.use {
+    return cursor?.use {
       if (!it.moveToFirst()) {
-        throw FilePickerException("Cursor returned empty while trying to read file info for $uri")
+        return null
       }
 
       // Note it's called "Display Name". This is
       // provider-specific, and might not necessarily be the file name.
       val displayName: String =
-        it.getString(it.getColumnIndex(OpenableColumns.DISPLAY_NAME))
+        it.getString(it.getColumnIndexOrThrow(OpenableColumns.DISPLAY_NAME))
       plugin.logDebug("Display Name: $displayName")
       displayName
-
-    } ?: throw FilePickerException("Unable to load file info from $uri")
-
+    }
   }
 
   fun onDetachedFromActivity(binding: ActivityPluginBinding) {
@@ -326,33 +370,38 @@ class FilePickerWritableImpl(
     onNewIntent(binding.activity.intent)
   }
 
-  @MainThread
-  suspend fun writeFileWithIdentifier(
+  @WorkerThread
+  fun writeFileWithIdentifier(
     result: MethodChannel.Result,
     identifier: String,
     file: File
   ) {
+    result.success(writeAndReturnFileInfo(Uri.parse(identifier), file))
+  }
+
+  @WorkerThread
+  private fun writeAndReturnFileInfo(
+    fileUri: Uri,
+    file: File
+  ): Map<String, String> {
     if (!file.exists()) {
       throw FilePickerException("File at source not found. $file")
     }
-    val fileUri = Uri.parse(identifier)
-    val context = requireContext()
-    val contentResolver = context.contentResolver
-    withContext(Dispatchers.IO) {
-      // with Android 10 and later, use wt
-      // https://issuetracker.google.com/issues/135714729?pli=1
-      // https://github.com/hpoul/file_picker_writable/issues/23
-      val writeMode = "wt".takeIf { Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q } ?: "w"
-      contentResolver.openOutputStream(fileUri, writeMode).use { output ->
-        require(output != null)
-        file.inputStream().use { input ->
-          input.copyTo(output)
-        }
+    val contentResolver = requireContext().contentResolver
+    // with Android 10 and later, use wt
+    // https://issuetracker.google.com/issues/135714729?pli=1
+    // https://github.com/hpoul/file_picker_writable/issues/23
+    val writeMode = "wt".takeIf { Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q } ?: "w"
+    contentResolver.openOutputStream(fileUri, writeMode).use { output ->
+      require(output != null)
+      file.inputStream().use { input ->
+        input.copyTo(output)
       }
     }
-    copyContentUriAndReturn(result, fileUri)
+    return copyContentUriAndReturnFileInfo(fileUri)
   }
 
+  @WorkerThread
   fun disposeIdentifier(identifier: String) {
     val context = requireContext()
     val contentResolver = context.applicationContext.contentResolver
@@ -361,6 +410,7 @@ class FilePickerWritableImpl(
     contentResolver.releasePersistableUriPermission(Uri.parse(identifier), takeFlags)
   }
 
+  @WorkerThread
   fun disposeAllIdentifiers() {
     val context = requireContext()
     val contentResolver = context.applicationContext.contentResolver
@@ -372,11 +422,161 @@ class FilePickerWritableImpl(
     }
   }
 
+  /**
+   * Persists the grant on a picked tree and describes it. Acquisition
+   * never touches a byte: no temp file, no copy.
+   */
+  @WorkerThread
+  private fun takeDirectory(treeUri: Uri): Map<String, String> {
+    val contentResolver = requireContext().contentResolver
+    // Read+write where the provider grants it, read-only otherwise: a
+    // read-only tree is still a successful pick, and `persistable` says
+    // whether the grant outlives this process.
+    val persistable = listOf(
+      Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION,
+      Intent.FLAG_GRANT_READ_URI_PERMISSION
+    ).any { flags ->
+      try {
+        contentResolver.takePersistableUriPermission(treeUri, flags)
+        true
+      } catch (e: SecurityException) {
+        plugin.logDebug("Couldn't persist tree grant (flags $flags) on $treeUri", e)
+        false
+      }
+    }
+    val name = queryDisplayName(documentUriFor(treeUri), contentResolver)
+      ?: throw TaxonomyException(ErrorKind.NOT_FOUND, "No document for picked tree $treeUri")
+    return mapOf(
+      "identifier" to treeUri.toString(),
+      "persistable" to persistable.toString(),
+      "uri" to treeUri.toString(),
+      "fileName" to name
+    )
+  }
+
+  /**
+   * Validates that a persisted grant still covers [identifier] and re-reads
+   * its display name. Android holds nothing native per scope, so the token
+   * is bookkeeping and the identifier is always echoed unrepaired.
+   */
+  @WorkerThread
+  fun acquire(identifier: String, session: String): Map<String, Any?> {
+    val uri = Uri.parse(identifier)
+    val contentResolver = requireContext().contentResolver
+    if (!hasPersistedReadGrant(contentResolver, uri)) {
+      throw TaxonomyException(ErrorKind.PERMISSION_LOST, "No persisted grant covers $uri")
+    }
+    val documentUri = documentUriFor(uri)
+    val name = queryDisplayName(documentUri, contentResolver)
+      ?: throw missingDocument(documentUri)
+    val (token, dropped) = scopes.add(session, identifier)
+    if (dropped > 0) {
+      // Expected once after a hot restart. Anything else means a second
+      // isolate called acquire, which breaks the root-isolate rule and
+      // just released the other isolate's holds.
+      plugin.logWarning(
+        "New Dart session: released $dropped scope token(s) of the previous one. " +
+          "acquire is a root-isolate verb."
+      )
+    }
+    plugin.logDebug("acquire: ${scopes.size} scope token(s) live.")
+    return mapOf(
+      "id" to token,
+      "identifier" to identifier,
+      "repaired" to false,
+      "path" to null,
+      "displayName" to name
+    )
+  }
+
+  /** Drops a scope token. Unknown tokens are a logged no-op. */
+  @WorkerThread
+  fun release(token: String) {
+    if (!scopes.release(token)) {
+      plugin.logDebug("release: unknown scope token $token, ignored.")
+    }
+    plugin.logDebug("release: ${scopes.size} scope token(s) live.")
+  }
+
+  fun onDetachedFromEngine() {
+    scopes.clear()
+  }
+
+  /**
+   * A live read grant on [uri] itself, or on the tree it belongs to: a
+   * tree grant lives on the root, so a document inside it matches by
+   * authority and tree ID.
+   */
+  @WorkerThread
+  private fun hasPersistedReadGrant(contentResolver: ContentResolver, uri: Uri): Boolean {
+    val treeId = if (DocumentsContract.isTreeUri(uri)) {
+      DocumentsContract.getTreeDocumentId(uri)
+    } else {
+      null
+    }
+    return contentResolver.persistedUriPermissions.any { permission ->
+      val granted = permission.uri
+      permission.isReadPermission && (
+        granted == uri || (
+          treeId != null &&
+            DocumentsContract.isTreeUri(granted) &&
+            granted.authority == uri.authority &&
+            DocumentsContract.getTreeDocumentId(granted) == treeId
+          )
+        )
+    }
+  }
+
+  /**
+   * The failure for a held grant whose document query came back empty:
+   * `permission-lost` (detached) when the document's ExternalStorageProvider
+   * volume is absent or unmounted, else `not-found`. Other providers are
+   * opaque, so a detached volume there still reads as `not-found`.
+   */
+  @WorkerThread
+  private fun missingDocument(documentUri: Uri): TaxonomyException {
+    val volume = if (documentUri.authority == StorageVolumes.AUTHORITY) {
+      StorageVolumes.volumeOf(DocumentsContract.getDocumentId(documentUri))
+    } else {
+      null
+    }
+    if (volume != null && !isMounted(volume)) {
+      return TaxonomyException(
+        ErrorKind.PERMISSION_LOST,
+        "Storage volume of $documentUri is not mounted",
+        details = mapOf("reason" to "volume-absent")
+      )
+    }
+    return TaxonomyException(ErrorKind.NOT_FOUND, "No document at $documentUri")
+  }
+
+  private fun isMounted(volume: StorageVolumes.Volume): Boolean {
+    val storageManager = requireContext().getSystemService(StorageManager::class.java)
+    val match = storageManager.storageVolumes.firstOrNull {
+      when (volume) {
+        StorageVolumes.Volume.Primary -> it.isPrimary
+        is StorageVolumes.Volume.Uuid -> it.uuid.equals(volume.uuid, ignoreCase = true)
+      }
+    }
+    return match?.state == Environment.MEDIA_MOUNTED ||
+      match?.state == Environment.MEDIA_MOUNTED_READ_ONLY
+  }
+
+  /** The document to query for [uri]: a bare tree URI names its root. */
+  private fun documentUriFor(uri: Uri): Uri =
+    if (DocumentsContract.isTreeUri(uri) && !DocumentsContract.isDocumentUri(requireContext(), uri)) {
+      DocumentsContract.buildDocumentUriUsingTree(uri, DocumentsContract.getTreeDocumentId(uri))
+    } else {
+      uri
+    }
+
   private fun requireActivity() = (plugin.activity
     ?: throw FilePickerException("Illegal state, expected activity to be there."))
 
-  private fun requireContext() = (plugin.activity ?: plugin.applicationContext
-    ?: throw FilePickerException("Illegal state, expected application context or activity to be there."))
+  // The application context only: this runs on the TaskQueue, and the
+  // activity binding is main-hop state.
+  private fun requireContext() = (plugin.applicationContext
+    ?: throw FilePickerException("Illegal state, expected application context to be there."))
 
   private val CONTENT_PROVIDER_SCHEMES = setOf(
     ContentResolver.SCHEME_CONTENT,
@@ -384,6 +584,7 @@ class FilePickerWritableImpl(
     ContentResolver.SCHEME_ANDROID_RESOURCE
   )
 
+  @MainThread
   override fun onNewIntent(intent: Intent): Boolean {
     val data = intent.data
     val scheme = data?.scheme
@@ -396,27 +597,30 @@ class FilePickerWritableImpl(
 //      plugin.logDebug("Not handling url $data (no supported scheme $CONTENT_PROVIDER_SCHEMES)")
 //      return false
 //    }
-    plugin.launch {
-      try {
-        if (isInitialized) {
-          handleUri(data)
-        } else {
-          initOpenUrl = data
-        }
-      } catch (exception: Exception) {
-        plugin.logDebug("Error while handling intent for $data", exception)
-      }
+    // Decide here, synchronously on main, not in the launched coroutine:
+    // by the time it runs, `init` may have drained the gate already.
+    if (launchUrls.offer(data)) {
+      plugin.launch { handleUriLogged(data) }
     }
     return true
   }
 
   @MainThread
   suspend fun init() {
-    isInitialized = true
-    initOpenUrl?.let { uri ->
-      handleUri(uri)
+    // `open` takes the queue in one step, before anything suspends, so an
+    // intent arriving while these are handled goes straight to handleUri.
+    for (uri in launchUrls.open()) {
+      handleUriLogged(uri)
     }
-    initOpenUrl = null
+  }
+
+  @MainThread
+  private suspend fun handleUriLogged(uri: Uri) {
+    try {
+      handleUri(uri)
+    } catch (exception: Exception) {
+      plugin.logDebug("Error while handling intent for $uri", exception)
+    }
   }
 
   @MainThread
@@ -424,7 +628,7 @@ class FilePickerWritableImpl(
     val scheme = uri.scheme ?: return
     val isFile = CONTENT_PROVIDER_SCHEMES.contains(scheme)
     if (isFile) {
-      plugin.openFile(copyContentUriAndReturnFileInfo(uri))
+      plugin.openFile(withContext(Dispatchers.IO) { copyContentUriAndReturnFileInfo(uri) })
     } else {
       plugin.handleOpenUri(uri)
     }
@@ -501,7 +705,7 @@ class FilePickerWritableImpl(
     val permissions = requireActivity().requestDragAndDropPermissions(event)
     plugin.launch {
       try {
-        val files = copyDropItems(clipData)
+        val files = withContext(Dispatchers.IO) { copyDropItems(clipData) }
         if (files.isEmpty()) {
           plugin.sendError("Drop intake: failed to copy $uriCount dropped file(s).")
         } else {
@@ -520,7 +724,8 @@ class FilePickerWritableImpl(
     }
   }
 
-  private suspend fun copyDropItems(clipData: ClipData): List<Map<String, String>> {
+  @WorkerThread
+  private fun copyDropItems(clipData: ClipData): List<Map<String, String>> {
     val files = mutableListOf<Map<String, String>>()
     for (i in 0 until clipData.itemCount) {
       val uri = clipData.getItemAt(i).uri

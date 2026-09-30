@@ -12,6 +12,8 @@ analyzer:
     # allow having TODOs in the code
     todo: ignore
   exclude:
+    # A separate package with its own dependencies (package:jni).
+    - bench/**
     - build/**
     - android/**
     - ios/**

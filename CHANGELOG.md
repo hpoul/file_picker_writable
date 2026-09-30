@@ -1,3 +1,35 @@
+## Unreleased
+
+* **Experimental** (`@experimental`, may change in any minor release until
+  it graduates; see `doc/scope-registry-plan.md` §8): directory picking and
+  held access scopes, on Android and iOS. macOS and other platforms throw
+  `UnsupportedError`.
+  * `openDirectory()` picks a folder and returns a `FileInfo` whose
+    identifier survives relaunches (a persisted tree grant on Android, a
+    bookmark on iOS). Returns null on cancel. Nothing is copied.
+  * `acquire(identifier:)` / `release(scope)` hold access across calls.
+    Holds are refcounted per file; `release` is idempotent. A stale iOS
+    bookmark is repaired: `AcquiredScope.repaired` is true and the app must
+    persist `AcquiredScope.identifier` in place of the old one.
+    `AcquiredScope.path` is a usable path on iOS and null on Android.
+  * Failures are `PlatformException`s whose `code` is the error kind
+    (`permission-lost`, `not-found`, `scope-closed`), with the native
+    domain and code in `details`. Other failures keep their own code.
+  * A folder deleted in the iOS Files app (moved into `.Trash`) reads as
+    `not-found`, `reason: trashed`. On Android a folder on an unmounted
+    volume of the system storage provider (a pulled USB stick or SD card)
+    reads as `permission-lost`, `reason: volume-absent`, not as deleted.
+  * `acquire` is a root-isolate verb: an acquire from a second isolate
+    releases the first one's holds, and is logged as a warning.
+  * On Android, `openDirectory` accepts a read-only tree and reports
+    `persistable` accordingly.
+* Android: every method-channel call now runs on a shared background
+  TaskQueue instead of the main thread, so slow providers no longer block
+  frames. The pickers and `init` still hop to the main thread. Launch URLs
+  that arrive before `init` now queue in order instead of the last one
+  winning, and each is delivered exactly once.
+* Android: `init` now completes its method-channel call.
+
 ## 2.2.0
 
 * Modernize Android build for current stable Flutter: AGP 9.1.0, Kotlin 2.4.0,

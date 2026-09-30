@@ -310,12 +310,16 @@ Notes:
   included as a companion change — TaskQueue is per-channel, and
   a serial queue would stall control behind a slow listing).
   No ordering across in-flight control calls — callers sequence
-  by awaiting; `impl`'s mutable state (the activity, the pending
-  pick) is only touched on the main hop. Picker verbs
-  (`openFilePicker`, `openFilePickerForCreate`) hop
-  back to main for `startActivityForResult`; the event-queue drain
-  stays on main as today; MainScope is retained for the main-hop +
-  drain. Bytes never touch the channel.
+  by awaiting. Rule: every `impl` field is touched on the main hop
+  only — the pending pick, and the launch URLs that `init` drains
+  and `onNewIntent` (on main) fills. So picker verbs
+  (`openFilePicker`, `openFilePickerForCreate`, `openDirectory`)
+  hop back to main for `startActivityForResult`, and `init` hops
+  to main too (review-4 F3: off main it races `onNewIntent`, and a
+  launch URL is dropped or handled twice). Background verbs use the
+  application context, never the activity binding. The
+  event-queue drain stays on main as today; MainScope is retained
+  for the main-hop + drain. Bytes never touch the channel.
 
 ### iOS (Swift, inside a Gap-1a scope)
 

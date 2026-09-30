@@ -1,3 +1,6 @@
+// The directory demo exercises the experimental scope API on purpose.
+// ignore_for_file: experimental_member_use
+
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
@@ -6,6 +9,7 @@ import 'dart:math';
 import 'package:convert/convert.dart';
 import 'package:file_picker_writable/file_picker_writable.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:logging/logging.dart';
 import 'package:logging_appenders/logging_appenders.dart';
 import 'package:simple_json_persistence/simple_json_persistence.dart';
@@ -28,21 +32,35 @@ class AppDataBloc {
 }
 
 class AppData implements HasToJson {
-  AppData({required this.files});
+  AppData({required this.files, this.directories = const []});
   final List<FileInfo> files;
 
+  /// Picked directories, persisted so acquire can be retried after a
+  /// relaunch.
+  final List<FileInfo> directories;
+
   static AppData fromJson(Map<String, dynamic> json) => AppData(
-      files: (json['files'] as List<dynamic>)
+    files: _fileInfos(json['files']),
+    directories: _fileInfos(json['directories']),
+  );
+
+  static List<FileInfo> _fileInfos(Object? json) =>
+      ((json as List<dynamic>?) ?? const <dynamic>[])
           .where((dynamic element) => element != null)
           .map((dynamic e) => FileInfo.fromJson(e as Map<String, dynamic>))
-          .toList());
+          .toList();
 
   @override
   Map<String, dynamic> toJson() => <String, dynamic>{
-        'files': files,
-      };
+    'files': files,
+    'directories': directories,
+  };
 
-  AppData copyWith({required List<FileInfo> files}) => AppData(files: files);
+  AppData copyWith({List<FileInfo>? files, List<FileInfo>? directories}) =>
+      AppData(
+        files: files ?? this.files,
+        directories: directories ?? this.directories,
+      );
 }
 
 class MyApp extends StatefulWidget {
@@ -57,11 +75,7 @@ class MyAppState extends State<MyApp> {
 
   @override
   Widget build(BuildContext context) {
-    return MaterialApp(
-      home: MainScreen(
-        appDataBloc: _appDataBloc,
-      ),
-    );
+    return MaterialApp(home: MainScreen(appDataBloc: _appDataBloc));
   }
 }
 
@@ -91,7 +105,8 @@ class MainScreenState extends State<MainScreen> {
         fileInfo,
         file,
         context,
-        bodyTextPrefix: 'Should open file from external app.\n\n'
+        bodyTextPrefix:
+            'Should open file from external app.\n\n'
             'fileName: ${fileInfo.fileName}\n'
             'uri: ${fileInfo.uri}\n\n\n',
       );
@@ -120,9 +135,7 @@ class MainScreenState extends State<MainScreen> {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      appBar: AppBar(
-        title: const Text('File Picker Example'),
-      ),
+      appBar: AppBar(title: const Text('File Picker Example')),
       body: SingleChildScrollView(
         child: SizedBox(
           width: double.infinity,
@@ -148,15 +161,30 @@ class MainScreenState extends State<MainScreen> {
                       onPressed: FilePickerWritable().disposeAllIdentifiers,
                       child: const Text('Dispose All IDs'),
                     ),
+                    const SizedBox(width: 32),
+                    ElevatedButton(
+                      onPressed: _openDirectory,
+                      child: const Text('Open Directory'),
+                    ),
                   ],
                 ),
+                if (snapshot.hasData) ...[
+                  for (final directory in snapshot.data!.directories) ...[
+                    DirectoryScopeDisplay(
+                      directory: directory,
+                      appDataBloc: _appDataBloc,
+                    ),
+                  ],
+                ],
                 DropTargetDemo(pickerState: _pickerState),
                 ...?(!snapshot.hasData
                     ? null
-                    : snapshot.data!.files.map((fileInfo) => FileInfoDisplay(
+                    : snapshot.data!.files.map(
+                        (fileInfo) => FileInfoDisplay(
                           fileInfo: fileInfo,
                           appDataBloc: _appDataBloc,
-                        ))),
+                        ),
+                      )),
               ],
             ),
           ),
@@ -166,16 +194,39 @@ class MainScreenState extends State<MainScreen> {
   }
 
   Future<void> _openFilePicker() async {
-    final fileInfo =
-        await FilePickerWritable().openFile((fileInfo, file) async {
+    final fileInfo = await FilePickerWritable().openFile((
+      fileInfo,
+      file,
+    ) async {
       _logger.fine('Got picker result: $fileInfo');
       final data = await _appDataBloc.store.load();
-      await _appDataBloc.store
-          .save(data.copyWith(files: data.files + [fileInfo]));
+      await _appDataBloc.store.save(
+        data.copyWith(files: data.files + [fileInfo]),
+      );
       return fileInfo;
     });
     if (fileInfo == null) {
       _logger.fine('User cancelled.');
+    }
+  }
+
+  Future<void> _openDirectory() async {
+    try {
+      final directory = await FilePickerWritable().openDirectory();
+      if (directory == null) {
+        _logger.fine('User cancelled.');
+        return;
+      }
+      _logger.fine('Got directory: $directory');
+      final data = await _appDataBloc.store.load();
+      await _appDataBloc.store.save(
+        data.copyWith(directories: data.directories + [directory]),
+      );
+    } on Exception catch (e) {
+      if (!mounted) {
+        return;
+      }
+      await SimpleAlertDialog.showErrorDialog(e, context);
     }
   }
 
@@ -193,8 +244,9 @@ class MainScreenState extends State<MainScreen> {
       return;
     }
     final data = await _appDataBloc.store.load();
-    await _appDataBloc.store
-        .save(data.copyWith(files: data.files + [fileInfo]));
+    await _appDataBloc.store.save(
+      data.copyWith(files: data.files + [fileInfo]),
+    );
   }
 }
 
@@ -250,12 +302,15 @@ class FileInfoDisplay extends StatelessWidget {
                     onPressed: () async {
                       try {
                         await FilePickerWritable().readFile(
-                            identifier: fileInfo.identifier,
-                            reader: (fileInfo, file) async {
-                              await SimpleAlertDialog
-                                  .readFileContentsAndShowDialog(
-                                      fileInfo, file, context);
-                            });
+                          identifier: fileInfo.identifier,
+                          reader: (fileInfo, file) async {
+                            await SimpleAlertDialog.readFileContentsAndShowDialog(
+                              fileInfo,
+                              file,
+                              context,
+                            );
+                          },
+                        );
                       } on Exception catch (e) {
                         if (!context.mounted) {
                           return;
@@ -268,26 +323,28 @@ class FileInfoDisplay extends StatelessWidget {
                   TextButton(
                     onPressed: () async {
                       await FilePickerWritable().writeFile(
-                          identifier: fileInfo.identifier,
-                          writer: (file) async {
-                            final content =
-                                'New Content written at ${DateTime.now()}.\n\n';
-                            await file.writeAsString(content);
-                            if (!context.mounted) {
-                              return;
-                            }
-                            await SimpleAlertDialog(
-                              bodyText: 'Written: $content',
-                            ).show(context);
-                          });
+                        identifier: fileInfo.identifier,
+                        writer: (file) async {
+                          final content =
+                              'New Content written at ${DateTime.now()}.\n\n';
+                          await file.writeAsString(content);
+                          if (!context.mounted) {
+                            return;
+                          }
+                          await SimpleAlertDialog(
+                            bodyText: 'Written: $content',
+                          ).show(context);
+                        },
+                      );
                     },
                     child: const Text('Overwrite'),
                   ),
                   IconButton(
                     onPressed: () async {
                       try {
-                        await FilePickerWritable()
-                            .disposeIdentifier(fileInfo.identifier);
+                        await FilePickerWritable().disposeIdentifier(
+                          fileInfo.identifier,
+                        );
                       } on Exception catch (e) {
                         if (!context.mounted) {
                           return;
@@ -295,15 +352,160 @@ class FileInfoDisplay extends StatelessWidget {
                         await SimpleAlertDialog.showErrorDialog(e, context);
                       }
                       final appData = await appDataBloc.store.load();
-                      await appDataBloc.store.save(appData.copyWith(
+                      await appDataBloc.store.save(
+                        appData.copyWith(
                           files: appData.files
                               .where((element) => element != fileInfo)
-                              .toList()));
+                              .toList(),
+                        ),
+                      );
                     },
                     icon: const Icon(Icons.remove_circle_outline),
                   ),
                 ],
-              )
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// A picked directory with acquire/release controls: the device checks of
+/// doc/scope-registry-plan.md §7 (relaunch, stale repair, refcount).
+class DirectoryScopeDisplay extends StatefulWidget {
+  const DirectoryScopeDisplay({
+    super.key,
+    required this.directory,
+    required this.appDataBloc,
+  });
+
+  final FileInfo directory;
+  final AppDataBloc appDataBloc;
+
+  @override
+  DirectoryScopeDisplayState createState() => DirectoryScopeDisplayState();
+}
+
+class DirectoryScopeDisplayState extends State<DirectoryScopeDisplay> {
+  final List<AcquiredScope> _held = [];
+  String _status = 'not acquired';
+
+  @override
+  void dispose() {
+    for (final scope in _held) {
+      unawaited(FilePickerWritable().release(scope));
+    }
+    super.dispose();
+  }
+
+  Future<void> _acquire() async {
+    try {
+      final scope = await FilePickerWritable().acquire(
+        identifier: widget.directory.identifier,
+      );
+      _logger.fine('Acquired: $scope');
+      if (scope.repaired) {
+        // The app MUST persist the fresh identifier in place of the old.
+        final data = await widget.appDataBloc.store.load();
+        await widget.appDataBloc.store.save(
+          data.copyWith(
+            directories: [
+              for (final d in data.directories) ...[
+                d.identifier == widget.directory.identifier
+                    ? FileInfo(
+                        identifier: scope.identifier,
+                        persistable: d.persistable,
+                        uri: d.uri,
+                        fileName: scope.displayName,
+                      )
+                    : d,
+              ],
+            ],
+          ),
+        );
+      }
+      if (!mounted) {
+        await FilePickerWritable().release(scope);
+        return;
+      }
+      setState(() {
+        _held.add(scope);
+        _status =
+            'held ${_held.length}: ${scope.displayName}, '
+            'repaired: ${scope.repaired}, path: ${scope.path}';
+      });
+    } on PlatformException catch (e) {
+      _logger.warning('acquire failed', e);
+      if (!mounted) {
+        return;
+      }
+      setState(() {
+        _status = 'error ${e.code}: ${e.message}';
+      });
+    }
+  }
+
+  Future<void> _release() async {
+    if (_held.isEmpty) {
+      return;
+    }
+    final scope = _held.removeLast();
+    await FilePickerWritable().release(scope);
+    if (!mounted) {
+      return;
+    }
+    setState(() {
+      _status = _held.isEmpty ? 'released' : 'held ${_held.length}';
+    });
+  }
+
+  Future<void> _remove() async {
+    final data = await widget.appDataBloc.store.load();
+    await widget.appDataBloc.store.save(
+      data.copyWith(
+        directories: data.directories
+            .where((d) => d.identifier != widget.directory.identifier)
+            .toList(),
+      ),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    return Padding(
+      padding: const EdgeInsets.all(8.0),
+      child: Card(
+        elevation: 2,
+        child: Padding(
+          padding: const EdgeInsets.all(16.0),
+          child: Column(
+            children: <Widget>[
+              Text('Directory: ${widget.directory.fileName}'),
+              Text(
+                widget.directory.identifier,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: theme.textTheme.bodySmall,
+              ),
+              Text(
+                'scope: $_status',
+                key: const ValueKey('scope-status'),
+                style: theme.textTheme.bodySmall,
+              ),
+              OverflowBar(
+                alignment: MainAxisAlignment.end,
+                children: <Widget>[
+                  TextButton(onPressed: _acquire, child: const Text('Acquire')),
+                  TextButton(onPressed: _release, child: const Text('Release')),
+                  IconButton(
+                    onPressed: _remove,
+                    icon: const Icon(Icons.remove_circle_outline),
+                  ),
+                ],
+              ),
             ],
           ),
         ),
@@ -313,8 +515,7 @@ class FileInfoDisplay extends StatelessWidget {
 }
 
 class SimpleAlertDialog extends StatelessWidget {
-  const SimpleAlertDialog(
-      {super.key, this.titleText, required this.bodyText});
+  const SimpleAlertDialog({super.key, this.titleText, required this.bodyText});
   final String? titleText;
   final String bodyText;
 
@@ -329,10 +530,11 @@ class SimpleAlertDialog extends StatelessWidget {
       content: Text(bodyText),
       actions: <Widget>[
         TextButton(
-            child: const Text('Ok'),
-            onPressed: () {
-              Navigator.of(context).pop();
-            }),
+          child: const Text('Ok'),
+          onPressed: () {
+            Navigator.of(context).pop();
+          },
+        ),
       ],
     );
   }
@@ -397,7 +599,8 @@ class DropTargetDemoState extends State<DropTargetDemo> {
     for (final item in drop.items) {
       final bytes = await item.file.readAsBytes();
       summaries.add(
-          '${item.fileInfo.fileName ?? 'unnamed'} (${bytes.length} bytes)');
+        '${item.fileInfo.fileName ?? 'unnamed'} (${bytes.length} bytes)',
+      );
       _logger.fine('Drop: ${item.fileInfo}');
     }
     if (!mounted) {
@@ -450,17 +653,12 @@ class DropTargetDemoState extends State<DropTargetDemo> {
                   textAlign: TextAlign.center,
                 ),
               ),
-              ..._drops.map((summary) => Text(
-                    summary,
-                    style: theme.textTheme.bodySmall,
-                  )),
-              if (_drops.isEmpty)
-                ...[
-                  Text(
-                    'No drops yet.',
-                    style: theme.textTheme.bodySmall,
-                  ),
-                ],
+              ..._drops.map(
+                (summary) => Text(summary, style: theme.textTheme.bodySmall),
+              ),
+              if (_drops.isEmpty) ...[
+                Text('No drops yet.', style: theme.textTheme.bodySmall),
+              ],
             ],
           ),
         ),

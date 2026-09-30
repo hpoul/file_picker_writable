@@ -1,10 +1,13 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
+import 'dart:math';
 
 import 'package:file_picker_writable/src/event_handling.dart';
+import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 import 'package:logging/logging.dart';
+import 'package:meta/meta.dart' show experimental;
 import 'package:path/path.dart' as path;
 import 'package:path_provider/path_provider.dart';
 import 'package:synchronized/synchronized.dart';
@@ -21,11 +24,11 @@ class FileInfo {
   });
 
   static FileInfo fromJson(Map<String, dynamic> json) => FileInfo(
-        identifier: json['identifier'] as String,
-        persistable: (json['persistable'] as String?) == 'true',
-        uri: json['uri'] as String,
-        fileName: json['fileName'] as String?,
-      );
+    identifier: json['identifier'] as String,
+    persistable: (json['persistable'] as String?) == 'true',
+    uri: json['uri'] as String,
+    fileName: json['fileName'] as String?,
+  );
 
   static FileInfo fromJsonString(String jsonString) =>
       fromJson(json.decode(jsonString) as Map<String, dynamic>);
@@ -63,15 +66,79 @@ class FileInfo {
   }
 
   Map<String, dynamic> toJson() => <String, dynamic>{
-        'identifier': identifier,
-        'persistable': persistable.toString(),
-        'uri': uri,
-        'fileName': fileName,
-      };
+    'identifier': identifier,
+    'persistable': persistable.toString(),
+    'uri': uri,
+    'fileName': fileName,
+  };
 
   /// Serializes this data into a json string for easy serialization.
   /// Can be read back using [fromJsonString].
   String toJsonString() => json.encode(toJson());
+}
+
+/// A native access scope held for one identifier, from
+/// [FilePickerWritable.acquire]. Hand it back to
+/// [FilePickerWritable.release] exactly once when done.
+///
+/// Error kinds, carried as [PlatformException.code] with the native
+/// domain and code in [PlatformException.details] where available:
+/// - `permission-lost`: the grant was revoked, the media detached, the
+///   scope start was refused, or a bookmark no longer resolves. On Android
+///   a detached volume is recognized for the system's own storage provider
+///   (internal storage, SD card, USB), with `reason: volume-absent` in the
+///   details; other providers are opaque, and a detached volume there
+///   reads as `not-found`.
+/// - `not-found`: the grant is held but the file or folder is gone. On iOS
+///   a folder deleted in Files (moved into the provider's `.Trash`) reads
+///   as gone too, with `reason: trashed` in the details.
+/// - `scope-closed`: a released scope was used (verbs that take a scope).
+///
+/// Anything else stays loud under its own native code.
+@experimental
+class AcquiredScope {
+  AcquiredScope({
+    required this.id,
+    required this.identifier,
+    required this.repaired,
+    required this.path,
+    required this.displayName,
+  });
+
+  static AcquiredScope _fromResult(Map<String, Object?> result) =>
+      AcquiredScope(
+        id: result['id']! as String,
+        identifier: result['identifier']! as String,
+        repaired: result['repaired']! as bool,
+        path: result['path'] as String?,
+        displayName: result['displayName']! as String,
+      );
+
+  /// Opaque token for this hold, passed back to
+  /// [FilePickerWritable.release].
+  final String id;
+
+  /// The identifier to use from now on. Equal to the acquired identifier
+  /// unless [repaired].
+  final String identifier;
+
+  /// True when the acquired identifier was stale and [identifier] is a
+  /// fresh replacement. The app MUST then persist [identifier] in place
+  /// of the old one. The old identifier keeps working until then.
+  final bool repaired;
+
+  /// A usable file system path while the scope is held (iOS), or null
+  /// where none exists (Android content URIs). Branch on null, never on
+  /// the platform.
+  final String? path;
+
+  /// The file or folder name, re-read on every acquire.
+  final String displayName;
+
+  @override
+  String toString() =>
+      'AcquiredScope{id: $id, repaired: $repaired, '
+      'path: $path, displayName: $displayName}';
 }
 
 typedef FileReader<T> = Future<T> Function(FileInfo fileInfo, File file);
@@ -95,27 +162,32 @@ class FilePickerWritable {
       _logger.fine('Got method call: {$call}');
       try {
         if (call.method == 'openFile') {
-          final result =
-              (call.arguments as Map<dynamic, dynamic>).cast<String, String>();
+          final result = (call.arguments as Map<dynamic, dynamic>)
+              .cast<String, String>();
           final fileInfo = _resultToFileInfo(result);
           final file = _resultToFile(result);
           await _filePickerState._fireFileOpenHandlers(fileInfo, file);
           return true;
         } else if (call.method == 'handleUri') {
-          await _filePickerState
-              ._fireUriHandlers(Uri.parse(call.arguments as String));
+          await _filePickerState._fireUriHandlers(
+            Uri.parse(call.arguments as String),
+          );
           return true;
         } else if (call.method == 'handleError') {
           await _filePickerState._fireErrorEvent(
-              ErrorEvent.fromJson(call.arguments as Map<dynamic, dynamic>));
+            ErrorEvent.fromJson(call.arguments as Map<dynamic, dynamic>),
+          );
         } else if (call.method == 'handleDrop') {
-          final files = ((call.arguments as Map)['files'] as List)
-              .map((dynamic f) => (f as Map).cast<String, String>());
+          final files = ((call.arguments as Map)['files'] as List).map(
+            (dynamic f) => (f as Map).cast<String, String>(),
+          );
           final items = files
-              .map((result) => DropItem(
-                    fileInfo: _resultToFileInfo(result),
-                    file: _resultToFile(result),
-                  ))
+              .map(
+                (result) => DropItem(
+                  fileInfo: _resultToFileInfo(result),
+                  file: _resultToFile(result),
+                ),
+              )
               .toList();
           await _filePickerState._fireDropHandlers(DropEvent(items));
           return true;
@@ -127,8 +199,9 @@ class FilePickerWritable {
           return true;
         } else {
           throw PlatformException(
-              code: 'MethodNotImplemented',
-              message: 'method ${call.method} not implemented.');
+            code: 'MethodNotImplemented',
+            message: 'method ${call.method} not implemented.',
+          );
         }
       } catch (e, stackTrace) {
         _logger.fine('Error while handling method call.', e, stackTrace);
@@ -139,19 +212,33 @@ class FilePickerWritable {
       final event = (eventArg as Map<dynamic, dynamic>).cast<String, String>();
       if (event['type'] == 'log') {
         final exception = event['exception'] ?? '';
-        _logger.fine('Native Log: ${event['level']}: ${event['message']} '
-            '${exception == '' ? '' : ' Exception: $exception'}');
+        _logger.log(
+          event['level'] == 'warning' ? Level.WARNING : Level.FINE,
+          'Native Log: ${event['level']}: ${event['message']} '
+          '${exception == '' ? '' : ' Exception: $exception'}',
+        );
       }
     });
   }
 
-  static const MethodChannel _channel =
-      MethodChannel('design.codeux.file_picker_writable');
-  static const EventChannel _eventChannel =
-      EventChannel('design.codeux.file_picker_writable/events');
+  static const MethodChannel _channel = MethodChannel(
+    'design.codeux.file_picker_writable',
+  );
+  static const EventChannel _eventChannel = EventChannel(
+    'design.codeux.file_picker_writable/events',
+  );
   static final FilePickerWritable _instance = FilePickerWritable._();
 
   final _filePickerState = FilePickerState();
+
+  /// Tokens acquired by this isolate and not yet released.
+  final Set<String> _liveScopeIds = {};
+
+  /// Identifies this Dart isolate to the native scope registry. A new
+  /// session (e.g. after a hot restart) makes native balance every hold
+  /// left by the previous one on its first acquire.
+  final String _scopeSession =
+      '${DateTime.now().microsecondsSinceEpoch}-${Random().nextInt(1 << 32)}';
 
   FilePickerState init() {
     _channel.invokeMethod<void>('init');
@@ -161,8 +248,9 @@ class FilePickerWritable {
   @Deprecated('use [openFile] instead.')
   Future<FileInfo?> openFilePicker() async {
     _logger.finest('openFilePicker()');
-    final result =
-        await _channel.invokeMapMethod<String, String>('openFilePicker');
+    final result = await _channel.invokeMapMethod<String, String>(
+      'openFilePicker',
+    );
     if (result == null) {
       // User cancelled.
       _logger.finer('User cancelled file picker.');
@@ -176,7 +264,9 @@ class FilePickerWritable {
   Future<FileInfo?> openFilePickerForCreate(File file) async {
     _logger.finest('openFilePickerForCreate($file)');
     final result = await _channel.invokeMapMethod<String, String>(
-        'openFilePickerForCreate', {'path': file.absolute.path});
+      'openFilePickerForCreate',
+      {'path': file.absolute.path},
+    );
     if (result == null) {
       // User cancelled.
       _logger.finer('User cancelled file picker.');
@@ -189,8 +279,9 @@ class FilePickerWritable {
   /// afterwards.
   Future<T?> openFile<T>(FileReader<T> reader) async {
     _logger.finest('openFilePicker()');
-    final result =
-        await _channel.invokeMapMethod<String, String>('openFilePicker');
+    final result = await _channel.invokeMapMethod<String, String>(
+      'openFilePicker',
+    );
     if (result == null) {
       // User cancelled.
       _logger.finer('User cancelled file picker.');
@@ -219,7 +310,9 @@ class FilePickerWritable {
     return _createFileInNewTempDirectory(fileName, (tempFile) async {
       await writer(tempFile);
       final result = await _channel.invokeMapMethod<String, String>(
-          'openFilePickerForCreate', {'path': tempFile.absolute.path});
+        'openFilePickerForCreate',
+        {'path': tempFile.absolute.path},
+      );
       if (result == null) {
         // User cancelled.
         _logger.finer('User cancelled file picker.');
@@ -238,7 +331,9 @@ class FilePickerWritable {
   }) async {
     _logger.finest('readFile()');
     final result = await _channel.invokeMapMethod<String, String>(
-        'readFileWithIdentifier', {'identifier': identifier});
+      'readFileWithIdentifier',
+      {'identifier': identifier},
+    );
     if (result == null) {
       throw StateError('Error while reading file with identifier $identifier');
     }
@@ -258,11 +353,10 @@ class FilePickerWritable {
   /// Expects a [FileInfo.identifier] string for [identifier].
   Future<FileInfo> writeFileWithIdentifier(String identifier, File file) async {
     _logger.finest('writeFileWithIdentifier(file: $file)');
-    final result = await _channel
-        .invokeMapMethod<String, String>('writeFileWithIdentifier', {
-      'identifier': identifier,
-      'path': file.absolute.path,
-    });
+    final result = await _channel.invokeMapMethod<String, String>(
+      'writeFileWithIdentifier',
+      {'identifier': identifier, 'path': file.absolute.path},
+    );
     if (result == null) {
       throw StateError('Got null response for writeFileWithIdentifier');
     }
@@ -280,14 +374,14 @@ class FilePickerWritable {
     required Future<void> Function(File file) writer,
   }) async {
     _logger.finest('writeFileWithIdentifier()');
-    final result =
-        await _createFileInNewTempDirectory(fileName, (tempFile) async {
+    final result = await _createFileInNewTempDirectory(fileName, (
+      tempFile,
+    ) async {
       await writer(tempFile);
-      final result = await _channel
-          .invokeMapMethod<String, String>('writeFileWithIdentifier', {
-        'identifier': identifier,
-        'path': tempFile.absolute.path,
-      });
+      final result = await _channel.invokeMapMethod<String, String>(
+        'writeFileWithIdentifier',
+        {'identifier': identifier, 'path': tempFile.absolute.path},
+      );
       return result!;
     });
     return _resultToFileInfo(result);
@@ -301,8 +395,9 @@ class FilePickerWritable {
   /// at once. Use this method to remove identifiers you no longer need.
   Future<void> disposeIdentifier(String identifier) async {
     _logger.finest('disposeIdentifier()');
-    return _channel
-        .invokeMethod<void>('disposeIdentifier', {'identifier': identifier});
+    return _channel.invokeMethod<void>('disposeIdentifier', {
+      'identifier': identifier,
+    });
   }
 
   /// Dispose of all identifiers persisted for your app. Afterwards, you will
@@ -315,6 +410,86 @@ class FilePickerWritable {
   Future<void> disposeAllIdentifiers() async {
     _logger.finest('disposeAllIdentifiers()');
     return _channel.invokeMethod<void>('disposeAllIdentifiers');
+  }
+
+  /// Shows a picker for a directory. Returns null if the user cancelled.
+  ///
+  /// The grant is persisted (Android) or bookmarked (iOS), so the returned
+  /// [FileInfo.identifier] feeds [acquire] across relaunches without
+  /// re-picking. [FileInfo.fileName] is the picked folder's display label.
+  /// No bytes are copied.
+  ///
+  /// Android and iOS only; throws [UnsupportedError] elsewhere.
+  @experimental
+  Future<FileInfo?> openDirectory() async {
+    _logger.finest('openDirectory()');
+    _requireScopePlatform('openDirectory');
+    final result = await _channel.invokeMapMethod<String, String>(
+      'openDirectory',
+    );
+    if (result == null) {
+      _logger.finer('User cancelled directory picker.');
+      return null;
+    }
+    return _resultToFileInfo(result);
+  }
+
+  /// Acquires native access scope for [identifier] until [release].
+  ///
+  /// Each call returns its own [AcquiredScope.id]; native refcounts per
+  /// file, so acquire, acquire, release still holds. A stale identifier is
+  /// repaired: [AcquiredScope.repaired] is true and
+  /// [AcquiredScope.identifier] is the replacement the app MUST persist.
+  ///
+  /// On iOS this holds the security scope. On Android, where persisted
+  /// grants need no ceremony, it checks the grant is still held. Neither
+  /// copies the file. Failures are [PlatformException]s with the kinds
+  /// listed on [AcquiredScope].
+  ///
+  /// Call this from the root isolate only. Native holds belong to one Dart
+  /// isolate at a time, so that a hot restart can release the old isolate's
+  /// holds: an acquire from a second isolate releases every hold the first
+  /// one had, and native logs a warning when that happens. Helper isolates
+  /// work under a scope the root acquired.
+  ///
+  /// Android and iOS only; throws [UnsupportedError] elsewhere.
+  @experimental
+  Future<AcquiredScope> acquire({required String identifier}) async {
+    _logger.finest('acquire()');
+    _requireScopePlatform('acquire');
+    final result = await _channel.invokeMapMethod<String, Object?>('acquire', {
+      'identifier': identifier,
+      'session': _scopeSession,
+    });
+    if (result == null) {
+      throw StateError('Got null response for acquire');
+    }
+    final scope = AcquiredScope._fromResult(result);
+    _liveScopeIds.add(scope.id);
+    return scope;
+  }
+
+  /// Releases a scope from [acquire]. Idempotent: releasing a scope twice
+  /// is a no-op, never an error.
+  @experimental
+  Future<void> release(AcquiredScope scope) async {
+    _logger.finest('release()');
+    // Forgotten before the channel call, on purpose: the scope is released
+    // from Dart's view even if the native call fails, so a retry is the
+    // no-op, never a second native release.
+    if (!_liveScopeIds.remove(scope.id)) {
+      return;
+    }
+    await _channel.invokeMethod<void>('release', {'id': scope.id});
+  }
+
+  void _requireScopePlatform(String verb) {
+    if (defaultTargetPlatform != TargetPlatform.android &&
+        defaultTargetPlatform != TargetPlatform.iOS) {
+      throw UnsupportedError(
+        '$verb is not supported on $defaultTargetPlatform.',
+      );
+    }
   }
 
   FileInfo _resultToFileInfo(Map<String, String> result) {
@@ -331,25 +506,30 @@ class FilePickerWritable {
   }
 
   Future<T> _createFileInNewTempDirectory<T>(
-      String baseName, Future<T> Function(File tempFile) callback) async {
+    String baseName,
+    Future<T> Function(File tempFile) callback,
+  ) async {
     final tempDirBase = await getTemporaryDirectory();
 
     final tempDir = await tempDirBase.createTemp('file_picker_writable');
     await tempDir.create(recursive: true);
-    final tempFile = File(path.join(
-      tempDir.path,
-      baseName,
-    ));
+    final tempFile = File(path.join(tempDir.path, baseName));
     try {
       return await callback(tempFile);
     } finally {
-      unawaited((() async {
-        try {
-          await tempDir.delete(recursive: true);
-        } catch (error, stackTrace) {
-          _logger.warning('Error while deleting temp dir.', error, stackTrace);
-        }
-      })());
+      unawaited(
+        (() async {
+          try {
+            await tempDir.delete(recursive: true);
+          } catch (error, stackTrace) {
+            _logger.warning(
+              'Error while deleting temp dir.',
+              error,
+              stackTrace,
+            );
+          }
+        })(),
+      );
     }
   }
 }
@@ -364,13 +544,13 @@ class FilePickerState {
   /// handler; handled ones are disposed and dropped from the queue.
   final List<FilePickerEvent> _pendingEvents = [];
 
-//  void init() {
-//    FilePickerWritable().init(openFileHandler: (fileInfo) {
-//      _fireFileInfoHandlers(fileInfo);
-//    }, uriHandler: (uri) {
-//      _fireUriHandlers(uri);
-//    });
-//  }
+  //  void init() {
+  //    FilePickerWritable().init(openFileHandler: (fileInfo) {
+  //      _fireFileInfoHandlers(fileInfo);
+  //    }, uriHandler: (uri) {
+  //      _fireUriHandlers(uri);
+  //    });
+  //  }
 
   Future<bool> _fireFileOpenHandlers(FileInfo fileInfo, File file) async {
     return await _fireEvent(FilePickerEventOpen(fileInfo, file));
@@ -380,8 +560,10 @@ class FilePickerState {
     _logger.fine('Firing error event for $errorEvent');
     return await _fireEvent(
       FilePickerEventLambda(
-          (handler) => handler.handleErrorEvent(errorEvent), () async {},
-          debugMessage: 'error: $errorEvent'),
+        (handler) => handler.handleErrorEvent(errorEvent),
+        () async {},
+        debugMessage: 'error: $errorEvent',
+      ),
     );
   }
 
@@ -396,8 +578,11 @@ class FilePickerState {
       _pendingEvents.add(event);
       return false;
     } catch (e, stackTrace) {
-      _logger.severe('Error while dispatching ${event.debugMessage} event.', e,
-          stackTrace);
+      _logger.severe(
+        'Error while dispatching ${event.debugMessage} event.',
+        e,
+        stackTrace,
+      );
       rethrow;
     }
   }
@@ -422,7 +607,8 @@ class FilePickerState {
   @Deprecated('use [registerFileOpenHandler] instead.')
   void registerFileInfoHandler(FileInfoHandler fileInfoHandler) {
     _registerFilePickerEventHandler(
-        FilePickerEventHandlerLambda(fileInfoHandler: fileInfoHandler));
+      FilePickerEventHandlerLambda(fileInfoHandler: fileInfoHandler),
+    );
   }
 
   @Deprecated('use [removeFileOpenHandler] instead.')
@@ -435,33 +621,42 @@ class FilePickerState {
   /// once it returns.
   void registerFileOpenHandler(FileOpenHandler fileOpenHandler) =>
       _registerFilePickerEventHandler(
-          FilePickerEventHandlerLambda(fileOpenHandler: fileOpenHandler));
+        FilePickerEventHandlerLambda(fileOpenHandler: fileOpenHandler),
+      );
 
   /// Removes the given [fileOpenHandler].
   bool removeFileOpenHandler(FileOpenHandler fileOpenHandler) => _eventHandlers
       .remove(FilePickerEventHandlerLambda(fileOpenHandler: fileOpenHandler));
 
-  Future<bool> _fireUriHandlers(Uri uri) => _fireEvent(FilePickerEventLambda(
-      (handler) => handler.handleUri(uri), () => null,
-      debugMessage: 'handleUri($uri)'));
+  Future<bool> _fireUriHandlers(Uri uri) => _fireEvent(
+    FilePickerEventLambda(
+      (handler) => handler.handleUri(uri),
+      () => null,
+      debugMessage: 'handleUri($uri)',
+    ),
+  );
 
   void registerUriHandler(UriHandler uriHandler) =>
       _registerFilePickerEventHandler(
-          FilePickerEventHandlerLambda(uriHandler: uriHandler));
+        FilePickerEventHandlerLambda(uriHandler: uriHandler),
+      );
 
-  void removeUriHandler(UriHandler uriHandler) => _eventHandlers
-      .remove(FilePickerEventHandlerLambda(uriHandler: uriHandler));
+  void removeUriHandler(UriHandler uriHandler) => _eventHandlers.remove(
+    FilePickerEventHandlerLambda(uriHandler: uriHandler),
+  );
 
   /// Registers [errorEventHandler] which will be called when an error
   /// occurs during open handlers, when it can't be delivered otherwise.
   /// (ie. an error during initialisation of openURLs/File Open)
   void registerErrorEventHandler(ErrorEventHandler errorEventHandler) =>
       _registerFilePickerEventHandler(
-          FilePickerEventHandlerLambda(errorEventHandler: errorEventHandler));
+        FilePickerEventHandlerLambda(errorEventHandler: errorEventHandler),
+      );
 
   void removeErrorEventHandler(ErrorEventHandler errorEventHandler) =>
       _eventHandlers.remove(
-          FilePickerEventHandlerLambda(errorEventHandler: errorEventHandler));
+        FilePickerEventHandlerLambda(errorEventHandler: errorEventHandler),
+      );
 
   /// Registers [dropHandler] to be called with every file dropped onto the
   /// app window, grouped into one [DropEvent] per drag session.
@@ -472,11 +667,13 @@ class FilePickerState {
   /// Currently delivered on Android only.
   void registerDropHandler(DropHandler dropHandler) =>
       _registerFilePickerEventHandler(
-          FilePickerEventHandlerLambda(dropHandler: dropHandler));
+        FilePickerEventHandlerLambda(dropHandler: dropHandler),
+      );
 
   /// Removes the given [dropHandler].
-  bool removeDropHandler(DropHandler dropHandler) => _eventHandlers
-      .remove(FilePickerEventHandlerLambda(dropHandler: dropHandler));
+  bool removeDropHandler(DropHandler dropHandler) => _eventHandlers.remove(
+    FilePickerEventHandlerLambda(dropHandler: dropHandler),
+  );
 
   Future<bool> _fireDropHandlers(DropEvent drop) =>
       _fireEvent(FilePickerEventDrop(drop));

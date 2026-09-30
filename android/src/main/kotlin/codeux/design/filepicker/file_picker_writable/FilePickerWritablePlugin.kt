@@ -9,11 +9,13 @@ import androidx.annotation.NonNull
 import io.flutter.embedding.engine.plugins.FlutterPlugin
 import io.flutter.embedding.engine.plugins.activity.ActivityAware
 import io.flutter.embedding.engine.plugins.activity.ActivityPluginBinding
+import io.flutter.plugin.common.BinaryMessenger
 import io.flutter.plugin.common.EventChannel
 import io.flutter.plugin.common.MethodCall
 import io.flutter.plugin.common.MethodChannel
 import io.flutter.plugin.common.MethodChannel.MethodCallHandler
 import io.flutter.plugin.common.MethodChannel.Result
+import io.flutter.plugin.common.StandardMethodCodec
 import kotlinx.coroutines.*
 import java.io.File
 import java.io.PrintWriter
@@ -47,9 +49,17 @@ class FilePickerWritablePlugin : FlutterPlugin, MethodCallHandler,
 
   private fun initializePlugin(flutterPluginBinding: FlutterPlugin.FlutterPluginBinding) {
     applicationContext = flutterPluginBinding.applicationContext
+    val messenger = flutterPluginBinding.binaryMessenger
+    // One shared concurrent queue for every control verb: a serial queue
+    // would stall control behind a slow provider call.
+    val taskQueue = messenger.makeBackgroundTaskQueue(
+      BinaryMessenger.TaskQueueOptions().setIsSerial(false)
+    )
     channel = MethodChannel(
-      flutterPluginBinding.binaryMessenger,
-      "design.codeux.file_picker_writable"
+      messenger,
+      "design.codeux.file_picker_writable",
+      StandardMethodCodec.INSTANCE,
+      taskQueue
     )
     channel.setMethodCallHandler(this)
     EventChannel(
@@ -73,63 +83,109 @@ class FilePickerWritablePlugin : FlutterPlugin, MethodCallHandler,
     })
   }
 
+  // Runs on the shared concurrent TaskQueue, so there is no ordering across
+  // in-flight calls: callers sequence by awaiting. Every `impl` field is
+  // touched on the main hop only, so the verbs that touch one (the pickers,
+  // and `init` with the launch URLs) hop to main; the rest do their
+  // blocking work right here.
   override fun onMethodCall(
     @NonNull call: MethodCall,
     @NonNull result: Result
   ) {
+    logDebug("Got method call: ${call.method}")
+    when (call.method) {
+      // Must stay on main (review-4 F3). No unit test pins this dispatch;
+      // LaunchUrlGate's main-thread check throws at runtime if it moves.
+      "init" -> onMain(call, result, ::legacyError) {
+        impl.init()
+        result.success(null)
+      }
+      "openFilePicker" -> onMain(call, result, ::legacyError) {
+        impl.openFilePicker(result)
+      }
+      "openFilePickerForCreate" -> onMain(call, result, ::legacyError) {
+        impl.openFilePickerForCreate(result, call.requireArgument("path"))
+      }
+      "openDirectory" -> onMain(call, result, Result::taxonomyError) {
+        impl.openDirectory(result)
+      }
+      "readFileWithIdentifier" -> onQueue(call, result, ::legacyError) {
+        impl.readFileWithIdentifier(result, call.requireArgument("identifier"))
+      }
+      "writeFileWithIdentifier" -> onQueue(call, result, ::legacyError) {
+        impl.writeFileWithIdentifier(
+          result,
+          call.requireArgument("identifier"),
+          File(call.requireArgument<String>("path"))
+        )
+      }
+      "disposeIdentifier" -> onQueue(call, result, ::legacyError) {
+        impl.disposeIdentifier(call.requireArgument("identifier"))
+        result.success(null)
+      }
+      "disposeAllIdentifiers" -> onQueue(call, result, ::legacyError) {
+        impl.disposeAllIdentifiers()
+        result.success(null)
+      }
+      "acquire" -> onQueue(call, result, Result::taxonomyError) {
+        result.success(
+          impl.acquire(
+            call.requireArgument("identifier"),
+            call.requireArgument("session")
+          )
+        )
+      }
+      "release" -> onQueue(call, result, Result::taxonomyError) {
+        impl.release(call.requireArgument("id"))
+        result.success(null)
+      }
+      else -> result.notImplemented()
+    }
+  }
+
+  private fun onMain(
+    call: MethodCall,
+    result: Result,
+    reportError: (Result, Exception) -> Unit,
+    block: suspend () -> Unit
+  ) {
     launch(Dispatchers.Main) {
-      logDebug("Got method call: ${call.method}")
       try {
-        when (call.method) {
-          "init" -> {
-            impl.init()
-          }
-          "openFilePicker" -> {
-            impl.openFilePicker(result)
-          }
-          "openFilePickerForCreate" -> {
-            val path = call.argument<String>("path")
-              ?: throw FilePickerException("Expected argument 'path'")
-            impl.openFilePickerForCreate(result, path)
-          }
-          "readFileWithIdentifier" -> {
-            val identifier = call.argument<String>("identifier")
-              ?: throw FilePickerException("Expected argument 'identifier'")
-            impl.readFileWithIdentifier(result, identifier)
-          }
-          "writeFileWithIdentifier" -> {
-            val identifier = call.argument<String>("identifier")
-              ?: throw FilePickerException("Expected argument 'identifier'")
-            val path = call.argument<String>("path")
-              ?: throw FilePickerException("Expected argument 'path'")
-            impl.writeFileWithIdentifier(result, identifier, File(path))
-          }
-          "disposeIdentifier" -> {
-            val identifier = call.argument<String>("identifier")
-              ?: throw FilePickerException("Expected argument 'identifier'")
-            impl.disposeIdentifier(identifier)
-            result.success(null)
-          }
-          "disposeAllIdentifiers" -> {
-            impl.disposeAllIdentifiers()
-            result.success(null)
-          }
-          else -> {
-            result.notImplemented()
-          }
-        }
+        block()
       } catch (e: Exception) {
         logDebug("Error while handling method call $call", e)
-        result.error("FilePickerError", e.toString(), null)
+        reportError(result, e)
       }
     }
-
   }
+
+  private fun onQueue(
+    call: MethodCall,
+    result: Result,
+    reportError: (Result, Exception) -> Unit,
+    block: () -> Unit
+  ) {
+    try {
+      block()
+    } catch (e: Exception) {
+      logDebug("Error while handling method call $call", e)
+      reportError(result, e)
+    }
+  }
+
+  /** The error shape of the verbs that predate the taxonomy. */
+  private fun legacyError(result: Result, e: Exception) {
+    result.error("FilePickerError", e.toString(), null)
+  }
+
+  private fun <T> MethodCall.requireArgument(name: String): T =
+    argument<T>(name) ?: throw FilePickerException("Expected argument '$name'")
 
   override fun onDetachedFromEngine(
     @NonNull binding: FlutterPlugin.FlutterPluginBinding
   ) {
     channel.setMethodCallHandler(null)
+    impl.onDetachedFromEngine()
     cancel("onDetachedFromEngine")
   }
 
@@ -170,6 +226,18 @@ class FilePickerWritablePlugin : FlutterPlugin, MethodCallHandler,
         "level" to "debug",
         "message" to "${Thread.currentThread().name} $message",
         "exception" to exception
+      )
+    )
+  }
+
+  override fun logWarning(message: String) {
+    Log.w(TAG, message)
+    sendEvent(
+      mapOf(
+        "type" to "log",
+        "level" to "warning",
+        "message" to "${Thread.currentThread().name} $message",
+        "exception" to ""
       )
     )
   }

@@ -41,6 +41,8 @@ public class FilePickerWritablePlugin: NSObject, FlutterPlugin {
   private let _channel: FlutterMethodChannel
   private var _filePickerResult: FlutterResult?
   private var _filePickerPath: String?
+  private var _filePickerDirectory = false
+  private let _scopes = ScopeRegistry()
   private var isInitialized = false
   private var _initOpen: [(url: URL, persistable: Bool)] = []
   private var _eventSink: FlutterEventSink?
@@ -52,7 +54,8 @@ public class FilePickerWritablePlugin: NSObject, FlutterPlugin {
   // when this plugin is integrated via CocoaPods.
   @objc(registerWithRegistrar:)
   public static func register(with registrar: FlutterPluginRegistrar) {
-    _ = FilePickerWritablePlugin(registrar: registrar)
+    // Published so the engine calls detachFromEngine(for:) on teardown.
+    registrar.publish(FilePickerWritablePlugin(registrar: registrar))
   }
 
   public init(registrar: FlutterPluginRegistrar) {
@@ -74,9 +77,15 @@ public class FilePickerWritablePlugin: NSObject, FlutterPlugin {
   }
   
   deinit {
+    _scopes.releaseAll()
     #if os(macOS)
     NSAppleEventManager.shared().removeEventHandler(forEventClass: AEEventClass(kInternetEventClass), andEventID: AEEventID(kAEGetURL))
     #endif
+  }
+
+  public func detachFromEngine(for registrar: FlutterPluginRegistrar) {
+    let dropped = _scopes.releaseAll()
+    logDebug("Detached from engine: released \(dropped) scope token(s).")
   }
   
   #if os(macOS)
@@ -99,6 +108,11 @@ public class FilePickerWritablePlugin: NSObject, FlutterPlugin {
   private func logError(_ message: String) {
     print("ERROR", "FilePickerWritablePlugin:", message)
     sendEvent(event: ["type": "log", "level": "ERROR", "message": message])
+  }
+
+  private func logWarning(_ message: String) {
+    print("WARNING", "FilePickerWritablePlugin:", message)
+    sendEvent(event: ["type": "log", "level": "warning", "message": message])
   }
 
   public func handle(_ call: FlutterMethodCall, result: @escaping FlutterResult) {
@@ -140,6 +154,37 @@ public class FilePickerWritablePlugin: NSObject, FlutterPlugin {
       case "disposeIdentifier", "disposeAllIdentifiers":
         // iOS doesn't have a concept of disposing identifiers (bookmarks)
         result(nil)
+      case "openDirectory":
+        do {
+          try openDirectory(result: result)
+        } catch {
+          result(_taxonomyError(error))
+        }
+      case "acquire":
+        guard
+          let args = call.arguments as? [String: Any],
+          let identifier = args["identifier"] as? String,
+          let session = args["session"] as? String
+        else {
+          throw FilePickerError.invalidArguments(message: "Expected 'identifier' and 'session'")
+        }
+        _offMain(result) { [self] in
+          try _acquire(identifier: identifier, session: session)
+        }
+      case "release":
+        guard
+          let args = call.arguments as? [String: Any],
+          let token = args["id"] as? String
+        else {
+          throw FilePickerError.invalidArguments(message: "Expected 'id'")
+        }
+        _offMain(result) { [self] in
+          if !_scopes.release(token: token) {
+            logDebug("release: unknown scope token \(token), ignored.")
+          }
+          logDebug("release: \(_scopes.counts) held.")
+          return nil
+        }
       default:
         result(FlutterMethodNotImplemented)
       }
@@ -243,6 +288,129 @@ public class FilePickerWritablePlugin: NSObject, FlutterPlugin {
     try _viewController.present(ctrl, animated: true, completion: nil)
   }
 
+  func openDirectory(result: @escaping FlutterResult) throws {
+    if _filePickerResult != nil {
+      result(FlutterError(code: "DuplicatedCall", message: "Only one file open call at a time.", details: nil))
+      return
+    }
+    let presenter = try _viewController
+    _filePickerResult = result
+    _filePickerPath = nil
+    _filePickerDirectory = true
+    let ctrl = UIDocumentPickerViewController(forOpeningContentTypes: [.folder], asCopy: false)
+    ctrl.delegate = self
+    ctrl.modalPresentationStyle = .currentContext
+    presenter.present(ctrl, animated: true, completion: nil)
+  }
+
+  /// Bookmarks a picked folder. No bytes are copied.
+  private func _directoryResult(url: URL) throws -> [String: String] {
+    guard url.startAccessingSecurityScopedResource() else {
+      throw TaxonomyError(kind: ErrorKind.permissionLost, message: "Scope refused for picked folder \(url)")
+    }
+    defer {
+      url.stopAccessingSecurityScopedResource()
+    }
+    let bookmark = try url.bookmarkData()
+    return [
+      "identifier": bookmark.base64EncodedString(),
+      "persistable": "true",
+      "uri": url.absoluteString,
+      "fileName": url.lastPathComponent,
+    ]
+  }
+
+  /// Resolves the bookmark and holds its scope until `release`. A stale
+  /// bookmark is repaired: new bookmark bytes, `repaired: true`.
+  private func _acquire(identifier: String, session: String) throws -> [String: Any] {
+    guard let bookmark = Data(base64Encoded: identifier) else {
+      throw FilePickerError.invalidArguments(message: "Unable to decode bookmark.")
+    }
+    var isStale = false
+    let url: URL
+    do {
+      url = try URL(resolvingBookmarkData: bookmark, bookmarkDataIsStale: &isStale)
+    } catch {
+      // Stale but unresolvable: from the caller's view the grant is gone.
+      throw TaxonomyError(kind: ErrorKind.permissionLost, message: "Bookmark no longer resolves: \(error)", underlying: error)
+    }
+    let token: String
+    do {
+      let acquired = try _scopes.acquire(url: url, session: session)
+      token = acquired.token
+      if acquired.dropped > 0 {
+        // Expected once after a hot restart. Anything else means a second
+        // isolate called acquire, which breaks the root-isolate rule and
+        // just released the other isolate's holds.
+        logWarning("New Dart session: released \(acquired.dropped) scope token(s) of the previous one. acquire is a root-isolate verb.")
+      }
+    } catch is ScopeRegistry.StartRefused {
+      throw TaxonomyError(kind: ErrorKind.permissionLost, message: "startAccessingSecurityScopedResource refused for \(url)")
+    }
+    do {
+      guard (try? url.checkResourceIsReachable()) == true else {
+        throw TaxonomyError(kind: ErrorKind.notFound, message: "Nothing at \(url.path)")
+      }
+      // A Files delete is a move into the provider's `.Trash`, and the
+      // bookmark follows it there. Deleted must read as gone, never as a
+      // live folder the app would list and write into. No public resource
+      // key reports "in the trash", so this matches a whole path component.
+      if url.standardizedFileURL.pathComponents.contains(".Trash") {
+        throw TaxonomyError(
+          kind: ErrorKind.notFound,
+          message: "\(url.lastPathComponent) is in the Trash",
+          details: ["reason": "trashed"]
+        )
+      }
+      let fresh = isStale ? try url.bookmarkData().base64EncodedString() : identifier
+      logDebug("acquire: isStale=\(isStale), \(_scopes.counts) held.")
+      return [
+        "id": token,
+        "identifier": fresh,
+        "repaired": isStale,
+        "path": url.path,
+        "displayName": url.lastPathComponent,
+      ]
+    } catch {
+      _scopes.release(token: token)
+      throw error
+    }
+  }
+
+  /// Runs `work` off main and replies on main, with taxonomy errors.
+  private func _offMain(_ result: @escaping FlutterResult, _ work: @escaping () throws -> Any?) {
+    DispatchQueue.global(qos: .userInitiated).async { [self] in
+      let reply: Any?
+      do {
+        reply = try work()
+      } catch {
+        reply = _taxonomyError(error)
+      }
+      DispatchQueue.main.async {
+        result(reply)
+      }
+    }
+  }
+
+  /// Taxonomy kinds as the code, native domain and code in details;
+  /// anything else stays loud under its own domain.
+  private func _taxonomyError(_ error: Error) -> FlutterError {
+    if let taxonomy = error as? TaxonomyError {
+      var details = taxonomy.details
+      if let underlying = taxonomy.underlying as NSError? {
+        details["domain"] = underlying.domain
+        details["code"] = underlying.code
+      }
+      return FlutterError(code: taxonomy.kind, message: taxonomy.message, details: details)
+    }
+    let nsError = error as NSError
+    return FlutterError(
+      code: nsError.domain,
+      message: "\(error)",
+      details: ["domain": nsError.domain, "code": nsError.code]
+    )
+  }
+
   func openFilePicker(result: @escaping FlutterResult) throws {
     if _filePickerResult != nil {
       result(FlutterError(code: "DuplicatedCall", message: "Only one file open call at a time.", details: nil))
@@ -331,6 +499,17 @@ public class FilePickerWritablePlugin: NSObject, FlutterPlugin {
 
 extension FilePickerWritablePlugin: UIDocumentPickerDelegate {
   public func documentPicker(_ controller: UIDocumentPickerViewController, didPickDocumentAt url: URL) {
+    if _filePickerDirectory {
+      _filePickerDirectory = false
+      DispatchQueue.global(qos: .userInitiated).async { [self] in
+        do {
+          _sendFilePickerResult(try _directoryResult(url: url))
+        } catch {
+          _sendFilePickerResult(_taxonomyError(error))
+        }
+      }
+      return
+    }
     DispatchQueue.global(qos: .userInitiated).async { [self] in
       do {
         if let path = _filePickerPath {
@@ -364,6 +543,7 @@ extension FilePickerWritablePlugin: UIDocumentPickerDelegate {
   }
         
   public func documentPickerWasCancelled(_ controller: UIDocumentPickerViewController) {
+    _filePickerDirectory = false
     _sendFilePickerResult(nil)
   }
 }

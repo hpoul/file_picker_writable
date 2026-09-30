@@ -144,23 +144,47 @@ Notes:
 
 ### iOS (Swift)
 
-- Registry: identifier → (resolved URL, hold count, active tokens).
-  Guarded for concurrent acquires.
+- Registry: resolved file path → (the URL access was started on,
+  active tokens); token → path. Keyed by the file, not the
+  identifier string: two resolutions of one bookmark (or an old and
+  a repaired bookmark) are different strings for one scope, and the
+  stop must balance the instance the start ran on. Guarded by a
+  lock for concurrent acquires.
 - `acquire`: base64-decode → resolve bookmark, capturing
   `isStale`. If stale, re-create `bookmarkData()` from the resolved
   URL and return its base64 as the fresh identifier with
   `repaired: true`. Return `url.path` as `path` plus a re-read
   display name. First hold on an identifier calls
   `startAccessingSecurityScopedResource`; a `false` return is a loud
-  `permission-lost`, never a silent proceed. Results hop to main per
-  the plugin's existing convention.
+  `permission-lost`, never a silent proceed. A held scope on a path
+  that is no longer reachable is `not-found`, and the hold is
+  dropped again. So is a path with a whole component equal to
+  `.Trash`, with `reason: trashed` in details: a Files delete moves
+  the folder into the provider's `.Trash` and the bookmark follows
+  it, so deleted would otherwise read as a live folder the app lists
+  and writes into. There is no public resource key for "in the
+  trash", and `FileManager.url(for: .trashDirectory…)` likely names a
+  different trash, so this is a narrow path guard, provider-specific
+  by nature. Results hop to main per the plugin's existing
+  convention.
 - `release`: drop the token; last token on an identifier calls
   `stopAccessing…`. Unknown token is a no-op (idempotent), logged at
   fine level for leak debugging.
 - Teardown: plugin detach/deinit balances every started URL and
-  clears all tokens and holds — covers engine teardown, hot
-  restart, and isolate loss where Dart-side `release` never runs.
-  Stale tokens after re-attach fail loud, never silently rebind.
+  clears all tokens and holds — covers engine teardown, where
+  Dart-side `release` never runs. A hot restart (or other loss of
+  the root isolate) does NOT detach the plugin, so detach alone
+  misses it: each root isolate sends a random session id with
+  `acquire`, and the first acquire from a new session balances
+  every hold of the old one. Old tokens are then unknown, so they
+  fail loud in the verbs that take a scope, never silently rebind.
+  Holds left by a dead session linger until that first acquire or
+  detach. Session-carrying verbs are root-isolate verbs; a helper
+  must never `acquire`. The rule is stated in the `acquire` dartdoc
+  but not enforced: an acquire from a second isolate silently
+  releases the first one's holds, so native logs every session flip
+  that drops live tokens at warning level (expected once per hot
+  restart, a bug otherwise).
 - Leak backstop: none in v1 — `release` explicit + idempotent only.
   A debug-mode "scopes still held" dump can come later if leaks prove
   hard to find.
@@ -175,10 +199,44 @@ Notes:
   same-authority descendant of a persisted tree URI (tree-ID
   comparison — the grant lives on the root, not the child).
   Absent grant is a loud `permission-lost`. Query the display name
-  (existing `readFileInfo` pattern) and return `path: null`. No
-  native resource is held, so refcounting is trivially satisfied.
+  (existing `readFileInfo` pattern; a bare tree URI is queried as
+  its root document via `buildDocumentUriUsingTree`) and return
+  `path: null`. A null or empty cursor is `not-found`
+  (`DocumentsProvider.query` returns null on a missing document;
+  confirmed for ExternalStorageProvider on an API 36 emulator,
+  2026-09-30) — except a detached volume. ExternalStorageProvider
+  drops an unmounted volume's root, `getRootFromDocId` throws, and
+  `DocumentsProvider.query` swallows that into a null cursor while
+  the grant survives, so a pulled stick would read as a deleted
+  folder. For `com.android.externalstorage.documents` only, the
+  document ID's tag before `:` (`primary`/`home`, or the volume's
+  fsUuid) is matched against `StorageManager.getStorageVolumes()`;
+  no match, or a state other than `MEDIA_MOUNTED` /
+  `MEDIA_MOUNTED_READ_ONLY`, is `permission-lost` with
+  `reason: volume-absent`. (Querying the provider's roots would be
+  cleaner but needs `MANAGE_DOCUMENTS`.) Other authorities are
+  opaque and keep `not-found`. Measured on an API 36 emulator
+  (2026-09-30) with a virtual removable disk (`sm set-virtual-disk
+  true`, `sm partition disk:7,432 public` → volume `3C61-1EFF`),
+  folder picked on it, tree ID `3C61-1EFF:FpwStick`: mounted →
+  acquires; `sm unmount` (grant still persisted) →
+  `permission-lost` with `reason: volume-absent`; `sm mount` →
+  acquires again; the folder removed on the mounted volume →
+  `not-found`. No native resource is
+  held, so refcounting is trivially satisfied.
+- `openDirectory` takes a read+write grant and falls back to
+  read-only, reporting `persistable` honestly, so a read-only tree
+  is still a successful pick rather than a coerced
+  `permission-lost`.
+- Persisted grants are capped (512 per app on current Android, the
+  oldest trimmed silently), and file picks share the cap with tree
+  grants. One grant per section folder keeps this far away, but an
+  app that also persists many file picks should dispose the ones it
+  no longer needs.
 - `release`: drop the token. No-op by design, kept for API symmetry
-  so Dart code paths stay identical across platforms.
+  so Dart code paths stay identical across platforms. The token set
+  is still kept (same session rule as iOS) so the verbs that take a
+  scope can answer `scope-closed`.
 - Control threading: the shared concurrent background TaskQueue
   (uniform rule for every Android control verb).
 
@@ -193,8 +251,13 @@ grant is gone. Dart carrier (pinned, all gaps): `PlatformException`
 with the taxonomy kind as `code` and a details map carrying the
 native domain + code where available. Exhaustiveness rule: anything
 outside the taxonomy stays loud under its own native code — unknown
-failures are never coerced into a taxonomy kind. Rule stands: new
-kinds need a taxonomy review before graduation.
+failures are never coerced into a taxonomy kind. Two mappings on
+Android are deliberate, not coercions of unknowns: a
+`SecurityException` is the platform refusing a grant
+(`permission-lost`), and a `FileNotFoundException` the platform
+reporting a missing document (`not-found`). A `reason` in details
+(`trashed`, `volume-absent`) says which guard produced a kind. Rule
+stands: new kinds need a taxonomy review before graduation.
 
 ## 7. Testing plan
 
@@ -204,12 +267,28 @@ kinds need a taxonomy review before graduation.
   passed through to 2b verbs (mock-level interplay, no native code).
 - Apple device: acquire → kill app → relaunch → acquire same
   identifier (grant survives); move/rename the file via Files, then
-  acquire and expect `repaired: true` with a working fresh identifier;
-  revoke (delete file / remove provider) and expect
-  `permission-lost`; acquire-acquire-release-release refcount check
-  via a debug counter.
+  acquire; revoke (remove provider, or empty Recently Deleted) and
+  expect `permission-lost`; acquire-acquire-release-release
+  refcount check via the logged hold counts.
+  Observed on the iOS 26.5 simulator, "On My iPad" (2026-09-30,
+  R1/1a PR): relaunch, refcount (1 file / 2 tokens → 0) and cancel
+  all as specified. But a Files rename and a move to another folder
+  both resolved with `isStale == false` — the bookmark followed the
+  file, with `path` and `displayName` updated — so `repaired: true`
+  was not produced; the repair branch stays unexercised until some
+  device reports staleness. And a Files delete moves the folder to
+  `.Trash`, where the bookmark follows it too: acquire succeeds with
+  a `.Trash` path instead of `permission-lost`. So acquire now
+  guards `.Trash` explicitly (§5, §9); re-run, the same trashed
+  folder reads as `not-found` with `reason: trashed`.
 - Android device: acquire on live vs revoked grants (revoke via app
   settings); assert no temp growth (acquire must never copy).
+  Observed on an API 36 emulator (2026-09-30, R1/1a PR): cancel →
+  null; tree pick → `fileName` is the folder label; acquire after
+  force-stop + relaunch holds; `disposeAllIdentifiers` →
+  `permission-lost`; folder removed under a live grant →
+  `not-found`; cache size unchanged across acquires; a cold-launch
+  and a warm VIEW intent each reached Dart exactly once.
 - Cross-doc interplay: Gap-1 listing then Gap-2b chunk reads under
   one scope, on each platform, once all three exist.
 
@@ -237,6 +316,18 @@ Same bar as Gaps 1 and 2b, evaluated independently:
   API surface, or is fine-level logging enough? Lean logging for v1.
 - Repair storm: an app acquiring hundreds of moved files pays one
   re-bookmark each — acceptable, but measure during prototype.
+- Trashed folders (RESOLVED 2026-09-30, owner + #68 review): a Files
+  delete is a move into `.Trash`, and acquire follows it. Deleted
+  reads as `not-found` (`reason: trashed`) via a whole-component
+  path guard (§5). Rejected: a public "in trash" resource key (none
+  exists), `.trashDirectory` (likely a different trash), and a flag
+  on the scope (the silent state §6 avoids).
+- Detached volumes on Android (RESOLVED 2026-09-30, owner + #68
+  review): read as `permission-lost` (`reason: volume-absent`) for
+  ExternalStorageProvider via `StorageManager` (§5). Same principle
+  as the trash guard: two separate provider-specific guards, each
+  making the provider's real state loud. Other providers stay
+  `not-found`.
 
 ## 10. Recommendation
 
