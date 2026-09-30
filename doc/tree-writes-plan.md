@@ -190,7 +190,12 @@ Notes:
   (`already-exists`), so callers implement delete-then-rename
   deliberately; the rename itself is best-effort atomic with a crash
   window (momentarily missing target) that the caller recovers
-  through its own damaged state.
+  through its own damaged state. Combined move+rename (parent
+  change with `newName`): pre-check BOTH the intermediate and the
+  final name, move, then rename; on rename failure attempt
+  rollback (move back) and throw the rename failure; if rollback
+  fails, throw loud `move-partial` carrying the actual identifier
+  in details so the caller can locate and recover.
 - `moveEntry` in v1 is same-provider only (what `moveDocument` and
   `FileManager.moveItem` both guarantee). Cross-provider move is
   copy + delete choreography — explicitly out of v1.
@@ -240,8 +245,11 @@ Notes:
   parent first; taken name is loud `already-exists`, not
   attempted. Same parent + new name → `renameDocument` (fresh URI
   returned); parent change → `moveDocument`, then `renameDocument`
-  when `newName` is also given (documented crash window between
-  the two ops). Always re-stat into a fresh `ChildEntry`.
+  when `newName` is also given (combined case pre-checks both the
+  intermediate and the final name; documented crash window between
+  the two ops; rename failure attempts rollback, rollback failure
+  throws `move-partial` with the actual identifier). Always
+  re-stat into a fresh `ChildEntry`.
   Cross-provider is loud `unsupported-move`, not attempted. The
   rename is best-effort atomic (no SAF replace primitive).
 
@@ -267,7 +275,8 @@ Notes:
   map to loud `already-exists` (nothing is created, so no residue
   cleanup); target names are pre-checked before `moveItem`, and
   move-then-rename is sequenced like Android (source parent from
-  the passed scope).
+  the passed scope, both names pre-checked, rollback attempt,
+  `move-partial` on rollback failure).
 
 ## 6. Error taxonomy
 
@@ -277,8 +286,10 @@ Shared with Gaps 1/1a/2b: `permission-lost`, `not-found`,
 sessions), `scope-closed`. New in this gap: `directory-not-empty`
 (non-recursive delete of a non-empty directory),
 `unsupported-move` (cross-provider move attempt),
-`already-exists` (create/move/write onto a taken name), and
-`invalid-name` (leaf-name rule violation). Dart carrier
+`already-exists` (create/move/write onto a taken name),
+`invalid-name` (leaf-name rule violation), and `move-partial`
+(combined move+rename with failed rollback; actual identifier in
+details). Dart carrier
 (pinned, all gaps): `PlatformException` with the taxonomy kind as
 `code` and a details map carrying the native domain + code where
 available. Exhaustiveness rule: anything outside the taxonomy stays
@@ -300,8 +311,10 @@ before graduation.
   expect `permission-lost`; create a folder twice, open-write an
   existing name, and move onto a taken name, all expecting loud
   `already-exists` with no residue; pass `../x` and expect loud
-  `invalid-name`; assert no temp growth on the write path and
-  memory bounded to ~2 chunks during a 1GB write.
+  `invalid-name`; force rename failure after a cross-parent move
+  and expect rollback to the source or loud `move-partial`
+  carrying the actual identifier; assert no temp growth on the
+  write path and memory bounded to ~2 chunks during a 1GB write.
 - iOS backend: same matrix once the 1a registry exists, plus
   stale-refresh interplay (move a file mid-session via Files).
 - Acquisition: cancel returns null; picked tree feeds listChildren,
