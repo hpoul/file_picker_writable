@@ -162,17 +162,20 @@ class ReadSession {
   int get fd;          // Plain int: passes to a helper isolate for free.
   bool get seekable;   // statSize >= 0. False for pipes: sequential only.
   int? get length;     // statSize, or null for pipes.
-  // Explicit handoff: returns the sendable record and kills the
-  // local copy in one call (a SendPort send copies silently, so the
-  // dead-marking must be explicit, never incidental).
+  // Explicit handoff: validates the scope is still acquired (loud
+  // `scope-closed` otherwise — the last root-side check), returns
+  // the sendable record, and kills the local copy in one call (a
+  // SendPort send copies silently, so the dead-marking must be
+  // explicit, never incidental).
   ReadHandoff handoff();
 }
-// Plain ints + bools: crosses isolates for free, in the same shape
-// the driving consumer already sends.
+// Plain ints + bools + strings: crosses isolates for free, in the
+// same shape the driving consumer already sends.
 class ReadHandoff {
   int get fd;
   bool get seekable;
   int? get length;
+  String get scopeToken; // AcquiredScope.id, opaque; validated at handoff().
 }
 
 @experimental
@@ -191,6 +194,10 @@ class FdReader {
   // signals EOF. A retained view past close() is use-after-free
   // (the buffer is freed) — copy to retain. No GC finalizer on
   // the view can fix this: it would double-free against close.
+  // Bounds: negative position/length ⇒ sync ArgumentError;
+  // length > bufferLength ⇒ sync ArgumentError (single fixed
+  // buffer — no silent clamp or resize); position at/past EOF ⇒
+  // empty view (the EOF signal, not an error).
   Uint8List readChunk(int position, int length);
   // FFI close + buffer free. Idempotent within the owning isolate.
   void close();
@@ -242,7 +249,11 @@ Notes:
   root-side wrapper GC'd mid-helper-read would close the live fd).
   Killable helpers use `Isolate.spawn` + `onExit` death
   confirmation (`Isolate.run` exposes no `Isolate` to kill; its
-  errors are the non-kill path, finalizers already run).
+  errors are the non-kill path, finalizers already run). The
+  finalizer token owns one native cleanup record {fd, buffer} (a
+  closing fd alone would leak the `malloc` buffer on the GC/kill
+  paths); the C shim releases both, and explicit close performs
+  the same cleanup after detaching the finalizer.
 - Pipes: `pread` fails on pipes (`ESPIPE`), so a non-seekable
   session reads sequentially (`read`), tracks position in Dart,
   and enforces forward-only. Backward seek on a pipe is a loud
@@ -297,8 +308,9 @@ Notes:
   `open(2)` `O_RDONLY`, `fstat`s for length, returns the fd.
   Reads are Dart FFI afterwards — but the scope discipline
   stays uniform: `FdReader` checks token liveness in Dart at
-  construction and close, not per op (uniform with the helper
-  channel rule below), and use after release is loud
+  construction and close, not per op (same-isolate path; the
+  helper path validates at `handoff()`, see below), and use
+  after release is loud
   `scope-closed` (the kernel would not re-check an open fd; the
   plugin does). Off main; results hop
   to main per the plugin's existing convention (TaskQueue is
@@ -307,15 +319,21 @@ Notes:
 
 ### Dart FFI reader (both platforms)
 
-- `pread64`/`read`/`close` bindings, `isLeaf: true`; one reusable
-  `malloc` buffer per reader; views via `asTypedList`, valid
-  until the next call or close. The finalizer callback is a tiny
-  native close shim (`void f(void*)`), not punned libc `close`
-  (works on LP64, ABI-fragile) — and `pread` / `read` / `pwrite`
-  / `fsync` go through the same shim as `-errno` wrappers (one
-  shared C shim, both gaps): a separate `__errno` FFI call runs
-  after Dart code has resumed, where a safepoint can intervene
-  and hand back a stale value. `EINTR` retries inside the shim.
+- Dart binds the shared C shim's entry points (non-leaf — a
+  cold-storage read can block, which strains the `isLeaf`
+  contract; the transition cost is ~0.1% of a 192µs read); one
+  reusable `malloc` buffer per reader; views via `asTypedList`,
+  valid until the next call or close. The bench FFI rows used
+  leaf libc bindings — re-run them against the non-leaf shim to
+  confirm the delta is noise. The shim wraps `pread` / `read` /
+  `pwrite` / `fsync` as `-errno` functions (one shared C shim,
+  both gaps; `EINTR` retried inside): a separate `__errno` FFI
+  call runs after Dart code has resumed, where a safepoint can
+  intervene and hand back a stale value. The shim selects the
+  read symbol per platform (`pread64` on Android, `pread` on
+  Darwin — one Dart signature). The finalizer callback is a tiny
+  native close entry (`void f(void*)`), not punned libc `close`
+  (works on LP64, ABI-fragile).
 - `errno` mapping: `EIO`/`ENXIO`/`ENODEV` after detach ⇒
   `permission-lost` (media detached — revoked grants do NOT fail
   open fds); `EBADF` ⇒ `session-closed` (use after close / double
@@ -327,10 +345,16 @@ Notes:
   `BackgroundIsolateBinaryMessenger` refuses — so helpers use a
   dedicated handler-free channel client
   (`ensureInitialized(rootToken)` + raw `MethodChannel` invoke, no
-  listen) shipped by the plugin. Token liveness is checked at
-  reader construction and close, not per op (a per-op round trip
-  would add 20–80% per read); mid-session revoke surfaces at
-  close, not mid-read.
+  listen) shipped by the plugin. Token liveness is a Dart-side
+  live-set of unreleased scope ids. Same-isolate `fromSession`
+  checks membership at construction and close, not per op (a
+  per-op round trip would add 20–80% per read); a mid-session
+  release surfaces at close on that path. `handoff()` validates
+  the scope root-side and carries the opaque token in the record
+  (catches already-released); the helper performs no live check
+  — its copy is a handoff-time snapshot, blind to a root-side
+  mid-session release. The scope MUST stay acquired until close
+  (caller obligation on the helper path).
 
 ## 6. Error taxonomy
 

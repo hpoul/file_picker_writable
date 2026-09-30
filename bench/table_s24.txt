@@ -6,7 +6,7 @@ chan    n  mean_us  p50_us  p99_us  max_us
 main    3     40.2      37      94    1632
 bg      3    182.8     162     554    1327
 
-RUNS (1 GiB sequential; medians over reps; jank = frames > 16.7 ms, jank33 = > 33.4 ms, uiStall = build > 16.7 ms, gaps40 = vsync gaps > 33 ms; worst/maxGap = max over reps)
+RUNS (1 GiB sequential; medians over reps; jank = frames > 16.7 ms, jank33 = > 33.4 ms, uiStall = build > 16.7 ms, gaps40 = vsync gaps > 40 ms; worst/maxGap = max over reps)
 transport               chunk  n   MiB/s  mean_us  p50_us  p99_us   max_us frames   fps  jank jank33 uiStall gaps40 worst_ms maxGap_ms
 A1-mc-io-dispatch         64K  3   110.7    564.1     482    2154     6049   1111 120.1     0      0       0      0     11.8      16.6
 A1-mc-io-dispatch        256K  3   209.1   1195.0     869    4083     8911    589 120.2     0      0       0      0     10.6       8.4

@@ -116,9 +116,11 @@ class WriteSession {
   String get identifier; // Child identifier (abort-delete + close-stat need it).
   int get bytesWritten;  // Acknowledged total. Progress numerator.
   bool get canFsync;     // False for pipes: no fsync, and it says so.
-  // Explicit handoff: returns the sendable record and kills the
-  // local copy in one call (a SendPort send copies silently, so the
-  // dead-marking must be explicit, never incidental).
+  // Explicit handoff: validates the scope is still acquired (loud
+  // `scope-closed` otherwise — the last root-side check), returns
+  // the sendable record, and kills the local copy in one call (a
+  // SendPort send copies silently, so the dead-marking must be
+  // explicit, never incidental).
   WriteHandoff handoff();
 }
 // Plain ints + strings: crosses isolates for free, in the same shape
@@ -127,6 +129,7 @@ class WriteHandoff {
   int get fd;
   String get identifier;
   bool get canFsync;
+  String get scopeToken; // AcquiredScope.id, opaque; validated at handoff().
 }
 // After handoff the sender's copy is dead for FD USE (byte ops, fd
 // close ⇒ sync StateError, like ArgumentError — fail-fast beats
@@ -200,6 +203,12 @@ Notes:
   parent scope because callers creating N folders in a loop should
   not pay N acquires; `moveEntry` takes source + new parent scopes
   because the native move needs the source parent (see §5).
+- Scope-liveness mechanics, same as 2b: a Dart-side live-set of
+  unreleased scope ids; same-isolate `fromSession` checks at
+  construction and close. `handoff()` validates root-side and
+  carries the opaque token; the helper performs no live check
+  (handoff-time snapshot). The scope MUST stay acquired until
+  close (caller obligation on the helper path).
 - Leaf-name rule (peer-confirmed): `name`/`newName` reject empty,
   `.`/`..`, and any `/` or NUL — one rule, both platforms (Android
   display names and iOS path components alike). Dart pre-checks
@@ -320,10 +329,12 @@ Notes:
   in v1; verify-after stays the correctness backstop.
 - `writeChunk`: pure Dart FFI (`pwrite` at `bytesWritten`, looped
   to full length; sequential `write` for pipes) — no channel.
-  Staging copy into the reusable native buffer. 0 from `write` /
-  `pwrite` is a loud ENOSPC-shaped failure, never loop progress
-  (a FUSE-full volume returns 0; treating it as progress spins
-  past the cancel check forever).
+  Staging copy into the reusable native buffer; bytes longer
+  than the buffer loop stage+write (no size cap — unlike the read
+  side's fixed view, a write chunk is never retained). 0 from
+  `write` / `pwrite` is a loud ENOSPC-shaped failure, never loop
+  progress (a FUSE-full volume returns 0; treating it as progress
+  spins past the cancel check forever).
 - `errno` capture: `pwrite` / `fsync` go through the 2b §5
   `-errno` shims (one shared native shim, `EINTR` retried
   inside) — never a separate `__errno` FFI call after Dart
@@ -334,6 +345,9 @@ Notes:
   `closeFd: false` on the kill path — the finalizer closed it),
   then a channel control call `deleteDocument`s the partial. Both
   idempotent; use-after-either is loud `session-closed`.
+  Explicit close/abort and the finalizer backstop all release the
+  fd + `malloc` buffer as one native cleanup record (same rule as
+  2b — a closing fd alone would leak the buffer on the kill path).
 - `createDirectory`: list the parent first (taken name ⇒ loud
   `already-exists`, not attempted); `createDocument` with
   `MIME_TYPE_DIR`, then verify the returned display name matches
@@ -368,7 +382,12 @@ Notes:
   re-mangle — verify, then loud `invalid-name` with requested +
   actual (== original) names in details. Rename-back failure ⇒
   `move-partial` here too: an exception path must never silently
-  move the user's file. Always re-stat into a fresh
+  move the user's file. In the combined case both branches
+  additionally move the file back to the source parent after the
+  rename-back (a bare rename-back would leave the source moved,
+  contradicting the rollback contract); either restoration step
+  failing ⇒ `move-partial` with the actual identifier. Always
+  re-stat into a fresh
   `ChildEntry`. Cross-provider is loud `unsupported-move`, not
   attempted. The rename is best-effort atomic (no SAF replace
   primitive).
@@ -386,11 +405,13 @@ Notes:
   `fsync`, `close`; abort removes the partial via `FileManager`).
   Off main; results hop to main per convention.
 - `createDirectory`: `FileManager.createDirectory` under the
-  passed-in parent scope (not per-call — §4). `deleteEntry` /
-  `moveEntry`: `FileManager` under a per-call scope (single-shot
-  verbs), with the plugin's own recursive walk for
+  passed-in parent scope (not per-call — §4). `deleteEntry`:
+  `FileManager` under a per-call scope (single-shot verb), with
+  the plugin's own recursive walk for
   `deleteEntry(recursive: true)` — same rule as Android: never
-  trust provider-side recursion. Non-recursive checks emptiness
+  trust provider-side recursion. `moveEntry`: `FileManager`
+  under the passed source + new parent scopes (same as Android —
+  never per-call). Non-recursive checks emptiness
   by listing first with the same best-effort race as Android
   (`FileManager.removeItem` is itself recursive). `FileManager` file-exists errors
   map to loud `already-exists` (nothing is created, so no residue

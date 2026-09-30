@@ -46,7 +46,7 @@ for chan, rows in pings.items():
           f"{med([int(r['max_us']) for r in rows]):>7}")
 print()
 print('RUNS (1 GiB sequential; medians over reps; jank = frames > 16.7 ms, jank33 = > 33.4 ms, '
-      'uiStall = build > 16.7 ms, gaps40 = vsync gaps > 33 ms; worst/maxGap = max over reps)')
+      'uiStall = build > 16.7 ms, gaps40 = vsync gaps > 40 ms; worst/maxGap = max over reps)')
 hdr = (f"{'transport':22} {'chunk':>6} {'n':>2} {'MiB/s':>7} {'mean_us':>8} {'p50_us':>7} {'p99_us':>7} "
        f"{'max_us':>8} {'frames':>6} {'fps':>5} {'jank':>5} {'jank33':>6} {'uiStall':>7} {'gaps40':>6} "
        f"{'worst_ms':>8} {'maxGap_ms':>9}")
