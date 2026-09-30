@@ -73,6 +73,6 @@ that handicap, ordering does not.
 
 Run logs capture the bench hostname and ephemeral VM-service URLs.
 Before committing a new run: replace `host="…"` with
-`host="devbox"`, replace `http://127.0.0.1:…` URLs with
+`host="devbox"`, replace loopback VM-service URLs with
 `(redacted-vm-url)`, and grep for owner/machine identifiers.
 Committed logs may be reruns — the table files state the run.
