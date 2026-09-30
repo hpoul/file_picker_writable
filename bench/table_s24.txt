@@ -1,0 +1,34 @@
+META flutter=3.47.0 mode=profile avd=s24-physical sdk=36 abi=arm64-v8a host="devbox"
+IDLE 5s: frames=601 fps=120.2 jank=0 jank33=0 uiStall=0 gaps40=0 worst_ms=6.0 medianSpan_ms=1.7 maxGap_ms=8.4
+
+PING (0-byte MethodChannel round trip, 1000 calls; medians over reps)
+chan    n  mean_us  p50_us  p99_us  max_us
+main    3     40.2      37      94    1632
+bg      3    182.8     162     554    1327
+
+RUNS (1 GiB sequential; medians over reps; jank = frames > 16.7 ms, jank33 = > 33.4 ms, uiStall = build > 16.7 ms, gaps40 = vsync gaps > 33 ms; worst/maxGap = max over reps)
+transport               chunk  n   MiB/s  mean_us  p50_us  p99_us   max_us frames   fps  jank jank33 uiStall gaps40 worst_ms maxGap_ms
+A1-mc-io-dispatch         64K  3   110.7    564.1     482    2154     6049   1111 120.1     0      0       0      0     11.8      16.6
+A1-mc-io-dispatch        256K  3   209.1   1195.0     869    4083     8911    589 120.2     0      0       0      0     10.6       8.4
+A1-mc-io-dispatch       1024K  3   329.3   3035.9    2550    6835     9749    374 120.2     0      0       0      0      7.9       8.4
+A2-mc-platform-sync       64K  3   393.9    158.5     121     874     4728    313 120.3     0      0       0      0      5.7       8.3
+A2-mc-platform-sync      256K  3   419.8    595.3     429    2592     6641    293 120.1     0      0       0      0      8.0       8.4
+A2-mc-platform-sync     1024K  3   498.4   2006.0    1779    5292     6756    234 113.1     0      0       0      0     14.8      16.7
+B-mc-taskqueue            64K  3   169.4    368.3     303    1690     4627    726 120.1     0      0       0      0      5.1       8.4
+B-mc-taskqueue           256K  3   273.5    913.5     666    3396     6478    450 120.2     0      0       0      0      7.2       8.4
+B-mc-taskqueue          1024K  3   392.9   2544.2    2179    5988     7863    314 119.9     0      0       0      0      7.3       8.4
+C1-ffi-iso-view           64K  3  4833.4     12.8      12      31      384     26 121.7     0      0       0      0      4.6       8.4
+C1-ffi-iso-view          256K  3  4880.0     51.0      46     255      792     26 122.9     0      0       0      0      6.3       8.3
+C1-ffi-iso-view         1024K  3  4653.7    214.6     192     956     2291     27 121.6     0      0       0      0      4.9       8.3
+C2-ffi-iso-copy           64K  3  2906.5     21.4      15     211     1135     42 118.7     0      0       0      0      4.5       8.3
+C2-ffi-iso-copy          256K  3   848.7    294.1     257    1199     3536    145 120.1     0      0       0      0      6.3       8.4
+C2-ffi-iso-copy         1024K  3  1045.8    955.4     779    3377     4517    118 120.3     0      0       0      0      9.9       8.4
+C3-ffi-iso-send           64K  3   447.9    139.2     101     654     4343    275 120.2     0      0       0      0      7.0       8.4
+C3-ffi-iso-send          256K  3   289.4    863.4     689    2931     6250    425 120.0     0      0       0      0      5.5       8.4
+C3-ffi-iso-send         1024K  3   465.8   2146.3    1499    5802     6654    265 120.3     0      0       0      0      6.7       8.4
+C4-ffi-ui-copy            64K  3  1227.1     20.3      16     152     1165    100 119.8     0      0       0      0      4.4       8.3
+C4-ffi-ui-copy           256K  3   850.2    237.2     207     772     2072     15  11.8     7      5       0      6    255.6     224.7
+C4-ffi-ui-copy          1024K  3  1088.5    758.7     662    2336     4510      6   6.4     4      3       0      2    308.9     216.4
+D-jni                     64K  3  1264.9     49.3      37     302     3064     98 120.0     0      0       0      0      4.7       8.3
+D-jni                    256K  3  1401.5    178.2     133    1136     4865     88 119.3     0      0       0      0      6.4       8.3
+D-jni                   1024K  3  1492.2    669.8     581    2639     5296     83 120.2     0      0       0      0      6.2       8.4
