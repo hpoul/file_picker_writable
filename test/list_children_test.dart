@@ -119,6 +119,23 @@ void main() {
       expect(child.lastModified, isNull);
     });
 
+    test(
+      'lastModified 0 from any platform is "won\'t say", size 0 stays',
+      () async {
+        // iOS passes a provider's 0 through; the rule lives in Dart.
+        backend = (call) async => <String, Object?>{
+          'identifier': 'dir',
+          'repaired': false,
+          'entries': [entry('empty.txt', size: 0, lastModified: 0)],
+        };
+        final child = (await FilePickerWritable().listChildren(
+          identifier: 'dir',
+        )).entries.single;
+        expect(child.lastModified, isNull);
+        expect(child.size, 0);
+      },
+    );
+
     test('a subdirectory identifier round-trips back in', () async {
       backend = (call) async {
         final id = (call.arguments as Map)['identifier'];

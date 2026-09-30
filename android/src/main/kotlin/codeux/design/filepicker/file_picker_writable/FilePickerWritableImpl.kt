@@ -515,8 +515,7 @@ class FilePickerWritableImpl(
   fun listChildren(identifier: String): Map<String, Any?> {
     val started = System.nanoTime()
     val directory = requireDirectory(identifier)
-    val entries = queryChildren(directory)
-      ?: throw missingDocument(directory.documentUri)
+    val entries = requireChildren(directory)
     plugin.logDebug(
       "listChildren: ${entries.size} rows in ${(System.nanoTime() - started) / 1_000_000} ms"
     )
@@ -531,7 +530,8 @@ class FilePickerWritableImpl(
    * The child [name] of the directory [identifier], or null when absent.
    * ExternalStorageProvider IDs are paths, so the child's ID is derived
    * and queried as one row; any other provider is opaque, so it falls back
-   * to scanning the listing (same answer, listing cost).
+   * to scanning the listing (same answer, listing cost; names match
+   * exactly there, unlike ExternalStorageProvider's file system match).
    */
   @WorkerThread
   fun lookupChild(identifier: String, name: String): Map<String, Any?>? {
@@ -540,27 +540,40 @@ class FilePickerWritableImpl(
     }
     val directory = requireDirectory(identifier)
     val child = if (directory.treeUri.authority == StorageVolumes.AUTHORITY) {
-      val childId = StorageVolumes.childDocumentId(directory.documentId, name)
+      val childUri = DocumentsContract.buildDocumentUriUsingTree(
+        directory.treeUri,
+        StorageVolumes.childDocumentId(directory.documentId, name)
+      )
       try {
-        queryRow(DocumentsContract.buildDocumentUriUsingTree(directory.treeUri, childId))
+        queryRow(childUri)
       } catch (e: IllegalArgumentException) {
-        // The provider's tree check (isChildDocument) cannot resolve a
-        // missing file, and says so as "Failed to determine if … is child
-        // of …" rather than a null row (measured, API 36). queryRow has
-        // already turned a removed volume into volume-absent, the parent
-        // was just confirmed to be a live directory, and the ID is derived
-        // from it, so this is the absent child.
-        plugin.logDebug("lookupChild: $childId absent (${e.message})")
+        // The provider's tree check (isChildDocument) throws for a child it
+        // cannot resolve — a missing file ("Failed to determine if … is
+        // child of …", measured API 36), but also a canonicalize failure on
+        // a failing stick, or a parent that vanished since requireDirectory.
+        // So never decide on the exception: re-query the parent. Only a
+        // parent that is still a live directory makes this the absent child.
+        plugin.logDebug("lookupChild: child query threw ${e.message}; re-checking the parent")
+        directoryRow(directory.documentUri, directory.isTreeRoot)
+        null
+      } ?: run {
+        // A volume detached since requireDirectory reads as a null row.
+        absentVolume(childUri)?.let { throw it }
         null
       }
     } else {
-      (queryChildren(directory) ?: throw missingDocument(directory.documentUri))
-        .firstOrNull { it.name == name }
+      requireChildren(directory).firstOrNull { it.name == name }
     }
     return child?.toResult(directory.treeUri)
   }
 
-  private class Directory(val treeUri: Uri, val documentId: String, val documentUri: Uri)
+  private class Directory(
+    val treeUri: Uri,
+    val documentId: String,
+    val documentUri: Uri,
+    /** The picked tree's own root, whose tree check never runs. */
+    val isTreeRoot: Boolean
+  )
 
   private class DocumentRow(
     val documentId: String,
@@ -602,11 +615,53 @@ class FilePickerWritableImpl(
     )
     val documentUri = documentUriFor(uri)
     val documentId = DocumentsContract.getDocumentId(documentUri)
-    val row = queryRow(documentUri) ?: throw missingDocument(documentUri)
+    val isTreeRoot = documentId == DocumentsContract.getTreeDocumentId(uri)
+    val row = directoryRow(documentUri, isTreeRoot)
     if (!row.isDirectory) {
       throw TaxonomyException(ErrorKind.NOT_A_DIRECTORY, "${row.name} is not a directory")
     }
-    return Directory(treeUri, documentId, documentUri)
+    return Directory(treeUri, documentId, documentUri, isTreeRoot)
+  }
+
+  /**
+   * The row of a directory that must still exist, else [missingDocument]
+   * (`not-found`, or `volume-absent`). A gone tree root reads as a null
+   * row, but anything below it goes through the provider's tree check,
+   * which throws `IllegalArgumentException` for a missing file instead
+   * (FileSystemProvider wraps the FileNotFoundException). So for a
+   * non-root directory that exception means gone, never a raw error.
+   */
+  @WorkerThread
+  private fun directoryRow(documentUri: Uri, isTreeRoot: Boolean): DocumentRow {
+    val row = try {
+      queryRow(documentUri)
+    } catch (e: IllegalArgumentException) {
+      if (isTreeRoot) {
+        throw e
+      }
+      plugin.logDebug("Directory query threw ${e.message}; treating it as gone")
+      null
+    }
+    return row ?: throw missingDocument(documentUri)
+  }
+
+  /**
+   * All children of [directory], else [missingDocument]: a folder removed
+   * since [requireDirectory] shows up here, as a null cursor or, below the
+   * tree root, as the tree check's `IllegalArgumentException`.
+   */
+  @WorkerThread
+  private fun requireChildren(directory: Directory): List<DocumentRow> {
+    val children = try {
+      queryChildren(directory)
+    } catch (e: IllegalArgumentException) {
+      if (directory.isTreeRoot) {
+        throw e
+      }
+      plugin.logDebug("Children query threw ${e.message}; treating the directory as gone")
+      null
+    }
+    return children ?: throw missingDocument(directory.documentUri)
   }
 
   /** The one row for [documentUri], or null when the provider has none. */

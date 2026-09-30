@@ -571,6 +571,37 @@ class DirectoryScopeDisplayState extends State<DirectoryScopeDisplay> {
         await plugin.release(scope);
         return scope;
       });
+      if (child.isDirectory) {
+        // Two levels down: a grandchild's identifier works too.
+        await step('grandchildren of "${child.name}"', () async {
+          final grandchildren = await plugin.listChildren(
+            identifier: child.identifier,
+          );
+          Future<Object> childCount(ChildEntry entry) async {
+            try {
+              return (await plugin.listChildren(
+                identifier: entry.identifier,
+              )).entries.length;
+            } on PlatformException catch (e) {
+              return e.code;
+            }
+          }
+
+          return [
+            for (final grandchild in grandchildren.entries) ...[
+              '${grandchild.name}: ${await childCount(grandchild)}',
+            ],
+          ];
+        });
+      } else {
+        // The one-shot copy verb takes a child identifier as well.
+        await step('readFile child "${child.name}"', () {
+          return plugin.readFile(
+            identifier: child.identifier,
+            reader: (info, file) async => '${file.lengthSync()} bytes',
+          );
+        });
+      }
     }
     if (mounted) {
       setState(() {

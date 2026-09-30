@@ -181,38 +181,72 @@ Notes:
   parent itself (null ⇒ the Gap-1a missing-document rule:
   `not-found`, or `permission-lost` `volume-absent` for an
   unmounted ExternalStorageProvider volume), and a directory MIME
-  type (else `not-a-directory`). So a gone parent is loud before
-  any child query. Every provider query (parent, children, derived
-  child) runs the volume check on any exception too, so a stick
-  pulled mid-call reads as `volume-absent`, never as a missing
-  child (scope-registry-plan §5). Measured: removing the virtual
-  disk turns both verbs into `permission-lost` `volume-absent`.
+  type (else `not-a-directory`). A gone parent reads as a null
+  row only when it is the picked tree's own root; anything below
+  the root goes through the provider's tree check
+  (`isChildDocument`), which throws `IllegalArgumentException` for
+  a missing file (FileSystemProvider wraps the
+  `FileNotFoundException`). So for a non-root directory that
+  exception from the parent or children query means gone ⇒ the
+  missing-document rule, never a raw error. Measured (#69 review
+  M1): delete a listed subfolder, then `lookupChild` and
+  `listChildren` on it ⇒ `not-found`. Every provider query
+  (parent, children, derived child) also runs the volume check on
+  any exception, and the derived child's null row runs it too, so
+  a stick pulled mid-call reads as `volume-absent`, not as a
+  missing child (scope-registry-plan §5; the null-row-mid-call
+  race itself is covered by construction, not timed). Measured:
+  removing the virtual disk, then calling both verbs with a
+  SUBFOLDER identifier, gets the provider's throwing variant
+  (`IllegalArgumentException` "… No root for <uuid>", reached
+  without `adb root`) and reports `permission-lost`
+  `volume-absent`, the raw exception kept in details.
 - `lookupChild`: for ExternalStorageProvider only (the one
   provider whose IDs are known to be paths), derive the child
   document ID as parent ID + `/` + name (`<root>:` + name directly
   under a volume root), query the one row via
   `buildDocumentUriUsingTree`, map to `ChildEntry`. A missing
-  child does NOT come back as a null row: the provider's tree
-  check (`isChildDocument`) cannot resolve the missing file and
-  throws `IllegalArgumentException` ("Failed to determine if … is
-  child of …"; measured, API 36). With the parent just confirmed
-  live, that is read as absent ⇒ null. Every other provider is
-  opaque and falls back to list-and-scan internally (same result,
-  listing cost — the caller can't tell).
+  child does NOT come back as a null row: the tree check throws
+  `IllegalArgumentException` ("Failed to determine if … is child
+  of …"; measured, API 36). The same exception also comes from a
+  canonicalize failure on a failing stick or a parent that
+  vanished mid-call, so the plugin never decides on it: it
+  re-queries the parent, and only a parent that is still a live
+  directory makes the answer null (one extra row query, on a miss
+  only); a gone parent is the missing-document rule. Every other
+  provider is opaque and falls back to list-and-scan internally
+  (same result, listing cost — the caller can't tell), with an
+  exact name match there.
+- An unreadable directory on ExternalStorageProvider lists as
+  empty (`FileUtils.listFilesOrEmpty`), so an empty listing is not
+  proof of an empty folder; the dartdoc says so.
 
 ### iOS (Swift, after Gap 1a lands)
 
 - `listChildren`: resolve identifier to URL (bookmark, with
-  stale-refresh per 1a), `startAccessing…`, `contentsOfDirectory`,
-  per-child `bookmarkData()` for the identifier plus
-  `resourceValues` for size/mtime, `stopAccessing…`. Return the
-  entries wrapped with the (possibly fresh) parent identifier +
-  `repaired` flag. Results hop to main per the plugin's existing
-  convention.
-- Identifier encoding (pinned): base64 `bookmarkData()` per child,
-  same encoding as the existing single-file identifiers. Opaque to
-  Dart — never parsed there. macOS is stubbed (`UnsupportedError`)
-  per the Gap-1a boundary decision.
+  stale-refresh per 1a), `startAccessing…` on the root,
+  `contentsOfDirectory`, `resourceValues` for size/mtime,
+  `stopAccessing…`. Return the entries wrapped with the (possibly
+  fresh) parent identifier + `repaired` flag. Results hop to main
+  per the plugin's existing convention.
+- Identifier encoding (REVISED 2026-10-01, #69 review S4/S5): a
+  child identifier is the picked root's bookmark plus a relative
+  path (`fpwchild1:<root bookmark>:<percent-encoded path>`), NOT a
+  bookmark per child as first pinned. Measured on the iOS 26.5
+  simulator, 10k children: a bookmark per child cost 47.3 s of a
+  47.8 s listing (~4.7 ms each); root + path costs 52 ms for all
+  entries, 164 ms end to end. It also settles where a child's
+  access comes from: every verb resolves the root bookmark and
+  starts the ROOT's security scope, then works on root + path —
+  the same pattern the plugin's create-in-folder pick already
+  ships — instead of trusting a child bookmark's own scope, which
+  the simulator (no sandbox enforcement) cannot prove. Trade-off,
+  same as Android's path-based document IDs: a child identifier
+  follows a rename only through its root; persist root
+  identifiers, re-derive children by listing. `readFile`,
+  `writeFile`, `acquire`, `listChildren` and `lookupChild` all take
+  either form. Opaque to Dart — never parsed there. macOS is
+  stubbed (`UnsupportedError`) per the Gap-1a boundary decision.
 - `lookupChild`: resolve parent URL (same stale-refresh),
   `startAccessing…`, `FileManager` attributes query on
   parentURL + name → `ChildEntry` or null when absent,
@@ -222,16 +256,23 @@ Notes:
   `reason: trashed`, not a directory ⇒ `not-a-directory`.
   `contentsOfDirectory` runs without `.skipsHiddenFiles`, so
   dotfiles list.
-- Child bookmarks made under the parent's scope stand on their
-  own: `acquire` on a listed child's identifier starts its scope
-  (simulator, 2026-09-30), so a caller holds one child without
-  holding the folder.
+- `acquire` on a child identifier holds the root's scope (the
+  registry refcounts the root) and returns the child's path and
+  name, so a caller holds one child without listing again.
+  Simulator runs: acquire, `readFile` and a two-levels-down
+  `listChildren` all work on child identifiers. Security scope on
+  a real device is still owed one run (the simulator does not
+  enforce the sandbox), but it is now the root's scope, not a
+  child bookmark's.
 
 ## 6. Error taxonomy
 
 Shared with Gap 2b where the meaning matches: `permission-lost`
-(grant revoked, media detached), `not-found`, plus
-`not-a-directory` (identifier resolves but is not listable).
+(grant revoked, media detached — `reason: volume-absent` on
+ExternalStorageProvider), `not-found` (`reason: trashed` for an iOS
+parent in `.Trash`), plus `not-a-directory` (identifier resolves
+but is not listable) and `invalid-name` (a non-leaf `lookupChild`
+name that got past the Dart `ArgumentError`, tree-writes-plan §6).
 Dart carrier (pinned, all gaps): `PlatformException` with the
 taxonomy kind as `code` and a details map carrying the native
 domain + code where available. Exhaustiveness rule: anything
@@ -273,7 +314,13 @@ taxonomy review before graduation (see §8).
   - iOS 26.5 simulator: the same listing, lookup, `not-a-directory`
     and child-acquire results; the wrong-case lookup was a miss
     there (null), and a trashed parent is `not-found`
-    `reason: trashed` for both verbs.
+    `reason: trashed` for both verbs. 10k children: 47.8 s with a
+    bookmark per child, 164 ms with root + path identifiers (§5).
+  - Both, after the review round (2026-10-01): `readFile` on child
+    identifiers, a grandchild listing two levels down, a deleted
+    subfolder ⇒ `not-found` (Android M1), and a removed disk with a
+    subfolder identifier ⇒ `volume-absent` via the throwing
+    variant (Android S2).
 - No new benchmark suite beyond the 10k-child latency check: listing
   throughput is provider-bound by the same argument as 2b §3's
   overhead note.

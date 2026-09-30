@@ -161,7 +161,9 @@ class ChildEntry {
       identifier: result['identifier']! as String,
       isDirectory: result['isDirectory']! as bool,
       size: result['size'] as int?,
-      lastModified: lastModified == null
+      // 0 (or less) is a provider that doesn't track it: "won't say".
+      // Normalized here so the rule holds on every platform.
+      lastModified: lastModified == null || lastModified <= 0
           ? null
           : DateTime.fromMillisecondsSinceEpoch(lastModified, isUtc: true),
     );
@@ -577,7 +579,10 @@ class FilePickerWritable {
   ///
   /// Failures are [PlatformException]s with the kinds listed on
   /// [AcquiredScope], plus `not-a-directory` when [identifier] resolves to
-  /// something that is not a listable directory.
+  /// something that is not a listable directory. One exception to
+  /// loudness: Android's system storage provider lists a directory it
+  /// cannot read (e.g. on a failing stick) as empty, so an empty listing
+  /// is not proof of an empty folder.
   ///
   /// Android and iOS only; throws [UnsupportedError] elsewhere.
   @experimental
@@ -600,12 +605,13 @@ class FilePickerWritable {
   /// directory is loud, with the same kinds as [listChildren].
   ///
   /// [name] is a single leaf name: empty, `.`, `..`, or anything containing
-  /// `/` or NUL throws [ArgumentError]. Matching is the file system's: on a
-  /// case-insensitive one (Android shared storage, FAT/exFAT sticks) a
-  /// child stored as `trip.json` is found for `TRIP.JSON`, and
-  /// [ChildEntry.name] may echo the requested case rather than the stored
-  /// one. Treat a hit as "that name is taken", and read stored names from
-  /// [listChildren].
+  /// `/` or NUL throws [ArgumentError]. On Android's system storage
+  /// provider matching is the file system's: case-insensitive on shared
+  /// storage and FAT/exFAT sticks, which also ignore trailing dots and
+  /// spaces, so `TRIP.JSON` or `trip.json ` find `trip.json`, and
+  /// [ChildEntry.name] echoes the requested spelling rather than the stored
+  /// one. Other providers match the exact name. Treat a hit as "that name
+  /// is taken", and read stored names from [listChildren].
   ///
   /// Unlike [listChildren], a stale directory identifier is not reported
   /// here; [acquire] or [listChildren] repair it.
