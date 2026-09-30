@@ -106,7 +106,7 @@ class WriteSession {
 @experimental
 Future<WriteSession> openWrite({
   required AcquiredScope scope, // Scope of the PARENT directory.
-  required String name,         // Created (truncated if present).
+  required String name,         // Created (fail-if-exists).
   String mimeType = 'application/octet-stream',
 });
 
@@ -133,12 +133,13 @@ Future<void> deleteEntry({
 
 @experimental
 Future<ChildEntry> moveEntry({
-  required String identifier, // Single-shot: scope handled internally.
+  required String identifier,
+  required AcquiredScope sourceParent, // Caller knows it from listing.
   required AcquiredScope newParent,
   String? newName,            // Null keeps the name (pure move).
 });
-// Rename is moveEntry with the same parent + newName. Returns a fresh
-// entry: identifiers may change across the move.
+// Rename is moveEntry with the same scope twice + newName. Returns a
+// fresh entry: identifiers may change across the move.
 ```
 
 Notes:
@@ -149,17 +150,26 @@ Notes:
   scope. macOS and other stub platforms throw `UnsupportedError` —
   loud beats silent.
 - Session/split discipline, same as 1/1a/2b: repeated byte access
-  (`openWrite`…) takes a live scope; single-shot verbs
-  (`deleteEntry`, `moveEntry`) manage scope internally per call.
-  `createDirectory` takes the parent scope because callers creating
-  N folders in a loop should not pay N acquires.
+  (`openWrite`…) takes a live scope; `deleteEntry` manages scope
+  internally per call (single-shot). `createDirectory` takes the
+  parent scope because callers creating N folders in a loop should
+  not pay N acquires; `moveEntry` takes source + new parent scopes
+  because the native move needs the source parent (see §5).
+- Leaf-name rule (peer-confirmed): `name`/`newName` reject empty,
+  `.`/`..`, and any `/` or NUL — one rule, both platforms (Android
+  display names and iOS path components alike). Dart pre-checks
+  and throws `ArgumentError`; native enforces with loud
+  `invalid-name`. Violation is a caller bug, never provider
+  variance.
 - Concurrency: `writeChunk`/`closeWrite`/`abortWrite` on one session
   are serialized natively (per-session mutex), FIFO — chunk order
   and acknowledged totals stay deterministic even after dispatch
   off the platform thread. Serialization, not rejection.
-- Truncate-if-present is the documented `openWrite` rule: one
-  predictable outcome. Callers needing fail-if-exists list first
-  (Gap 1 is one call).
+- Fail-if-exists is the documented `openWrite` rule (peer
+  re-confirmed, superseding truncate): an existing name is loud
+  `already-exists`, so abort can never destroy an overwrite
+  victim and crash partials stay identifiable for the orphan
+  sweep. Callers needing overwrite delete first, deliberately.
 - Loud-on-taken-name is the documented `createDirectory` and
   `moveEntry` rule (peer-pinned): creating a folder or moving onto
   an existing sibling name throws `already-exists` — never a silent
@@ -187,13 +197,13 @@ Notes:
   pattern), return `FileInfo` with the tree URI as identifier. No temp,
   no copies — acquisition never touches a byte.
 - `openWrite`: resolve parent scope → tree URI + parent document ID;
-  list the parent first: an exact existing child opens with
-  truncate, otherwise `createDocument` (MIME type + name as passed)
-  and verify the returned display name (auto-rename ⇒ delete the
-  residue, loud `already-exists`). Truncating mode follows the
-  existing SDK rule (`"wt"` on API 29+, `"w"` below). Hold the
-  `OutputStream` in the session registry. Validate the scope token
-  (released ⇒ loud `scope-closed`).
+  list the parent first: an exact existing child ⇒ loud
+  `already-exists`, not attempted; otherwise `createDocument`
+  (MIME type + name as passed) and verify the returned display
+  name (auto-rename ⇒ delete the residue, loud `already-exists`).
+  Open the fresh child for writing and hold the `OutputStream` in
+  the session registry. Validate the scope token (released ⇒ loud
+  `scope-closed`).
 - `writeChunk`: append bytes, flush per chunk (provider visibility +
   crash hygiene), return the new total. Everything on
   `Dispatchers.IO`.
@@ -211,10 +221,13 @@ Notes:
   depth-first), because provider-side recursive delete is
   discretionary — never trust it. Non-recursive on a non-empty
   directory is loud `directory-not-empty`, checked by listing first.
-- `moveEntry`: list the target parent first; taken name is loud
-  `already-exists`, not attempted. Same-tree → `renameDocument`
-  when only the name changes (fresh URI returned), `moveDocument`
-  when the parent changes; always re-stat into a fresh `ChildEntry`.
+- `moveEntry`: source parent comes from the passed scope — no
+  `findDocumentPath` needed on any API level. List the target
+  parent first; taken name is loud `already-exists`, not
+  attempted. Same parent + new name → `renameDocument` (fresh URI
+  returned); parent change → `moveDocument`, then `renameDocument`
+  when `newName` is also given (documented crash window between
+  the two ops). Always re-stat into a fresh `ChildEntry`.
   Cross-provider is loud `unsupported-move`, not attempted. The
   rename is best-effort atomic (no SAF replace primitive).
 
@@ -222,8 +235,9 @@ Notes:
 
 - `openDirectory`: document picker in folder mode, bookmark the
   directory, same `FileInfo` encoding as file picks.
-- `openWrite`: resolve parent scope URL + name, create/truncate,
-  hold a `FileHandle` for writing. `writeChunk`: `write` +
+- `openWrite`: resolve parent scope URL + name (taken name ⇒ loud
+  `already-exists`), create the file, hold a `FileHandle` for
+  writing. `writeChunk`: `write` +
   `synchronizeFile` per chunk, return the total.
   `closeWrite`/`abortWrite` mirror Android (abort removes the
   partial). Off main; results hop to main per convention.
@@ -234,8 +248,9 @@ Notes:
   `deleteEntry(recursive: true)` — same rule as Android: never
   trust provider-side recursion. `FileManager` file-exists errors
   map to loud `already-exists` (nothing is created, so no residue
-  cleanup); target names are pre-checked before `moveItem` like
-  Android.
+  cleanup); target names are pre-checked before `moveItem`, and
+  move-then-rename is sequenced like Android (source parent from
+  the passed scope).
 
 ## 6. Error taxonomy
 
@@ -244,8 +259,9 @@ Shared with Gaps 1/1a/2b: `permission-lost`, `not-found`,
 `session-closed` (use after close/abort — same kind as 2b's read
 sessions), `scope-closed`. New in this gap: `directory-not-empty`
 (non-recursive delete of a non-empty directory),
-`unsupported-move` (cross-provider move attempt), and
-`already-exists` (create/move onto a taken name). Dart carrier
+`unsupported-move` (cross-provider move attempt),
+`already-exists` (create/move/write onto a taken name), and
+`invalid-name` (leaf-name rule violation). Dart carrier
 (pinned, all gaps): `PlatformException` with the taxonomy kind as
 `code` and a details map carrying the native domain + code where
 available. Exhaustiveness rule: anything outside the taxonomy stays
@@ -256,17 +272,19 @@ before graduation.
 
 - Dart unit, mocked channels (existing harness): session lifecycle,
   progress totals, abort idempotency, close-after-abort and
-  write-after-close errors, truncate rule, rename-is-move shape,
+  write-after-close errors, fail-if-exists rule, rename-is-move
+  shape with source parent, leaf-name `ArgumentError` pre-check,
   error mapping. No native code needed.
 - Android device: mkdir → chunked write with progress asserts →
   close → read back via Gap-2b chunks (cross-gap round trip);
   abort mid-write and assert the partial is gone; delete recursive
   on a nested tree; move + rename incl. fresh-identifier use;
   create-after-pick visibility (R4 interplay); revoke mid-write and
-  expect `permission-lost`; create a folder twice and move onto a
-  taken name, both expecting loud `already-exists` with no residue;
-  assert no temp growth on the write path and memory bounded to ~2
-  chunks during a 1GB write.
+  expect `permission-lost`; create a folder twice, open-write an
+  existing name, and move onto a taken name, all expecting loud
+  `already-exists` with no residue; pass `../x` and expect loud
+  `invalid-name`; assert no temp growth on the write path and
+  memory bounded to ~2 chunks during a 1GB write.
 - iOS backend: same matrix once the 1a registry exists, plus
   stale-refresh interplay (move a file mid-session via Files).
 - Acquisition: cancel returns null; picked tree feeds listChildren,
@@ -286,9 +304,9 @@ Same bar as the other gaps, evaluated independently:
 
 ## 9. Open questions
 
-- Truncate-if-present vs fail-if-exists for `openWrite`?
-  (CONFIRMED 2026-09-30, peer-verified): truncate. Compatible with
-  the move flow and one predictable rule.
+- Fail-if-exists for `openWrite` (RE-CONFIRMED 2026-09-30,
+  peer-verified, superseding truncate): abort can never destroy
+  an overwrite victim; same compatibility for the move flow.
 - Per-chunk `flush`/`synchronizeFile`: right crash hygiene, but
   measures needed — if a provider turns flush into a round trip,
   make it every-N-chunks with N tuned, not removed.

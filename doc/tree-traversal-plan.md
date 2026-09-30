@@ -94,7 +94,15 @@ class ChildEntry {
 }
 
 @experimental
-Future<List<ChildEntry>> listChildren({required String identifier});
+class DirectoryListing {
+  // One level plus the identifier to use (and re-persist).
+  List<ChildEntry> get entries;
+  String get identifier; // Fresh when repair happened; else echo.
+  bool get repaired;     // True when identifier differs from input.
+}
+
+@experimental
+Future<DirectoryListing> listChildren({required String identifier});
 ```
 
 Notes:
@@ -109,6 +117,10 @@ Notes:
 - Scope handling on Apple: `listChildren` manages scope internally
   per call (single-shot op). Repeated-access callers use Gap-1a
   `acquire` + Gap-2b `openRead`, not repeated listings.
+- Repair echo (peer-confirmed): when resolving the parent bookmark
+  reports stale, iOS repairs and returns the fresh identifier with
+  `repaired: true` — the app MUST persist it, same discipline as
+  acquire repair. Android echoes the input with `repaired: false`.
 - Experimental mechanics: `@experimental` annotation plus a CHANGELOG
   notice, same as Gap 2b. Additive API, no feature flag.
 
@@ -143,8 +155,10 @@ Notes:
 - `listChildren`: resolve identifier to URL (bookmark, with
   stale-refresh per 1a), `startAccessing…`, `contentsOfDirectory`,
   per-child `bookmarkData()` for the identifier plus
-  `resourceValues` for size/mtime, `stopAccessing…`. Results hop to
-  main per the plugin's existing convention.
+  `resourceValues` for size/mtime, `stopAccessing…`. Return the
+  entries wrapped with the (possibly fresh) parent identifier +
+  `repaired` flag. Results hop to main per the plugin's existing
+  convention.
 - Identifier encoding (pinned): base64 `bookmarkData()` per child,
   same encoding as the existing single-file identifiers. Opaque to
   Dart — never parsed there. macOS is stubbed (`UnsupportedError`)
@@ -164,8 +178,10 @@ taxonomy review before graduation (see §8).
 
 ## 7. Testing plan
 
-- Dart unit, mocked channels (existing harness): single-level shape,
-  empty directory, null size/mtime passthrough, error mapping,
+- Dart unit, mocked channels (existing harness): wrapper shape
+  (entries + identifier echo + `repaired: false`), stale-parent
+  repair echo (`repaired: true`, fresh identifier), empty
+  directory, null size/mtime passthrough, error mapping,
   subdirectory identifier round-trips back into `listChildren`.
   No native code needed.
 - Android device: local + USB-OTG tree URIs; assert no temp growth
