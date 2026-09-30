@@ -215,7 +215,12 @@ Notes:
   `MEDIA_MOUNTED_READ_ONLY`, is `permission-lost` with
   `reason: volume-absent`. (Querying the provider's roots would be
   cleaner but needs `MANAGE_DOCUMENTS`.) Other authorities are
-  opaque and keep `not-found`. No native resource is
+  opaque and keep `not-found`. Not yet measured: the run is
+  `sm set-virtual-disk true`, `sm partition disk:X,Y public`, pick a
+  folder on it, `sm unmount public:X,Y`, acquire, and expect
+  `permission-lost` with `reason: volume-absent`. It was blocked on
+  2026-09-30 by host disk space (an emulator's data partition did
+  not fit), so today this rests on the AOSP source reading alone. No native resource is
   held, so refcounting is trivially satisfied.
 - `openDirectory` takes a read+write grant and falls back to
   read-only, reporting `persistable` honestly, so a read-only tree
