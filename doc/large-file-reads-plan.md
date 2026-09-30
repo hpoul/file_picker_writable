@@ -71,8 +71,8 @@ design is kept below as a documented rejected alternative with numbers.
 Control verbs (pick, acquire/release, open a session and hand back a
 descriptor, list, create/delete/move, error mapping) stay on the
 MethodChannel on a background TaskQueue. `openRead` detaches the
-provider fd into Dart ownership; a small Dart `FdReader` (FFI
-`pread`/`read`/`close`, `isLeaf`) reads into a caller-owned native
+provider fd into Dart ownership; a small Dart `FdReader` (non-leaf
+calls into the shared C shim, §5) reads into a caller-owned native
 buffer and returns views consumed in place; `closeRead` closes the fd
 with a `NativeFinalizer` backstop. Backpressure is structural (no
 calls, no bytes); cancellation is `close`; multiplexing is session
@@ -98,7 +98,10 @@ throughput but collapses frames to 6–12 fps at 256K+. All rows hold
 120 fps with zero jank on device except A2 at 1M (113 fps, no jank)
 and C4. Caveat: channel loops ran UI-interleaved (each await can pay
 frame-build time) while helper loops did not — absolutes carry that
-handicap, ordering does not. Full tables plus per-call latencies:
+handicap, ordering does not. The FFI rows ran with leaf libc
+bindings; §5 prescribes non-leaf shim bindings instead — re-run
+the FFI rows to confirm the delta is noise. Full tables plus
+per-call latencies:
 `bench/table_s24.txt`, `bench/table_emulator.txt`.
 
 ### 3b. Pull-model chunks over MethodChannel (rejected)
@@ -166,7 +169,9 @@ class ReadSession {
   // `scope-closed` otherwise — the last root-side check), returns
   // the sendable record, and kills the local copy in one call (a
   // SendPort send copies silently, so the dead-marking must be
-  // explicit, never incidental).
+  // explicit, never incidental). Throws StateError once a wrapper
+  // was constructed on this copy (bytes already flow here — hand
+  // off before wrapping, never after).
   ReadHandoff handoff();
 }
 // Plain ints + bools + strings: crosses isolates for free, in the
@@ -176,6 +181,8 @@ class ReadHandoff {
   bool get seekable;
   int? get length;
   String get scopeToken; // AcquiredScope.id, opaque; validated at handoff().
+  // Provenance for errors/debug + attribution for helper control
+  // calls. The helper performs no live check on it (see §5).
 }
 
 @experimental
@@ -186,7 +193,7 @@ Future<ReadSession> openRead({required AcquiredScope scope});
 @experimental
 class FdReader {
   FdReader.fromSession(ReadSession session, {int bufferLength = 1 << 20}); // Same-isolate path.
-  FdReader.fromHandoff(ReadHandoff handoff, {int bufferLength = 1 << 20}); // Helper-isolate path.
+  FdReader.fromHandoff(ReadHandoff handoff, {int bufferLength = 1 << 20}); // Helper-isolate path (also the root recovery path — see §4).
   // Sync FFI pread into the caller-owned native buffer; returns a VIEW
   // valid until the next call or close (call-counted, never
   // time-bound — awaits between calls are safe). Consume in place
@@ -239,8 +246,16 @@ Notes:
   does nothing further. (Writes run the control half only — see
   Gap 3 `closeFd: false`.) Explicit close always detaches the
   finalizer first, then closes (standard pattern), idempotent via
-  a closed flag. If kill is ignored (no terminate capability) the
-  helper stays owner — message-cancel, never the kill path.
+  a closed flag; a close whose liveness check fails still runs
+  the native cleanup (fd + buffer), then throws — the throw never
+  skips the release. Recovery: if `Isolate.spawn` throws after
+  `handoff()` (or the helper dies before constructing its
+  wrapper), the root recovers with `fromHandoff` on its own copy
+  — the root is then the consuming isolate — and closes
+  normally. A kill before the helper's wrapper exists leaks the
+  fd (nothing attached a finalizer yet). If kill is ignored (no
+  terminate capability) the helper stays owner — message-cancel,
+  never the kill path.
 - Finalizer placement: the `NativeFinalizer` MUST
   be attached by the wrapper constructed in the consuming isolate
   (finalizers run for the exiting isolate's own — verified in
@@ -445,7 +460,9 @@ unless noted:
   (stable); corrected the draft's 0.x claim.
 - https://api.flutter.dev/flutter/services/MethodChannel-class.html —
   async method calls over binary encoding with a MethodCodec;
-  framework channels guarantee FIFO ordering.
+  framework channels guarantee FIFO ordering per channel on the
+  platform thread; the shared concurrent TaskQueue gives that up
+  (see §5).
 - https://developer.android.com/reference/android/content/ContentResolver —
   official `ContentResolver` API reference; `openFileDescriptor`
   / `openInputStream` signatures additionally verified in the

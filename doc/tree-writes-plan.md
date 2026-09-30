@@ -120,7 +120,9 @@ class WriteSession {
   // `scope-closed` otherwise — the last root-side check), returns
   // the sendable record, and kills the local copy in one call (a
   // SendPort send copies silently, so the dead-marking must be
-  // explicit, never incidental).
+  // explicit, never incidental). Throws StateError once a wrapper
+  // was constructed on this copy (bytes already flow here — hand
+  // off before wrapping, never after).
   WriteHandoff handoff();
 }
 // Plain ints + strings: crosses isolates for free, in the same shape
@@ -130,6 +132,8 @@ class WriteHandoff {
   String get identifier;
   bool get canFsync;
   String get scopeToken; // AcquiredScope.id, opaque; validated at handoff().
+  // Provenance for errors/debug + attribution for helper control
+  // calls. The helper performs no live check on it (see 2b §5).
 }
 // After handoff the sender's copy is dead for FD USE (byte ops, fd
 // close ⇒ sync StateError, like ArgumentError — fail-fast beats
@@ -146,12 +150,14 @@ Future<WriteSession> openWrite({
   String mimeType = 'application/octet-stream',
 });
 // Control call (channel): creates, opens, detaches the fd into Dart
-// ownership. Never writes bytes.
+// ownership. Never writes bytes. Keep the default for
+// `.writing`/`.part`/marker files — a real MIME may append its
+// extension (see §4).
 
 @experimental
 class FdWriter {
   FdWriter.fromSession(WriteSession session, {int bufferLength = 1 << 20}); // Same-isolate path.
-  FdWriter.fromHandoff(WriteHandoff handoff, {int bufferLength = 1 << 20}); // Helper-isolate path.
+  FdWriter.fromHandoff(WriteHandoff handoff, {int bufferLength = 1 << 20}); // Helper-isolate path (also the root recovery path — see §4).
   // Sync FFI pwrite at bytesWritten (positional; sequential write()
   // for pipes); stages through a reusable native buffer; returns the
   // new acknowledged total.
@@ -165,7 +171,7 @@ class FdWriter {
 @experimental
 Future<ChildEntry> closeWrite(WriteSession session, {bool fsync = true}); // Commit, no-writer path.
 @experimental
-Future<void> abortWrite(WriteSession session, {bool closeFd = true}); // Delete partial, no-writer path. Idempotent. Kill path: closeFd: false on the fd-dead copy (identifier-keyed, never touches the fd).
+Future<void> abortWrite(WriteSession session, {bool closeFd = true}); // Delete partial, no-writer path. Idempotent; gone partial is success. Kill path: closeFd: false on the fd-dead copy (identifier-keyed, never touches the fd).
 
 @experimental
 Future<ChildEntry> createDirectory({
@@ -211,17 +217,25 @@ Notes:
   close (caller obligation on the helper path).
 - Leaf-name rule (peer-confirmed): `name`/`newName` reject empty,
   `.`/`..`, and any `/` or NUL — one rule, both platforms (Android
-  display names and iOS path components alike). Dart pre-checks
+  display names and iOS path components alike). Names starting
+  with `.` are ordinary names (`.howitwent`, `.writing`, `.prev`
+  all pass); nothing filters them. Dart pre-checks
   and throws `ArgumentError`; native enforces with loud
   `invalid-name`. Violation is a caller bug, never provider
   variance. Providers may still clean legal names (AOSP
   FileSystemProvider-based providers sanitize unconditionally —
   memory of AOSP, confirm on device — regardless of backing fs,
-  so the FAT set is the shape, not the precondition): a
-  create/rename whose returned name mismatches re-lists
-  the parent — taken ⇒ `already-exists`, else `invalid-name`
-  carrying the provider's actual name. The rule stays narrow so
-  iOS (APFS allows the FAT set) is not over-restricted.
+  so the FAT set is the shape, not the precondition).
+  Separately, `createDocument` may append the MIME's own
+  extension when the name's suffix doesn't map to it (memory of
+  AOSP, confirm on device) — `.howitwent` + `application/json`
+  may land as `.howitwent.json`: a create/rename whose returned
+  name mismatches looks up the returned name — taken ⇒
+  `already-exists`, else `invalid-name` carrying the provider's
+  actual name. Callers writing `.writing`/`.part`/marker files
+  keep `application/octet-stream` (the default), under which
+  names survive. The rule stays narrow so iOS (APFS allows the
+  FAT set) is not over-restricted.
 - Concurrency: `pwrite` is positional with no shared stream offset,
   so overlapping `writeChunk` calls cannot interleave — the
   per-session mutex question dissolves (same as the 2b read side).
@@ -249,7 +263,11 @@ Notes:
   after kill is meaningless: abort, don't commit. The `closeFd` /
   `fsync` escape hatches live on the session-level verbs only;
   `FdWriter` methods run in the owning isolate and always take
-  the full path.
+  the full path. Recovery: if `Isolate.spawn` throws after
+  `handoff()` (or the helper dies before its wrapper exists),
+  the root recovers with `fromHandoff` on its own copy and
+  closes/aborts normally (fd still open — nothing attached a
+  finalizer yet). A kill in that window leaks the fd.
 - Fail-if-exists is the documented `openWrite` rule (peer
   re-confirmed, superseding truncate): an existing name is loud
   `already-exists`, so abort can never destroy an overwrite
@@ -257,7 +275,7 @@ Notes:
   sweep. Callers needing overwrite delete first, deliberately.
   Atomic on iOS (`O_CREAT|O_EXCL`); best-effort on Android — no
   exclusive-create primitive exists, so a concurrent same-name
-  create may slip past list-first when the provider returns the
+  create may slip past lookup-first when the provider returns the
   existing URI. Documented, not hidden.
 - Non-recursive delete is best-effort on both platforms:
   emptiness is checked by listing first, but no atomic
@@ -310,29 +328,29 @@ Notes:
   off-main dispatch (TaskQueue is Android-only).
 - `openWrite` (control): validate the scope token (released ⇒ loud
   `scope-closed`); resolve parent scope → tree URI + parent
-  document ID; list the parent first: an exact existing child ⇒
-  loud `already-exists`, not attempted; otherwise `createDocument`
+  document ID; `lookupChild` first (Gap 1 — one query, not a
+  listing): a hit ⇒ loud `already-exists`, not attempted;
+  otherwise `createDocument`
   (MIME type + name as passed) and verify the returned display
-  name (mismatch ⇒ re-list: taken means auto-rename → delete the
-  fresh residue, loud `already-exists`; not taken means
-  provider-cleaned → delete the residue, loud `invalid-name` with the
-  actual name).
+  name (mismatch ⇒ look up the returned name: hit means
+  auto-rename → delete the fresh residue, loud `already-exists`;
+  miss means provider-cleaned → delete the residue, loud
+  `invalid-name` with the actual name).
   `openFileDescriptor(uri, "w")`, `getStatSize` for `canFsync`,
   `detachFd()` into Dart ownership (never `fromFd` without
   retaining — finalizer trap, see 2b §5). Residual race (no
   exclusive-create primitive): a concurrent same-name create may
-  slip past list-first when the provider returns the existing URI
-  instead of auto-renaming — verify-after only catches the
-  auto-rename case. List-first is O(parent) per open
-  (`queryChildDocuments` takes no name filter), so bulk creation
-  into one folder pays N full listings — a known cost, no opt-out
-  in v1; verify-after stays the correctness backstop.
+  slip past lookup-first when the provider returns the existing
+  URI instead of auto-renaming — verify-after only catches the
+  auto-rename case.
 - `writeChunk`: pure Dart FFI (`pwrite` at `bytesWritten`, looped
   to full length; sequential `write` for pipes) — no channel.
   Staging copy into the reusable native buffer; bytes longer
   than the buffer loop stage+write (no size cap — unlike the read
   side's fixed view, a write chunk is never retained). 0 from
-  `write` / `pwrite` is a loud ENOSPC-shaped failure, never loop
+  `write` / `pwrite` is loud under `ENOSPC` (native errno domain,
+  code 28, `synthesized: true` in details — the volume returned
+  0, never the errno; the failure shape is ENOSPC's), never loop
   progress (a FUSE-full volume returns 0; treating it as progress
   spins past the cancel check forever).
 - `errno` capture: `pwrite` / `fsync` go through the 2b §5
@@ -344,28 +362,33 @@ Notes:
   `ChildEntry`. `abortWrite`: FFI `close` (skipped with
   `closeFd: false` on the kill path — the finalizer closed it),
   then a channel control call `deleteDocument`s the partial. Both
-  idempotent; use-after-either is loud `session-closed`.
+  idempotent; use-after-either is loud `session-closed`. A close
+  whose liveness check fails still runs the native cleanup (fd +
+  buffer), then throws — same rule as 2b.
   Explicit close/abort and the finalizer backstop all release the
   fd + `malloc` buffer as one native cleanup record (same rule as
   2b — a closing fd alone would leak the buffer on the kill path).
-- `createDirectory`: list the parent first (taken name ⇒ loud
+- `createDirectory`: `lookupChild` first (taken name ⇒ loud
   `already-exists`, not attempted); `createDocument` with
   `MIME_TYPE_DIR`, then verify the returned display name matches
-  the request: a mismatch re-lists — taken means auto-rename →
-  delete the fresh residue, loud `already-exists`; not taken
-  means provider-cleaned → delete the residue, loud `invalid-name`
-  with the actual name. The returned entry always carries the
-  actual name.
-- `deleteEntry`: resolve identifier; `deleteDocument`. Recursion is
-  the plugin's own walk (list children via the Gap-1 path, delete
-  depth-first), because provider-side recursive delete is
-  discretionary — never trust it. Non-recursive on a non-empty
-  directory is loud `directory-not-empty`, checked by listing first.
+  the request: a mismatch looks up the returned name — hit means
+  auto-rename → delete the fresh residue, loud `already-exists`;
+  miss means provider-cleaned → delete the residue, loud
+  `invalid-name` with the actual name. The returned entry always
+  carries the actual name.
+- `deleteEntry`: resolve identifier; `deleteDocument`. A gone
+  identifier is success on every delete path (idempotent; the
+  consumer's delete-if-present shape) — never loud `not-found`.
+  Recursion is the plugin's own walk (list children via the
+  Gap-1 path, delete depth-first), because provider-side
+  recursive delete is discretionary — never trust it.
+  Non-recursive on a non-empty directory is loud
+  `directory-not-empty`, checked by listing first.
   Best-effort: no atomic delete-if-empty primitive — a child created
   after the listing may be deleted anyway (see §4).
 - `moveEntry`: source parent comes from the passed scope — no
-  `findDocumentPath` needed on any API level. List the target
-  parent first; taken name is loud `already-exists`, not
+  `findDocumentPath` needed on any API level. `lookupChild` the
+  target parent first; taken name is loud `already-exists`, not
   attempted. Same parent + new name → `renameDocument` (fresh URI
   returned); parent change → `moveDocument` (safe: the provider
   throws on collision, never renames), then `renameDocument`
@@ -373,14 +396,16 @@ Notes:
   intermediate and the final name; documented crash window between
   the two ops; rename failure attempts rollback, rollback failure
   throws `move-partial` with the actual identifier). After any
-  rename, verify the returned name: mismatch ⇒ re-list. Taken
-  (collision race) ⇒ rename back to the original — never delete,
-  the residue is the user's file; rename-back failure ⇒
-  `move-partial`. Not taken (provider cleaned the request, e.g.
-  FAT set) ⇒ rename back to the original as well — the original
-  name was already stored once, so the rename-back cannot
-  re-mangle — verify, then loud `invalid-name` with requested +
-  actual (== original) names in details. Rename-back failure ⇒
+  rename, verify the returned name: mismatch ⇒ look up the
+  returned name. Hit (collision race) ⇒ rename back to the
+  original — never delete, the residue is the user's file;
+  rename-back failure ⇒ `move-partial`. Miss (provider cleaned
+  the request, e.g. FAT set) ⇒ rename back to the original as
+  well — the original
+  name was already stored once, so it should land clean; verify,
+  `move-partial` if it does not — then loud `invalid-name` with
+  requested + actual (== original) names in details.
+  Rename-back failure ⇒
   `move-partial` here too: an exception path must never silently
   move the user's file. In the combined case both branches
   additionally move the file back to the source parent after the
@@ -476,9 +501,10 @@ before graduation.
   only a stick pull proves that); close with `fsync: false`
   honors the opt-out; kill the helper mid-write and abort with
   `closeFd: false`, asserting single close via `/proc/self/fd`;
-  stub a 0-returning fd and expect loud ENOSPC-shaped failure,
-  never a spin; assert no temp growth on the write path and
-  memory bounded to one native buffer during a 1GB write.
+  stub a 0-returning fd and expect loud synthesized `ENOSPC`
+  (errno 28 + `synthesized: true`), never a spin; assert no temp
+  growth on the write path and memory bounded to one native
+  buffer during a 1GB write.
 - iOS backend: same matrix once the 1a registry exists, plus
   stale-refresh interplay (move a file mid-session via Files).
 - Acquisition: cancel returns null; picked tree feeds listChildren,
@@ -507,7 +533,10 @@ Same bar as the other gaps, evaluated independently:
   storage. Opt-out flag (peer-confirmed): `fsync` defaults true;
   bulk copies pass false. Revisit if durability needs tighten.
 - MIME-type default (CONFIRMED 2026-09-30, peer-verified):
-  `application/octet-stream` dumb fallback; callers pass real MIMEs.
+  `application/octet-stream` dumb fallback; callers pass real
+  MIMEs, except suffixed/marker files (`.writing`, `.part`,
+  dotfiles), which keep the default — a real MIME may append
+  its extension (MIME-extension rule, §4; confirm on device).
 - Cross-provider move as a plugin verb (copy + delete choreography
   with progress)? Out of v1 by design — app-side fd→fd in a helper
   isolate covers it; revisit if a plugin verb is still wanted.

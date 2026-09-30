@@ -103,6 +103,12 @@ class DirectoryListing {
 
 @experimental
 Future<DirectoryListing> listChildren({required String identifier});
+
+@experimental
+Future<ChildEntry?> lookupChild({required String identifier, required String name});
+// Single-shot by-name lookup under one parent. Null when absent —
+// for probes ("does `.prev` exist"), not-found is data, not an
+// error. Gone parent is loud `not-found`.
 ```
 
 Notes:
@@ -114,9 +120,16 @@ Notes:
 - Ordering: provider/native order, documented as unspecified. Dart-side
   sorting is the caller's one-liner; the plugin must not impose a sort
   that costs a full metadata pass on providers that stream rows.
+- No filtering: names starting with `.` are ordinary names, listed
+  like any other; nothing filters hidden files on either platform.
 - Scope handling on Apple: `listChildren` manages scope internally
   per call (single-shot op). Repeated-access callers use Gap-1a
   `acquire` + Gap-2b `openRead`, not repeated listings.
+- `lookupChild` is the O(1) probe and scan step: one query, not a
+  listing. Gap-3 taken-checks (`openWrite`, `createDirectory`,
+  `moveEntry`) and create/rename verify-after all use it instead
+  of listing the parent — one listing per taken-check at 10k
+  children is tens of seconds per save on a media folder.
 - Repair echo (peer-confirmed): when resolving the parent bookmark
   reports stale, iOS repairs and returns the fresh identifier with
   `repaired: true` — the app MUST persist it, same discipline as
@@ -151,6 +164,13 @@ Notes:
   and run cursor work directly on queue threads (no second hop —
   the queue is concurrent, so a slow provider does not stall other
   control). Close the cursor in `finally`.
+- `lookupChild`: derive the child document ID as parent ID + `/`
+  + name (path-based providers — the AOSP shape §2 already
+  relies on; memory of AOSP, confirm on device), query the one
+  row via `buildDocumentUriUsingTree`, map to `ChildEntry`, null
+  when the row is absent. Non-path providers fall back to
+  list-and-scan internally (same result, listing cost — the
+  caller can't tell). Gone parent is loud `not-found`.
 
 ### iOS (Swift, after Gap 1a lands)
 
@@ -165,6 +185,10 @@ Notes:
   same encoding as the existing single-file identifiers. Opaque to
   Dart — never parsed there. macOS is stubbed (`UnsupportedError`)
   per the Gap-1a boundary decision.
+- `lookupChild`: resolve parent URL (same stale-refresh),
+  `startAccessing…`, `FileManager` attributes query on
+  parentURL + name → `ChildEntry` or null when absent,
+  `stopAccessing…`. Single-shot scope, like `listChildren`.
 
 ## 6. Error taxonomy
 
@@ -184,14 +208,16 @@ taxonomy review before graduation (see §8).
   (entries + identifier echo + `repaired: false`), stale-parent
   repair echo (`repaired: true`, fresh identifier), empty
   directory, null size/mtime passthrough, error mapping,
-  subdirectory identifier round-trips back into `listChildren`.
+  subdirectory identifier round-trips back into `listChildren`,
+  `lookupChild` null-on-absent vs loud parent `not-found`.
   No native code needed.
 - Android device: local + USB-OTG tree URIs; assert no temp growth
   (cache dir size before/after — listing must never copy); 10k-child
   directory for batch latency; revoke grant mid-session and expect
   `permission-lost`; pass a file URI and expect `not-a-directory`;
   create a child after the pick, then list, and expect it visible
-  (R4: grant covers later-created children).
+  (R4: grant covers later-created children); `lookupChild` hit,
+  miss (null), gone parent (loud), and a dotfile by name.
 - iOS backend: listing correctness plus interplay with
   stale-refresh once Gap 1a exists.
 - No new benchmark suite beyond the 10k-child latency check: listing
