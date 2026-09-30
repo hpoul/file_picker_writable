@@ -1,4 +1,4 @@
-## Unreleased
+## 2.2.0
 
 * Modernize Android build for current stable Flutter: AGP 9.1.0, Kotlin 2.4.0,
   Gradle 9.3.1, compileSdk 36, minSdk 24 (Android 7.0+); the example app
