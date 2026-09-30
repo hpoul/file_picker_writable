@@ -171,6 +171,9 @@ class MainScreenState extends State<MainScreen> {
                 if (snapshot.hasData) ...[
                   for (final directory in snapshot.data!.directories) ...[
                     DirectoryScopeDisplay(
+                      // Keyed so removing a card never hands its state
+                      // (and its held scopes) to the next folder.
+                      key: ValueKey(directory.identifier),
                       directory: directory,
                       appDataBloc: _appDataBloc,
                     ),
@@ -219,6 +222,10 @@ class MainScreenState extends State<MainScreen> {
       }
       _logger.fine('Got directory: $directory');
       final data = await _appDataBloc.store.load();
+      // Re-picking a folder renews its grant; it keeps its one card.
+      if (data.directories.any((d) => d.identifier == directory.identifier)) {
+        return;
+      }
       await _appDataBloc.store.save(
         data.copyWith(directories: data.directories + [directory]),
       );
@@ -397,6 +404,7 @@ class DirectoryScopeDisplayState extends State<DirectoryScopeDisplay> {
     for (final scope in _held) {
       unawaited(FilePickerWritable().release(scope));
     }
+    _lookupName.dispose();
     super.dispose();
   }
 
@@ -461,6 +469,116 @@ class DirectoryScopeDisplayState extends State<DirectoryScopeDisplay> {
     });
   }
 
+  /// The listing on screen, and the identifiers descended through.
+  DirectoryListing? _listing;
+  final List<String> _listPath = [];
+  final _lookupName = TextEditingController(text: '.howitwent');
+
+  Future<void> _list(String identifier) async {
+    try {
+      final listing = await FilePickerWritable().listChildren(
+        identifier: identifier,
+      );
+      _logger.fine(
+        'Listed ${listing.entries.length} (repaired: ${listing.repaired}): '
+        '${listing.entries}',
+      );
+      if (!mounted) {
+        return;
+      }
+      setState(() {
+        _listing = listing;
+        _listPath.add(identifier);
+      });
+    } on PlatformException catch (e) {
+      _logger.warning('listChildren failed', e);
+      if (mounted) {
+        setState(() {
+          _status = 'error ${e.code}: ${e.message}';
+        });
+      }
+    }
+  }
+
+  Future<void> _lookup() async {
+    final name = _lookupName.text;
+    final parent = _listPath.isEmpty
+        ? widget.directory.identifier
+        : _listPath.last;
+    try {
+      final child = await FilePickerWritable().lookupChild(
+        identifier: parent,
+        name: name,
+      );
+      _logger.fine('Lookup "$name": $child');
+      if (mounted) {
+        setState(() {
+          _status = 'lookup "$name": ${child ?? 'absent'}';
+        });
+      }
+    } on Exception catch (e) {
+      _logger.warning('lookupChild failed', e);
+      if (mounted) {
+        setState(() {
+          _status = 'lookup "$name" failed: $e';
+        });
+      }
+    }
+  }
+
+  /// The traversal device checks of doc/tree-traversal-plan.md §7 in one
+  /// tap, logged line by line: lookups (hit, dotfile, miss, case, folder),
+  /// a timed listing, one level down, and a file listed as a directory.
+  Future<void> _runChecks() async {
+    final plugin = FilePickerWritable();
+    final root = widget.directory.identifier;
+    Future<void> step(String label, Future<Object?> Function() run) async {
+      try {
+        _logger.info('CHECK $label: ${await run()}');
+      } on Exception catch (e) {
+        _logger.info('CHECK $label: threw $e');
+      }
+    }
+
+    for (final name in [
+      '.howitwent',
+      'trip.json',
+      'missing.txt',
+      'TRIP.JSON',
+      'media',
+    ]) {
+      await step(
+        'lookup "$name"',
+        () => plugin.lookupChild(identifier: root, name: name),
+      );
+    }
+    final stopwatch = Stopwatch()..start();
+    final listing = await plugin.listChildren(identifier: root);
+    _logger.info(
+      'CHECK list root: ${listing.entries.length} entries in '
+      '${stopwatch.elapsedMilliseconds} ms: ${listing.entries.take(5)}',
+    );
+    for (final child in listing.entries.take(5)) {
+      await step(
+        'list child "${child.name}"',
+        () => plugin
+            .listChildren(identifier: child.identifier)
+            .then((l) => l.entries),
+      );
+      // A child identifier stands on its own: acquire it directly.
+      await step('acquire child "${child.name}"', () async {
+        final scope = await plugin.acquire(identifier: child.identifier);
+        await plugin.release(scope);
+        return scope;
+      });
+    }
+    if (mounted) {
+      setState(() {
+        _status = 'checks done, see log';
+      });
+    }
+  }
+
   Future<void> _remove() async {
     final data = await widget.appDataBloc.store.load();
     await widget.appDataBloc.store.save(
@@ -500,12 +618,55 @@ class DirectoryScopeDisplayState extends State<DirectoryScopeDisplay> {
                 children: <Widget>[
                   TextButton(onPressed: _acquire, child: const Text('Acquire')),
                   TextButton(onPressed: _release, child: const Text('Release')),
+                  TextButton(
+                    onPressed: () {
+                      _listPath.clear();
+                      _list(widget.directory.identifier);
+                    },
+                    child: const Text('List'),
+                  ),
+                  TextButton(
+                    onPressed: _runChecks,
+                    child: const Text('Run checks'),
+                  ),
                   IconButton(
                     onPressed: _remove,
                     icon: const Icon(Icons.remove_circle_outline),
                   ),
                 ],
               ),
+              Row(
+                children: <Widget>[
+                  Expanded(
+                    child: TextField(
+                      controller: _lookupName,
+                      decoration: const InputDecoration(
+                        labelText: 'Look up child by name',
+                      ),
+                    ),
+                  ),
+                  TextButton(onPressed: _lookup, child: const Text('Lookup')),
+                ],
+              ),
+              if (_listing != null) ...[
+                for (final child in _listing!.entries) ...[
+                  ListTile(
+                    dense: true,
+                    leading: Icon(
+                      child.isDirectory
+                          ? Icons.folder_outlined
+                          : Icons.insert_drive_file_outlined,
+                    ),
+                    title: Text(child.name),
+                    subtitle: Text(
+                      'size: ${child.size}, modified: ${child.lastModified}',
+                    ),
+                    // Files too: listing one shows the loud
+                    // not-a-directory in the status line.
+                    onTap: () => _list(child.identifier),
+                  ),
+                ],
+              ],
             ],
           ),
         ),

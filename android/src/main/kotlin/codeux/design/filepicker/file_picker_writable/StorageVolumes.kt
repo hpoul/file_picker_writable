@@ -25,6 +25,14 @@ object StorageVolumes {
     }
   }
 
+  /**
+   * The document ID of [name] directly under [parentId]: `<root>:<path>`,
+   * where a volume root's own ID ends in `:` and deeper levels join with
+   * `/`. [name] must already satisfy the leaf-name rule.
+   */
+  fun childDocumentId(parentId: String, name: String): String =
+    if (parentId.endsWith(':')) "$parentId$name" else "$parentId/$name"
+
   sealed class Volume {
     object Primary : Volume()
     data class Uuid(val uuid: String) : Volume()

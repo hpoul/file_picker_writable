@@ -130,6 +130,18 @@ Notes:
   `moveEntry`) and create/rename verify-after all use it instead
   of listing the parent — one listing per taken-check at 10k
   children is tens of seconds per save on a media folder.
+- `lookupChild` takes a single leaf name (tree-writes-plan §4's rule:
+  not empty, `.`, `..`, nor containing `/` or NUL; Dart
+  `ArgumentError` first, native `invalid-name` behind it), since
+  the derived child ID would otherwise walk the tree. Matching is
+  the file system's: on case-insensitive storage (Android shared
+  storage, FAT/exFAT) `TRIP.JSON` finds `trip.json`, and
+  ExternalStorageProvider echoes the requested case as the name
+  (measured, API 36). A hit means "the name is taken"; stored names
+  come from `listChildren`.
+- Metadata normalization, one rule on both platforms: `size` is
+  null for directories (Android reports the block size, iOS
+  nothing), and a `lastModified` of 0 is "won't say", so null.
 - Repair echo (peer-confirmed): when resolving the parent bookmark
   reports stale, iOS repairs and returns the fresh identifier with
   `repaired: true` — the app MUST persist it, same discipline as
@@ -164,13 +176,25 @@ Notes:
   and run cursor work directly on queue threads (no second hop —
   the queue is concurrent, so a slow provider does not stall other
   control). Close the cursor in `finally`.
-- `lookupChild`: derive the child document ID as parent ID + `/`
-  + name (path-based providers — the AOSP shape §2 already
-  relies on; memory of AOSP, confirm on device), query the one
-  row via `buildDocumentUriUsingTree`, map to `ChildEntry`, null
-  when the row is absent. Non-path providers fall back to
-  list-and-scan internally (same result, listing cost — the
-  caller can't tell). Gone parent is loud `not-found`.
+- Both verbs first resolve the parent: a tree URI under a live
+  persisted grant (else `permission-lost`), one row query for the
+  parent itself (null ⇒ the Gap-1a missing-document rule:
+  `not-found`, or `permission-lost` `volume-absent` for an
+  unmounted ExternalStorageProvider volume), and a directory MIME
+  type (else `not-a-directory`). So a gone parent is loud before
+  any child query.
+- `lookupChild`: for ExternalStorageProvider only (the one
+  provider whose IDs are known to be paths), derive the child
+  document ID as parent ID + `/` + name (`<root>:` + name directly
+  under a volume root), query the one row via
+  `buildDocumentUriUsingTree`, map to `ChildEntry`. A missing
+  child does NOT come back as a null row: the provider's tree
+  check (`isChildDocument`) cannot resolve the missing file and
+  throws `IllegalArgumentException` ("Failed to determine if … is
+  child of …"; measured, API 36). With the parent just confirmed
+  live, that is read as absent ⇒ null. Every other provider is
+  opaque and falls back to list-and-scan internally (same result,
+  listing cost — the caller can't tell).
 
 ### iOS (Swift, after Gap 1a lands)
 
@@ -189,6 +213,15 @@ Notes:
   `startAccessing…`, `FileManager` attributes query on
   parentURL + name → `ChildEntry` or null when absent,
   `stopAccessing…`. Single-shot scope, like `listChildren`.
+- Both run the Gap-1a liveness checks on the parent with the scope
+  held: unreachable ⇒ `not-found`, inside `.Trash` ⇒ `not-found`
+  `reason: trashed`, not a directory ⇒ `not-a-directory`.
+  `contentsOfDirectory` runs without `.skipsHiddenFiles`, so
+  dotfiles list.
+- Child bookmarks made under the parent's scope stand on their
+  own: `acquire` on a listed child's identifier starts its scope
+  (simulator, 2026-09-30), so a caller holds one child without
+  holding the folder.
 
 ## 6. Error taxonomy
 
@@ -220,6 +253,23 @@ taxonomy review before graduation (see §8).
   miss (null), gone parent (loud), and a dotfile by name.
 - iOS backend: listing correctness plus interplay with
   stale-refresh once Gap 1a exists.
+- Observed 2026-09-30 (the Gap-1 PR), via the example's "Run
+  checks" button:
+  - Android, API 36 emulator, ExternalStorageProvider: listing
+    with a dotfile and a subfolder, one level down through a child
+    identifier, a file listed ⇒ `not-a-directory`, lookup hit /
+    dotfile / folder / miss ⇒ null / wrong-case hit, a child
+    created after the pick is listed (R4), revoke ⇒
+    `permission-lost`, gone parent ⇒ `not-found` for both verbs,
+    cache size unchanged, and a listed child's identifier acquires
+    on its own. 10k children: 3.9–4.6 s in profile mode, all but
+    ~0.1 s of it the provider's cursor (native-timed), so
+    provider-bound; 5.3 s once in debug mode. Warm emulator, not
+    the mid-range-device gate.
+  - iOS 26.5 simulator: the same listing, lookup, `not-a-directory`
+    and child-acquire results; the wrong-case lookup was a miss
+    there (null), and a trashed parent is `not-found`
+    `reason: trashed` for both verbs.
 - No new benchmark suite beyond the 10k-child latency check: listing
   throughput is provider-bound by the same argument as 2b §3's
   overhead note.
@@ -250,7 +300,10 @@ Same bar as Gap 2b, evaluated independently:
   during prototype; decides how loudly docs must warn.
 - Pagination for very large directories (cursor window vs full list)?
   Lean full list for v1; revisit if 10k-child memory or latency
-  disappoints.
+  disappoints. First data point (§7): 10k children ≈ 4 s on a warm
+  emulator, almost all of it the provider's cursor, so pagination
+  would not make the total faster, only the first page. The
+  device gate (§8) decides.
 - Containment for untrusted entry points: how does native prove a
   picked directory is inside the blessed parent (the Gap-3 Add
   refusal needs it)? Options: a containment query verb,

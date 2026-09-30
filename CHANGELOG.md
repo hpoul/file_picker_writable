@@ -23,6 +23,15 @@
     releases the first one's holds, and is logged as a warning.
   * On Android, `openDirectory` accepts a read-only tree and reports
     `persistable` accordingly.
+  * `listChildren(identifier:)` lists one level of a picked directory in
+    one call, metadata only (`ChildEntry`: name, identifier, isDirectory,
+    size, lastModified), never copying a file. Child identifiers work
+    wherever an identifier is taken, including `listChildren` and
+    `acquire`. Dotfiles are listed like any other name.
+  * `lookupChild(identifier:, name:)` answers "is there a child called
+    this?" without listing: the entry, or null when absent. A gone
+    parent is loud. On Android's system storage provider it is one row
+    query, not a listing.
 * Android: every method-channel call now runs on a shared background
   TaskQueue instead of the main thread, so slow providers no longer block
   frames. The pickers and `init` still hop to the main thread. Launch URLs

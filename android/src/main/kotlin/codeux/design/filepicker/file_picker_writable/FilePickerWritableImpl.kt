@@ -57,6 +57,14 @@ class FilePickerWritableImpl(
     const val REQUEST_CODE_OPEN_FILE = 40832
     const val REQUEST_CODE_CREATE_FILE = 40833
     const val REQUEST_CODE_OPEN_DIRECTORY = 40834
+
+    private val DOCUMENT_PROJECTION = arrayOf(
+      DocumentsContract.Document.COLUMN_DOCUMENT_ID,
+      DocumentsContract.Document.COLUMN_DISPLAY_NAME,
+      DocumentsContract.Document.COLUMN_MIME_TYPE,
+      DocumentsContract.Document.COLUMN_SIZE,
+      DocumentsContract.Document.COLUMN_LAST_MODIFIED
+    )
   }
 
   // Every mutable field below is touched on the main hop only, except the
@@ -496,6 +504,147 @@ class FilePickerWritableImpl(
       plugin.logDebug("release: unknown scope token $token, ignored.")
     }
     plugin.logDebug("release: ${scopes.size} scope token(s) live.")
+  }
+
+  /**
+   * One level of the directory [identifier] names, in one cursor pass:
+   * metadata only, never a copy. Android identifiers never go stale, so
+   * the identifier is echoed unrepaired.
+   */
+  @WorkerThread
+  fun listChildren(identifier: String): Map<String, Any?> {
+    val started = System.nanoTime()
+    val directory = requireDirectory(identifier)
+    val entries = queryChildren(directory)
+      ?: throw missingDocument(directory.documentUri)
+    plugin.logDebug(
+      "listChildren: ${entries.size} rows in ${(System.nanoTime() - started) / 1_000_000} ms"
+    )
+    return mapOf(
+      "identifier" to identifier,
+      "repaired" to false,
+      "entries" to entries.map { it.toResult(directory.treeUri) }
+    )
+  }
+
+  /**
+   * The child [name] of the directory [identifier], or null when absent.
+   * ExternalStorageProvider IDs are paths, so the child's ID is derived
+   * and queried as one row; any other provider is opaque, so it falls back
+   * to scanning the listing (same answer, listing cost).
+   */
+  @WorkerThread
+  fun lookupChild(identifier: String, name: String): Map<String, Any?>? {
+    if (!isLeafName(name)) {
+      throw TaxonomyException(ErrorKind.INVALID_NAME, "Not a single leaf name: \"$name\"")
+    }
+    val directory = requireDirectory(identifier)
+    val child = if (directory.treeUri.authority == StorageVolumes.AUTHORITY) {
+      val childId = StorageVolumes.childDocumentId(directory.documentId, name)
+      try {
+        queryRow(DocumentsContract.buildDocumentUriUsingTree(directory.treeUri, childId))
+      } catch (e: IllegalArgumentException) {
+        // The provider's tree check (isChildDocument) cannot resolve a
+        // missing file, and says so as "Failed to determine if … is child
+        // of …" rather than a null row (measured, API 36). The parent was
+        // just confirmed to be a live directory and the ID is derived from
+        // it, so this is the absent child.
+        plugin.logDebug("lookupChild: $childId absent (${e.message})")
+        null
+      }
+    } else {
+      (queryChildren(directory) ?: throw missingDocument(directory.documentUri))
+        .firstOrNull { it.name == name }
+    }
+    return child?.toResult(directory.treeUri)
+  }
+
+  private class Directory(val treeUri: Uri, val documentId: String, val documentUri: Uri)
+
+  private class DocumentRow(
+    val documentId: String,
+    val name: String,
+    val mimeType: String?,
+    val size: Long?,
+    val lastModified: Long?
+  ) {
+    val isDirectory: Boolean
+      get() = mimeType == DocumentsContract.Document.MIME_TYPE_DIR
+
+    fun toResult(treeUri: Uri): Map<String, Any?> = mapOf(
+      "name" to name,
+      "identifier" to DocumentsContract.buildDocumentUriUsingTree(treeUri, documentId).toString(),
+      "isDirectory" to isDirectory,
+      // A directory's size is the file system's block size, not content:
+      // null, as on iOS.
+      "size" to if (isDirectory) null else size,
+      "lastModified" to lastModified
+    )
+  }
+
+  /**
+   * Resolves [identifier] to a directory under a live persisted tree grant:
+   * `not-a-directory` unless it is a tree URI naming a directory,
+   * `permission-lost` without a grant, and [missingDocument] when gone.
+   */
+  @WorkerThread
+  private fun requireDirectory(identifier: String): Directory {
+    val uri = Uri.parse(identifier)
+    if (!DocumentsContract.isTreeUri(uri)) {
+      throw TaxonomyException(ErrorKind.NOT_A_DIRECTORY, "Not a directory tree URI: $uri")
+    }
+    if (!hasPersistedReadGrant(requireContext().contentResolver, uri)) {
+      throw TaxonomyException(ErrorKind.PERMISSION_LOST, "No persisted grant covers $uri")
+    }
+    val treeUri = DocumentsContract.buildTreeDocumentUri(
+      uri.authority, DocumentsContract.getTreeDocumentId(uri)
+    )
+    val documentUri = documentUriFor(uri)
+    val documentId = DocumentsContract.getDocumentId(documentUri)
+    val row = queryRow(documentUri) ?: throw missingDocument(documentUri)
+    if (!row.isDirectory) {
+      throw TaxonomyException(ErrorKind.NOT_A_DIRECTORY, "${row.name} is not a directory")
+    }
+    return Directory(treeUri, documentId, documentUri)
+  }
+
+  /** The one row for [documentUri], or null when the provider has none. */
+  @WorkerThread
+  private fun queryRow(documentUri: Uri): DocumentRow? =
+    requireContext().contentResolver.query(documentUri, DOCUMENT_PROJECTION, null, null, null)
+      ?.use { cursor -> if (cursor.moveToFirst()) cursor.toDocumentRow() else null }
+
+  /** All children of [directory] in one pass, or null for a null cursor. */
+  @WorkerThread
+  private fun queryChildren(directory: Directory): List<DocumentRow>? {
+    val childrenUri = DocumentsContract.buildChildDocumentsUriUsingTree(
+      directory.treeUri, directory.documentId
+    )
+    return requireContext().contentResolver
+      .query(childrenUri, DOCUMENT_PROJECTION, null, null, null)
+      ?.use { cursor ->
+        buildList {
+          while (cursor.moveToNext()) {
+            add(cursor.toDocumentRow())
+          }
+        }
+      }
+  }
+
+  private fun Cursor.toDocumentRow(): DocumentRow {
+    val id = getColumnIndexOrThrow(DocumentsContract.Document.COLUMN_DOCUMENT_ID)
+    val name = getColumnIndexOrThrow(DocumentsContract.Document.COLUMN_DISPLAY_NAME)
+    val mime = getColumnIndex(DocumentsContract.Document.COLUMN_MIME_TYPE)
+    val size = getColumnIndex(DocumentsContract.Document.COLUMN_SIZE)
+    val modified = getColumnIndex(DocumentsContract.Document.COLUMN_LAST_MODIFIED)
+    return DocumentRow(
+      documentId = getString(id),
+      name = getString(name),
+      mimeType = if (mime < 0 || isNull(mime)) null else getString(mime),
+      size = if (size < 0 || isNull(size)) null else getLong(size),
+      // Providers that don't track it report 0: that is "won't say".
+      lastModified = if (modified < 0 || isNull(modified)) null else getLong(modified).takeIf { it > 0 }
+    )
   }
 
   fun onDetachedFromEngine() {
