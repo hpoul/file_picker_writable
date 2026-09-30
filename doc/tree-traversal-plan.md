@@ -37,8 +37,10 @@ against our own acquisition verb (see §9).
   per-child URIs via `buildDocumentUriUsingTree`); each child URI works
   with the existing read/write verbs. Directory-ness is the
   `MIME_TYPE_DIR` MIME type, not a flag. Document IDs are opaque and
-  stable across renames (R3); the persisted tree grant covers
-  descendants created after the pick (R4).
+  may change on rename/move (path-based providers derive them from
+  the path) — callers must use the fresh `ChildEntry` a move/rename
+  returns. The persisted tree URI and its grant are stable across
+  renames (R3) and cover descendants created after the pick (R4).
 - Provider metadata is best-effort: `SIZE` and `LAST_MODIFIED` may be
   missing or 0 depending on provider (cloud, OTG). Nullable in the API,
   never fabricated.
@@ -116,6 +118,8 @@ Notes:
 
 - `listChildren`: resolve identifier to tree URI; require
   `DocumentsContract.isTreeUri`, else loud `not-a-directory`.
+  Derive the parent document ID by shape: root tree URI ⇒
+  `getTreeDocumentId`, child/subdir URIs ⇒ `getDocumentId`.
   Query `buildChildDocumentsUriUsingTree(treeUri, parentDocumentId)`
   for `COLUMN_DOCUMENT_ID`, `COLUMN_DISPLAY_NAME`,
   `COLUMN_MIME_TYPE`, `COLUMN_SIZE`, `COLUMN_LAST_MODIFIED` in one
@@ -124,7 +128,8 @@ Notes:
   `mimeType == MIME_TYPE_DIR`. Persisted tree grant already covers
   children — no per-child permission calls.
 - Subdirectories: the caller passes a child's identifier back in;
-  native derives its document ID (`getDocumentId`) and lists under it
+  native derives its document ID (`getDocumentId` — child URIs only;
+  the root takes `getTreeDocumentId` above) and lists under it
   with the same tree URI. One code path for every level.
 - Identifier encoding (pinned): child identifiers are full document
   URIs from `buildDocumentUriUsingTree`, embedding the tree ID so the

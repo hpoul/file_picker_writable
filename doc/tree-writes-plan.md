@@ -39,9 +39,10 @@ write path, all under the Gap-1a scope discipline.
   discretion — behavior varies, so recursion is the plugin's job;
   see §5), `renameDocument` (returns a fresh URI), and
   `moveDocument` (same-authority only). Byte output is a sequential
-  `openOutputStream` — append (`"wa"`) for chunked sessions, never
-  positional writes; pipes make seeking as unavailable as on the read
-  path.
+  `openOutputStream` on a held stream — truncating open, then
+  sequential writes advancing the position; never positional writes
+  and never append mode (the held stream already advances); pipes
+  make seeking as unavailable as on the read path.
 - The create-then-stream pattern has a crash window: a file created
   but never committed is a partial the app must sweep. Abort deletes
   the partial; crash recovery is the app's orphan sweep (Gap-1
@@ -143,14 +144,19 @@ Future<ChildEntry> moveEntry({
 Notes:
 
 - Cross-platform from day one: identical Dart verbs; Android serves
-  `DocumentsContract` + append streams, iOS serves `FileManager` +
-  `FileHandle` inside the passed-in scope. macOS and other stub
-  platforms throw `UnsupportedError` — loud beats silent.
+  `DocumentsContract` + truncating opens with sequential streams,
+  iOS serves `FileManager` + `FileHandle` inside the passed-in
+  scope. macOS and other stub platforms throw `UnsupportedError` —
+  loud beats silent.
 - Session/split discipline, same as 1/1a/2b: repeated byte access
   (`openWrite`…) takes a live scope; single-shot verbs
   (`deleteEntry`, `moveEntry`) manage scope internally per call.
   `createDirectory` takes the parent scope because callers creating
   N folders in a loop should not pay N acquires.
+- Concurrency: `writeChunk`/`closeWrite`/`abortWrite` on one session
+  are serialized natively (per-session mutex), FIFO — chunk order
+  and acknowledged totals stay deterministic even after dispatch
+  off the platform thread. Serialization, not rejection.
 - Truncate-if-present is the documented `openWrite` rule: one
   predictable outcome. Callers needing fail-if-exists list first
   (Gap 1 is one call).
@@ -181,8 +187,11 @@ Notes:
   pattern), return `FileInfo` with the tree URI as identifier. No temp,
   no copies — acquisition never touches a byte.
 - `openWrite`: resolve parent scope → tree URI + parent document ID;
-  `createDocument` (MIME type + name as passed); on name collision
-  resolve the existing child and open with truncate (`"wt"`); hold the
+  list the parent first: an exact existing child opens with
+  truncate, otherwise `createDocument` (MIME type + name as passed)
+  and verify the returned display name (auto-rename ⇒ delete the
+  residue, loud `already-exists`). Truncating mode follows the
+  existing SDK rule (`"wt"` on API 29+, `"w"` below). Hold the
   `OutputStream` in the session registry. Validate the scope token
   (released ⇒ loud `scope-closed`).
 - `writeChunk`: append bytes, flush per chunk (provider visibility +
@@ -191,11 +200,12 @@ Notes:
 - `closeWrite`: flush, close, stat the child into a `ChildEntry`.
   `abortWrite`: close, `deleteDocument` the partial, drop the session.
   Both idempotent; use-after-either is loud `session-closed`.
-- `createDirectory`: `createDocument` with `MIME_TYPE_DIR`, then
-  verify the returned display name matches the request: a mismatch
-  means the provider auto-renamed, so delete the residue and throw
-  loud `already-exists`. The returned entry always carries the
-  actual name.
+- `createDirectory`: list the parent first (taken name ⇒ loud
+  `already-exists`, not attempted); `createDocument` with
+  `MIME_TYPE_DIR`, then verify the returned display name matches
+  the request: a mismatch means the provider auto-renamed, so
+  delete the residue and throw loud `already-exists`. The returned
+  entry always carries the actual name.
 - `deleteEntry`: resolve identifier; `deleteDocument`. Recursion is
   the plugin's own walk (list children via the Gap-1 path, delete
   depth-first), because provider-side recursive delete is
@@ -217,13 +227,15 @@ Notes:
   `synchronizeFile` per chunk, return the total.
   `closeWrite`/`abortWrite` mirror Android (abort removes the
   partial). Off main; results hop to main per convention.
-- `createDirectory`/`deleteEntry`/`moveEntry`: `FileManager` under a
-  per-call scope (single-shot verbs), with the plugin's own
-  recursive walk for `deleteEntry(recursive: true)` — same rule as
-  Android: never trust provider-side recursion. `FileManager`
-  file-exists errors map to loud `already-exists` (nothing is
-  created, so no residue cleanup); target names are pre-checked
-  before `moveItem` like Android.
+- `createDirectory`: `FileManager.createDirectory` under the
+  passed-in parent scope (not per-call — §4). `deleteEntry` /
+  `moveEntry`: `FileManager` under a per-call scope (single-shot
+  verbs), with the plugin's own recursive walk for
+  `deleteEntry(recursive: true)` — same rule as Android: never
+  trust provider-side recursion. `FileManager` file-exists errors
+  map to loud `already-exists` (nothing is created, so no residue
+  cleanup); target names are pre-checked before `moveItem` like
+  Android.
 
 ## 6. Error taxonomy
 

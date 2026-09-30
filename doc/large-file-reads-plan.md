@@ -121,17 +121,22 @@ Notes:
   should use `AcquiredScope.path` plus `dart:io` directly, not an
   `openRead` session. Sessions are for large reads where chunking,
   cancellation, and multiplexing earn their keep.
+- Concurrency: `readChunk` calls on one session are serialized
+  natively (per-session mutex); overlapping Dart calls complete in
+  FIFO order, never interleave seek+read. Serialization, not
+  rejection — no overlapping-request error exists.
 - Chunk guidance: 256KB–1MB default; document that this amortizes
   call overhead and bounds memory either way.
 - Experimental mechanics: `@experimental` annotation plus a CHANGELOG
   notice. Additive API, so no feature flag is needed; the annotation
-  keeps breaking the protocol in a minor honest until graduation.
+  keeps it honest to break the protocol in a minor until graduation.
 
 ## 5. Native design
 
 ### Android (Kotlin)
 
-- Session registry: id → open handle, guarded for concurrent sessions.
+- Session registry: id → open handle, guarded for concurrent
+  sessions, each with a mutex serializing `readChunk`.
 - `openRead`: validate the scope token (released ⇒ loud
   `scope-closed`), resolve the scope's identifier to URI; prefer
   `openAssetFileDescriptor` (offset + length known ⇒ seekable);
@@ -149,8 +154,8 @@ Notes:
 ### iOS (Swift, inside a Gap-1a scope)
 
 - `openRead` requires a live `AcquiredScope` and stats the file,
-  holding a `FileHandle` for the session; `readChunk` seeks + reads
-  off main; `closeRead` closes the handle. Scope lifetime stays with
+  holding a `FileHandle` for the session; serialized `readChunk`
+  seeks + reads off main; `closeRead` closes the handle. Scope lifetime stays with
   the caller — sessions never acquire or release. Results/errors hop
   to main per the plugin's existing convention. macOS is stubbed
   (`UnsupportedError`) per the Gap-1a boundary decision.

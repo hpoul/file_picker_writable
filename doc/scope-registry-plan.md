@@ -156,6 +156,10 @@ Notes:
 - `release`: drop the token; last token on an identifier calls
   `stopAccessing…`. Unknown token is a no-op (idempotent), logged at
   fine level for leak debugging.
+- Teardown: plugin detach/deinit balances every started URL and
+  clears all tokens and holds — covers engine teardown, hot
+  restart, and isolate loss where Dart-side `release` never runs.
+  Stale tokens after re-attach fail loud, never silently rebind.
 - Leak backstop: none in v1 — `release` explicit + idempotent only.
   A debug-mode "scopes still held" dump can come later if leaks prove
   hard to find.
@@ -166,10 +170,12 @@ Notes:
 ### Android (Kotlin)
 
 - `acquire`: parse URI, scan `persistedUriPermissions` for a live
-  grant (read, or read+write as taken); absent grant is a loud
-  `permission-lost`. Query the display name (existing `readFileInfo`
-  pattern) and return `path: null`. No native resource is held, so
-  refcounting is trivially satisfied.
+  grant (read, or read+write as taken): exact-URI match, or
+  same-authority descendant of a persisted tree URI (tree-ID
+  comparison — the grant lives on the root, not the child).
+  Absent grant is a loud `permission-lost`. Query the display name
+  (existing `readFileInfo` pattern) and return `path: null`. No
+  native resource is held, so refcounting is trivially satisfied.
 - `release`: drop the token. No-op by design, kept for API symmetry
   so Dart code paths stay identical across platforms.
 
