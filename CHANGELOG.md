@@ -43,6 +43,10 @@
   off the UI thread, with results and errors delivered on the main
   thread. File intake is processed in deterministic order via a serial
   queue.
+* Fix `openFileForCreate` corrupting suggested file names longer than 30
+  characters (the truncated temp name becomes the created file's name,
+  eating extensions).
+  [#36](https://github.com/hpoul/file_picker_writable/pull/36) (thanks @manaspratap)
 
 ## 2.1.0+1
 
