@@ -475,7 +475,7 @@ class FilePickerWritableImpl(
       throw TaxonomyException(ErrorKind.PERMISSION_LOST, "No persisted grant covers $uri")
     }
     val documentUri = documentUriFor(uri)
-    val name = queryDisplayName(documentUri, contentResolver)
+    val name = onVolume(documentUri) { queryDisplayName(documentUri, contentResolver) }
       ?: throw missingDocument(documentUri)
     val (token, dropped) = scopes.add(session, identifier)
     if (dropped > 0) {
@@ -546,9 +546,10 @@ class FilePickerWritableImpl(
       } catch (e: IllegalArgumentException) {
         // The provider's tree check (isChildDocument) cannot resolve a
         // missing file, and says so as "Failed to determine if … is child
-        // of …" rather than a null row (measured, API 36). The parent was
-        // just confirmed to be a live directory and the ID is derived from
-        // it, so this is the absent child.
+        // of …" rather than a null row (measured, API 36). queryRow has
+        // already turned a removed volume into volume-absent, the parent
+        // was just confirmed to be a live directory, and the ID is derived
+        // from it, so this is the absent child.
         plugin.logDebug("lookupChild: $childId absent (${e.message})")
         null
       }
@@ -610,9 +611,10 @@ class FilePickerWritableImpl(
 
   /** The one row for [documentUri], or null when the provider has none. */
   @WorkerThread
-  private fun queryRow(documentUri: Uri): DocumentRow? =
+  private fun queryRow(documentUri: Uri): DocumentRow? = onVolume(documentUri) {
     requireContext().contentResolver.query(documentUri, DOCUMENT_PROJECTION, null, null, null)
       ?.use { cursor -> if (cursor.moveToFirst()) cursor.toDocumentRow() else null }
+  }
 
   /** All children of [directory] in one pass, or null for a null cursor. */
   @WorkerThread
@@ -620,15 +622,17 @@ class FilePickerWritableImpl(
     val childrenUri = DocumentsContract.buildChildDocumentsUriUsingTree(
       directory.treeUri, directory.documentId
     )
-    return requireContext().contentResolver
-      .query(childrenUri, DOCUMENT_PROJECTION, null, null, null)
-      ?.use { cursor ->
-        buildList {
-          while (cursor.moveToNext()) {
-            add(cursor.toDocumentRow())
+    return onVolume(directory.documentUri) {
+      requireContext().contentResolver
+        .query(childrenUri, DOCUMENT_PROJECTION, null, null, null)
+        ?.use { cursor ->
+          buildList {
+            while (cursor.moveToNext()) {
+              add(cursor.toDocumentRow())
+            }
           }
         }
-      }
+    }
   }
 
   private fun Cursor.toDocumentRow(): DocumentRow {
@@ -683,21 +687,48 @@ class FilePickerWritableImpl(
    * opaque, so a detached volume there still reads as `not-found`.
    */
   @WorkerThread
-  private fun missingDocument(documentUri: Uri): TaxonomyException {
-    val volume = if (documentUri.authority == StorageVolumes.AUTHORITY) {
-      StorageVolumes.volumeOf(DocumentsContract.getDocumentId(documentUri))
-    } else {
-      null
+  private fun missingDocument(documentUri: Uri): TaxonomyException =
+    absentVolume(documentUri)
+      ?: TaxonomyException(ErrorKind.NOT_FOUND, "No document at $documentUri")
+
+  /**
+   * `permission-lost` (`volume-absent`) when [documentUri] lives on an
+   * ExternalStorageProvider volume that is absent or unmounted, else null.
+   */
+  @WorkerThread
+  private fun absentVolume(documentUri: Uri, cause: Throwable? = null): TaxonomyException? {
+    if (documentUri.authority != StorageVolumes.AUTHORITY) {
+      return null
     }
-    if (volume != null && !isMounted(volume)) {
-      return TaxonomyException(
-        ErrorKind.PERMISSION_LOST,
-        "Storage volume of $documentUri is not mounted",
-        details = mapOf("reason" to "volume-absent")
-      )
+    val volume = StorageVolumes.volumeOf(DocumentsContract.getDocumentId(documentUri))
+    if (volume == null || isMounted(volume)) {
+      return null
     }
-    return TaxonomyException(ErrorKind.NOT_FOUND, "No document at $documentUri")
+    return TaxonomyException(
+      ErrorKind.PERMISSION_LOST,
+      "Storage volume of $documentUri is not mounted",
+      cause,
+      details = mapOf("reason" to "volume-absent")
+    )
   }
+
+  /**
+   * Runs a provider call on [documentUri]. A removed volume does not
+   * always read as a null row: once its root is gone the provider's tree
+   * check throws `IllegalArgumentException("… No root for <uuid>")`, and a
+   * plain document URI throws `FileNotFoundException`. The cause does not
+   * cross Binder, so rather than match on the class or message, any
+   * exception is first checked against the volume's state.
+   */
+  @WorkerThread
+  private inline fun <T> onVolume(documentUri: Uri, block: () -> T): T =
+    try {
+      block()
+    } catch (e: Exception) {
+      val absent = absentVolume(documentUri, e) ?: throw e
+      plugin.logDebug("Volume absent; the provider threw ${e.javaClass.name}: ${e.message}")
+      throw absent
+    }
 
   private fun isMounted(volume: StorageVolumes.Volume): Boolean {
     val storageManager = requireContext().getSystemService(StorageManager::class.java)

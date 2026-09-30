@@ -182,7 +182,11 @@ Notes:
   `not-found`, or `permission-lost` `volume-absent` for an
   unmounted ExternalStorageProvider volume), and a directory MIME
   type (else `not-a-directory`). So a gone parent is loud before
-  any child query.
+  any child query. Every provider query (parent, children, derived
+  child) runs the volume check on any exception too, so a stick
+  pulled mid-call reads as `volume-absent`, never as a missing
+  child (scope-registry-plan §5). Measured: removing the virtual
+  disk turns both verbs into `permission-lost` `volume-absent`.
 - `lookupChild`: for ExternalStorageProvider only (the one
   provider whose IDs are known to be paths), derive the child
   document ID as parent ID + `/` + name (`<root>:` + name directly
