@@ -144,23 +144,36 @@ Notes:
 
 ### iOS (Swift)
 
-- Registry: identifier → (resolved URL, hold count, active tokens).
-  Guarded for concurrent acquires.
+- Registry: resolved file path → (the URL access was started on,
+  active tokens); token → path. Keyed by the file, not the
+  identifier string: two resolutions of one bookmark (or an old and
+  a repaired bookmark) are different strings for one scope, and the
+  stop must balance the instance the start ran on. Guarded by a
+  lock for concurrent acquires.
 - `acquire`: base64-decode → resolve bookmark, capturing
   `isStale`. If stale, re-create `bookmarkData()` from the resolved
   URL and return its base64 as the fresh identifier with
   `repaired: true`. Return `url.path` as `path` plus a re-read
   display name. First hold on an identifier calls
   `startAccessingSecurityScopedResource`; a `false` return is a loud
-  `permission-lost`, never a silent proceed. Results hop to main per
-  the plugin's existing convention.
+  `permission-lost`, never a silent proceed. A held scope on a path
+  that is no longer reachable is `not-found`, and the hold is
+  dropped again. Results hop to main per the plugin's existing
+  convention.
 - `release`: drop the token; last token on an identifier calls
   `stopAccessing…`. Unknown token is a no-op (idempotent), logged at
   fine level for leak debugging.
 - Teardown: plugin detach/deinit balances every started URL and
-  clears all tokens and holds — covers engine teardown, hot
-  restart, and isolate loss where Dart-side `release` never runs.
-  Stale tokens after re-attach fail loud, never silently rebind.
+  clears all tokens and holds — covers engine teardown, where
+  Dart-side `release` never runs. A hot restart (or other loss of
+  the root isolate) does NOT detach the plugin, so detach alone
+  misses it: each root isolate sends a random session id with
+  `acquire`, and the first acquire from a new session balances
+  every hold of the old one. Old tokens are then unknown, so they
+  fail loud in the verbs that take a scope, never silently rebind.
+  Holds left by a dead session linger until that first acquire or
+  detach. Session-carrying verbs are root-isolate verbs; a helper
+  must never `acquire`.
 - Leak backstop: none in v1 — `release` explicit + idempotent only.
   A debug-mode "scopes still held" dump can come later if leaks prove
   hard to find.
@@ -175,10 +188,16 @@ Notes:
   same-authority descendant of a persisted tree URI (tree-ID
   comparison — the grant lives on the root, not the child).
   Absent grant is a loud `permission-lost`. Query the display name
-  (existing `readFileInfo` pattern) and return `path: null`. No
-  native resource is held, so refcounting is trivially satisfied.
+  (existing `readFileInfo` pattern; a bare tree URI is queried as
+  its root document via `buildDocumentUriUsingTree`) and return
+  `path: null`. A null or empty cursor is `not-found`
+  (`DocumentsProvider.query` returns null on a missing document —
+  AOSP from memory, confirm on device). No native resource is
+  held, so refcounting is trivially satisfied.
 - `release`: drop the token. No-op by design, kept for API symmetry
-  so Dart code paths stay identical across platforms.
+  so Dart code paths stay identical across platforms. The token set
+  is still kept (same session rule as iOS) so the verbs that take a
+  scope can answer `scope-closed`.
 - Control threading: the shared concurrent background TaskQueue
   (uniform rule for every Android control verb).
 
@@ -204,10 +223,20 @@ kinds need a taxonomy review before graduation.
   passed through to 2b verbs (mock-level interplay, no native code).
 - Apple device: acquire → kill app → relaunch → acquire same
   identifier (grant survives); move/rename the file via Files, then
-  acquire and expect `repaired: true` with a working fresh identifier;
-  revoke (delete file / remove provider) and expect
-  `permission-lost`; acquire-acquire-release-release refcount check
-  via a debug counter.
+  acquire; revoke (remove provider, or empty Recently Deleted) and
+  expect `permission-lost`; acquire-acquire-release-release
+  refcount check via the logged hold counts.
+  Observed on the iOS 26.5 simulator, "On My iPad" (2026-09-30,
+  R1/1a PR): relaunch, refcount (1 file / 2 tokens → 0) and cancel
+  all as specified. But a Files rename and a move to another folder
+  both resolved with `isStale == false` — the bookmark followed the
+  file, with `path` and `displayName` updated — so `repaired: true`
+  was not produced; the repair branch stays unexercised until some
+  device reports staleness. And a Files delete moves the folder to
+  `.Trash`, where the bookmark follows it too: acquire succeeds with
+  a `.Trash` path instead of `permission-lost`. Callers that must
+  not write into a trashed folder cannot rely on acquire for that
+  (see §9).
 - Android device: acquire on live vs revoked grants (revoke via app
   settings); assert no temp growth (acquire must never copy).
 - Cross-doc interplay: Gap-1 listing then Gap-2b chunk reads under
@@ -237,6 +266,11 @@ Same bar as Gaps 1 and 2b, evaluated independently:
   API surface, or is fine-level logging enough? Lean logging for v1.
 - Repair storm: an app acquiring hundreds of moved files pays one
   re-bookmark each — acceptable, but measure during prototype.
+- Trashed folders (OPEN, found 2026-09-30 on the simulator): a Files
+  delete is a move into `.Trash`, and acquire follows it. Should
+  acquire report a path inside the provider's `.Trash` as
+  `not-found`? It is a path heuristic, so it is left out of v1
+  pending the owner's call.
 
 ## 10. Recommendation
 

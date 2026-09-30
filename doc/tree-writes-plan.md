@@ -316,16 +316,19 @@ Notes:
 
 - `openDirectory`: `ACTION_OPEN_DOCUMENT_TREE` (already verified
   present), `takePersistableUriPermission` on the tree URI (existing
-  pattern), return `FileInfo` with the tree URI as identifier. No temp,
-  no copies — acquisition never touches a byte.
+  pattern), return `FileInfo` with the tree URI as identifier and
+  the tree root's display name as `fileName` (queried through
+  `buildDocumentUriUsingTree`; a bare tree URI is not queryable).
+  No temp, no copies — acquisition never touches a byte.
 - Control threading (all Android verbs here): one shared
   CONCURRENT background TaskQueue (TaskQueue is per-channel; a
   serial queue would stall control behind a slow listing), so
   slow provider calls never block frames. No ordering across
   in-flight control calls — callers sequence by awaiting.
-  `impl`'s mutable state (the activity, the pending pick) is only
-  touched on the main hop. iOS keeps manual
-  off-main dispatch (TaskQueue is Android-only).
+  Every `impl` field is touched on the main hop only (the pending
+  pick, and the launch URLs `init` drains and `onNewIntent`
+  fills), so the pickers and `init` hop to main — see 2b §5.
+  iOS keeps manual off-main dispatch (TaskQueue is Android-only).
 - `openWrite` (control): validate the scope token (released ⇒ loud
   `scope-closed`); resolve parent scope → tree URI + parent
   document ID; `lookupChild` first (Gap 1 — one query, not a

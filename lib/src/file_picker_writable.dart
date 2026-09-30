@@ -1,10 +1,13 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
+import 'dart:math';
 
 import 'package:file_picker_writable/src/event_handling.dart';
+import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 import 'package:logging/logging.dart';
+import 'package:meta/meta.dart' show experimental;
 import 'package:path/path.dart' as path;
 import 'package:path_provider/path_provider.dart';
 import 'package:synchronized/synchronized.dart';
@@ -72,6 +75,63 @@ class FileInfo {
   /// Serializes this data into a json string for easy serialization.
   /// Can be read back using [fromJsonString].
   String toJsonString() => json.encode(toJson());
+}
+
+/// A native access scope held for one identifier, from
+/// [FilePickerWritable.acquire]. Hand it back to
+/// [FilePickerWritable.release] exactly once when done.
+///
+/// Error kinds, carried as [PlatformException.code] with the native
+/// domain and code in [PlatformException.details] where available:
+/// - `permission-lost`: the grant was revoked, the media detached, the
+///   scope start was refused, or a bookmark no longer resolves.
+/// - `not-found`: the grant is held but the file or folder is gone.
+/// - `scope-closed`: a released scope was used (verbs that take a scope).
+///
+/// Anything else stays loud under its own native code.
+@experimental
+class AcquiredScope {
+  AcquiredScope({
+    required this.id,
+    required this.identifier,
+    required this.repaired,
+    required this.path,
+    required this.displayName,
+  });
+
+  static AcquiredScope _fromResult(Map<String, Object?> result) =>
+      AcquiredScope(
+        id: result['id']! as String,
+        identifier: result['identifier']! as String,
+        repaired: result['repaired']! as bool,
+        path: result['path'] as String?,
+        displayName: result['displayName']! as String,
+      );
+
+  /// Opaque token for this hold, passed back to
+  /// [FilePickerWritable.release].
+  final String id;
+
+  /// The identifier to use from now on. Equal to the acquired identifier
+  /// unless [repaired].
+  final String identifier;
+
+  /// True when the acquired identifier was stale and [identifier] is a
+  /// fresh replacement. The app MUST then persist [identifier] in place
+  /// of the old one. The old identifier keeps working until then.
+  final bool repaired;
+
+  /// A usable file system path while the scope is held (iOS), or null
+  /// where none exists (Android content URIs). Branch on null, never on
+  /// the platform.
+  final String? path;
+
+  /// The file or folder name, re-read on every acquire.
+  final String displayName;
+
+  @override
+  String toString() => 'AcquiredScope{id: $id, repaired: $repaired, '
+      'path: $path, displayName: $displayName}';
 }
 
 typedef FileReader<T> = Future<T> Function(FileInfo fileInfo, File file);
@@ -152,6 +212,15 @@ class FilePickerWritable {
   static final FilePickerWritable _instance = FilePickerWritable._();
 
   final _filePickerState = FilePickerState();
+
+  /// Tokens acquired by this isolate and not yet released.
+  final Set<String> _liveScopeIds = {};
+
+  /// Identifies this Dart isolate to the native scope registry. A new
+  /// session (e.g. after a hot restart) makes native balance every hold
+  /// left by the previous one on its first acquire.
+  final String _scopeSession =
+      '${DateTime.now().microsecondsSinceEpoch}-${Random().nextInt(1 << 32)}';
 
   FilePickerState init() {
     _channel.invokeMethod<void>('init');
@@ -315,6 +384,75 @@ class FilePickerWritable {
   Future<void> disposeAllIdentifiers() async {
     _logger.finest('disposeAllIdentifiers()');
     return _channel.invokeMethod<void>('disposeAllIdentifiers');
+  }
+
+  /// Shows a picker for a directory. Returns null if the user cancelled.
+  ///
+  /// The grant is persisted (Android) or bookmarked (iOS), so the returned
+  /// [FileInfo.identifier] feeds [acquire] across relaunches without
+  /// re-picking. [FileInfo.fileName] is the picked folder's display label.
+  /// No bytes are copied.
+  ///
+  /// Android and iOS only; throws [UnsupportedError] elsewhere.
+  @experimental
+  Future<FileInfo?> openDirectory() async {
+    _logger.finest('openDirectory()');
+    _requireScopePlatform('openDirectory');
+    final result =
+        await _channel.invokeMapMethod<String, String>('openDirectory');
+    if (result == null) {
+      _logger.finer('User cancelled directory picker.');
+      return null;
+    }
+    return _resultToFileInfo(result);
+  }
+
+  /// Acquires native access scope for [identifier] until [release].
+  ///
+  /// Each call returns its own [AcquiredScope.id]; native refcounts per
+  /// file, so acquire, acquire, release still holds. A stale identifier is
+  /// repaired: [AcquiredScope.repaired] is true and
+  /// [AcquiredScope.identifier] is the replacement the app MUST persist.
+  ///
+  /// On iOS this holds the security scope. On Android, where persisted
+  /// grants need no ceremony, it checks the grant is still held. Neither
+  /// copies the file. Failures are [PlatformException]s with the kinds
+  /// listed on [AcquiredScope].
+  ///
+  /// Android and iOS only; throws [UnsupportedError] elsewhere.
+  @experimental
+  Future<AcquiredScope> acquire({required String identifier}) async {
+    _logger.finest('acquire()');
+    _requireScopePlatform('acquire');
+    final result = await _channel.invokeMapMethod<String, Object?>(
+      'acquire',
+      {'identifier': identifier, 'session': _scopeSession},
+    );
+    if (result == null) {
+      throw StateError('Got null response for acquire');
+    }
+    final scope = AcquiredScope._fromResult(result);
+    _liveScopeIds.add(scope.id);
+    return scope;
+  }
+
+  /// Releases a scope from [acquire]. Idempotent: releasing a scope twice
+  /// is a no-op, never an error.
+  @experimental
+  Future<void> release(AcquiredScope scope) async {
+    _logger.finest('release()');
+    if (!_liveScopeIds.remove(scope.id)) {
+      return;
+    }
+    await _channel.invokeMethod<void>('release', {'id': scope.id});
+  }
+
+  void _requireScopePlatform(String verb) {
+    if (defaultTargetPlatform != TargetPlatform.android &&
+        defaultTargetPlatform != TargetPlatform.iOS) {
+      throw UnsupportedError(
+          '$verb is not supported on $defaultTargetPlatform.');
+    }
   }
 
   FileInfo _resultToFileInfo(Map<String, String> result) {
