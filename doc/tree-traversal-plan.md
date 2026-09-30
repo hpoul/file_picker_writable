@@ -243,7 +243,7 @@ first; no external spec gates native code.
 ## Sources
 
 APIs verified 2026-09-30 in the compile SDK
-(`/Users/herbert/dev/android/sdk/platforms/android-36/android.jar`)
+(`$ANDROID_HOME/platforms/android-36/android.jar`)
 via `javap`:
 
 - `android.provider.DocumentsContract`: `buildChildDocumentsUriUsingTree`,

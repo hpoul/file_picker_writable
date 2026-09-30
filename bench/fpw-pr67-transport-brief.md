@@ -334,6 +334,11 @@ project document on the drive and makes durable writes (fsync on a real fd) matt
 
 ## 9. Artifacts
 
+[2026-09-30 note: preserved — everything below now lives in this
+repo under `bench/` (`chanbench/`, `table_emulator.txt`,
+`runs_emulator.txt`, `run_s24.log`, `logcat_s24.log`,
+`table_s24.txt`, `table.py`), so this section is historical.]
+
 Everything is in the reviewing session's scratchpad, which is temporary. Copy what you need:
 `(reviewer scratchpad, ephemeral)`
 

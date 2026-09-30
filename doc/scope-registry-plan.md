@@ -129,7 +129,8 @@ Notes:
 - Single-shot vs repeated split (peer-confirmed): `listChildren`
   (Gap 1) manages scope internally per call; 2b's `openRead` takes
   the scope, never a raw identifier, and `FdReader` checks token
-  liveness (reads are FFI, not channel verbs). Small one-shot
+  liveness at construction and close, not per op (reads are FFI,
+  not channel verbs). Small one-shot
   reads on Apple (index files, fingerprint hashes) skip sessions
   entirely: `path` plus `dart:io` under the held scope.
 - `path` is null on Android by design (no filesystem path exists for

@@ -78,6 +78,9 @@ with a `NativeFinalizer` backstop. Backpressure is structural (no
 calls, no bytes); cancellation is `close`; multiplexing is session
 fds. The isolate rule is load-bearing, not advisory: bytes must be
 consumed in the helper isolate where they land (rows C3/C4 below).
+Bounded exemption, shared with the driving consumer: one-shot reads
+of ≤1MiB total may run on the root isolate (milliseconds of views,
+no frame risk); anything larger MUST use a helper.
 
 ```
 S24 medians, MiB/s, 1 GiB sequential (emulator in parens):
@@ -159,6 +162,17 @@ class ReadSession {
   int get fd;          // Plain int: passes to a helper isolate for free.
   bool get seekable;   // statSize >= 0. False for pipes: sequential only.
   int? get length;     // statSize, or null for pipes.
+  // Explicit handoff: returns the sendable record and kills the
+  // local copy in one call (a SendPort send copies silently, so the
+  // dead-marking must be explicit, never incidental).
+  ReadHandoff handoff();
+}
+// Plain ints + bools: crosses isolates for free, in the same shape
+// the driving consumer already sends.
+class ReadHandoff {
+  int get fd;
+  bool get seekable;
+  int? get length;
 }
 
 @experimental
@@ -168,7 +182,8 @@ Future<ReadSession> openRead({required AcquiredScope scope});
 
 @experimental
 class FdReader {
-  FdReader.fromSession(ReadSession session, {int bufferLength = 1 << 20});
+  FdReader.fromSession(ReadSession session, {int bufferLength = 1 << 20}); // Same-isolate path.
+  FdReader.fromHandoff(ReadHandoff handoff, {int bufferLength = 1 << 20}); // Helper-isolate path.
   // Sync FFI pread into the caller-owned native buffer; returns a VIEW
   // valid until the next call or close (call-counted, never
   // time-bound — awaits between calls are safe). Consume in place
@@ -190,20 +205,23 @@ Notes:
 
 - Cross-platform from day one: identical Dart verbs; Android fds
   come from ContentResolver + `detachFd`, iOS fds from `open(2)`
-  under the held scope. No new native read code on iOS beyond the
-  open — reads are pure Dart FFI. macOS and other stub platforms
-  throw `UnsupportedError` — loud beats silent.
+  under the held scope. Reads are Dart FFI plus one small shared
+  C shim (close finalizer + `-errno` wrappers — needs a build
+  step in the podspec and in the Android plugin). macOS and other
+  stub platforms throw `UnsupportedError` — loud beats silent.
 - Single-owner rule: the fd has exactly one Dart owner at a time.
-  Passing the session to a helper isolate transfers ownership; the
+  `handoff()` transfers ownership to the helper isolate; the
   sender must not close afterwards. Double-close across isolates
   is a caller bug (fd-number reuse), guarded within each wrapper
   by idempotent close plus a `NativeFinalizer` backstop on
   `FdReader`. (Symmetric with `detachFd`, which transferred
-  ownership plugin→Dart.) After handoff the sender's copy is dead:
-  any use throws `StateError` (sync Dart, like `ArgumentError`) and
-  never touches the fd. Within one isolate, `fromSession` links
-  wrapper↔session close-state, so wrapper `close` and top-level
-  `closeRead` cannot double-close each other.
+  ownership plugin→Dart.) After `handoff()` the sender's copy is
+  dead for FD USE (byte ops, `closeRead` / wrapper close ⇒ sync
+  `StateError`, like `ArgumentError` — fail-fast beats silent
+  double-close); only the owning side closes. Within one isolate,
+  `fromSession` links wrapper↔session close-state, so wrapper
+  `close` and top-level `closeRead` cannot double-close each
+  other.
 - Kill/cancel story (peer-confirmed): cancel a live helper by
   message — it aborts and acks; the sender never closes. Kill is
   finalizer-closed: isolate shutdown runs attached
@@ -234,8 +252,9 @@ Notes:
   positional with no shared file offset, so overlapping reads
   cannot interleave — the per-session mutex question dissolves.
   (Pipe sessions use sequential `read` + Dart-tracked position and
-  serialize per-reader; pipes are the rare path. Control calls
-  still complete FIFO per channel guarantees.)
+  serialize per-reader; pipes are the rare path.) No ordering
+  across in-flight control calls on the shared concurrent queue —
+  callers sequence by awaiting.
 - Small one-shot reads on Apple (index files, fingerprint hashes)
   should use `AcquiredScope.path` plus `dart:io` directly, not a
   session. Sessions are for large reads where fd reads earn it.
@@ -263,8 +282,11 @@ Notes:
 - Threading: control on one shared CONCURRENT background TaskQueue
   (uniform rule for every Android control verb, existing verbs
   included as a companion change — TaskQueue is per-channel, and
-  a serial queue would stall control behind a slow listing);
-  picker verbs (`openFilePicker`, `openFilePickerForCreate`) hop
+  a serial queue would stall control behind a slow listing).
+  No ordering across in-flight control calls — callers sequence
+  by awaiting; `impl`'s mutable state (the activity, the pending
+  pick) is only touched on the main hop. Picker verbs
+  (`openFilePicker`, `openFilePickerForCreate`) hop
   back to main for `startActivityForResult`; the event-queue drain
   stays on main as today; MainScope is retained for the main-hop +
   drain. Bytes never touch the channel.
@@ -273,10 +295,12 @@ Notes:
 
 - `openRead` requires a live `AcquiredScope`, opens the path with
   `open(2)` `O_RDONLY`, `fstat`s for length, returns the fd.
-  Reads are pure Dart FFI afterwards — but the scope discipline
-  stays uniform: `FdReader` checks token liveness in Dart per op,
-  and use after release is loud `scope-closed` (the kernel would
-  not re-check an open fd; the plugin does). Off main; results hop
+  Reads are Dart FFI afterwards — but the scope discipline
+  stays uniform: `FdReader` checks token liveness in Dart at
+  construction and close, not per op (uniform with the helper
+  channel rule below), and use after release is loud
+  `scope-closed` (the kernel would not re-check an open fd; the
+  plugin does). Off main; results hop
   to main per the plugin's existing convention (TaskQueue is
   Android-only). macOS is stubbed (`UnsupportedError`) per the
   Gap-1a boundary decision.
@@ -287,7 +311,11 @@ Notes:
   `malloc` buffer per reader; views via `asTypedList`, valid
   until the next call or close. The finalizer callback is a tiny
   native close shim (`void f(void*)`), not punned libc `close`
-  (works on LP64, ABI-fragile).
+  (works on LP64, ABI-fragile) — and `pread` / `read` / `pwrite`
+  / `fsync` go through the same shim as `-errno` wrappers (one
+  shared C shim, both gaps): a separate `__errno` FFI call runs
+  after Dart code has resumed, where a safepoint can intervene
+  and hand back a stale value. `EINTR` retries inside the shim.
 - `errno` mapping: `EIO`/`ENXIO`/`ENODEV` after detach ⇒
   `permission-lost` (media detached — revoked grants do NOT fail
   open fds); `EBADF` ⇒ `session-closed` (use after close / double
@@ -323,7 +351,8 @@ into a taxonomy kind.
   tests): control lifecycle (`openRead`/`closeRead`, close
   idempotency, error mapping), view-until-next-call semantics,
   EOF and short-read loops, forward-only pipe behavior (stub a
-  non-seekable session), single-owner discipline. No device needed.
+  non-seekable session), single-owner discipline, shim `-errno`
+  mapping incl. `EINTR` retry (stubbed). No device needed.
 - Android device (S24 matrix in `bench/table_s24.txt` is the
   baseline): large files from named providers (ExternalStorage
   internal, USB-OTG root, Downloads, Media, one cloud); assert
