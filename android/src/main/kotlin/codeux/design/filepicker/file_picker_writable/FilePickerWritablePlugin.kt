@@ -94,6 +94,8 @@ class FilePickerWritablePlugin : FlutterPlugin, MethodCallHandler,
   ) {
     logDebug("Got method call: ${call.method}")
     when (call.method) {
+      // Must stay on main (review-4 F3). No unit test pins this dispatch;
+      // LaunchUrlGate's main-thread check throws at runtime if it moves.
       "init" -> onMain(call, result, ::legacyError) {
         impl.init()
         result.success(null)
@@ -224,6 +226,18 @@ class FilePickerWritablePlugin : FlutterPlugin, MethodCallHandler,
         "level" to "debug",
         "message" to "${Thread.currentThread().name} $message",
         "exception" to exception
+      )
+    )
+  }
+
+  override fun logWarning(message: String) {
+    Log.w(TAG, message)
+    sendEvent(
+      mapOf(
+        "type" to "log",
+        "level" to "warning",
+        "message" to "${Thread.currentThread().name} $message",
+        "exception" to ""
       )
     )
   }

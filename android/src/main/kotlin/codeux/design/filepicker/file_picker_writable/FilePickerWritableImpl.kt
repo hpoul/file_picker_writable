@@ -10,7 +10,9 @@ import android.content.Intent
 import android.database.Cursor
 import android.net.Uri
 import android.os.Build
+import android.os.Environment
 import android.os.Looper
+import android.os.storage.StorageManager
 import android.provider.DocumentsContract
 import android.provider.OpenableColumns
 import android.view.DragEvent
@@ -32,6 +34,7 @@ interface ContextProvider : CoroutineScope {
   val applicationContext: Context?
 
   fun logDebug(message: String, e: Throwable? = null)
+  fun logWarning(message: String)
   @MainThread
   fun openFile(fileInfo: Map<String, String>)
   @MainThread
@@ -426,15 +429,26 @@ class FilePickerWritableImpl(
   @WorkerThread
   private fun takeDirectory(treeUri: Uri): Map<String, String> {
     val contentResolver = requireContext().contentResolver
-    contentResolver.takePersistableUriPermission(
-      treeUri,
-      Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION
-    )
+    // Read+write where the provider grants it, read-only otherwise: a
+    // read-only tree is still a successful pick, and `persistable` says
+    // whether the grant outlives this process.
+    val persistable = listOf(
+      Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION,
+      Intent.FLAG_GRANT_READ_URI_PERMISSION
+    ).any { flags ->
+      try {
+        contentResolver.takePersistableUriPermission(treeUri, flags)
+        true
+      } catch (e: SecurityException) {
+        plugin.logDebug("Couldn't persist tree grant (flags $flags) on $treeUri", e)
+        false
+      }
+    }
     val name = queryDisplayName(documentUriFor(treeUri), contentResolver)
       ?: throw TaxonomyException(ErrorKind.NOT_FOUND, "No document for picked tree $treeUri")
     return mapOf(
       "identifier" to treeUri.toString(),
-      "persistable" to "true",
+      "persistable" to persistable.toString(),
       "uri" to treeUri.toString(),
       "fileName" to name
     )
@@ -452,11 +466,18 @@ class FilePickerWritableImpl(
     if (!hasPersistedReadGrant(contentResolver, uri)) {
       throw TaxonomyException(ErrorKind.PERMISSION_LOST, "No persisted grant covers $uri")
     }
-    val name = queryDisplayName(documentUriFor(uri), contentResolver)
-      ?: throw TaxonomyException(ErrorKind.NOT_FOUND, "No document at $uri")
+    val documentUri = documentUriFor(uri)
+    val name = queryDisplayName(documentUri, contentResolver)
+      ?: throw missingDocument(documentUri)
     val (token, dropped) = scopes.add(session, identifier)
     if (dropped > 0) {
-      plugin.logDebug("New Dart session: dropped $dropped stale scope token(s).")
+      // Expected once after a hot restart. Anything else means a second
+      // isolate called acquire, which breaks the root-isolate rule and
+      // just released the other isolate's holds.
+      plugin.logWarning(
+        "New Dart session: released $dropped scope token(s) of the previous one. " +
+          "acquire is a root-isolate verb."
+      )
     }
     plugin.logDebug("acquire: ${scopes.size} scope token(s) live.")
     return mapOf(
@@ -504,6 +525,41 @@ class FilePickerWritableImpl(
           )
         )
     }
+  }
+
+  /**
+   * The failure for a held grant whose document query came back empty:
+   * `permission-lost` (detached) when the document's ExternalStorageProvider
+   * volume is absent or unmounted, else `not-found`. Other providers are
+   * opaque, so a detached volume there still reads as `not-found`.
+   */
+  @WorkerThread
+  private fun missingDocument(documentUri: Uri): TaxonomyException {
+    val volume = if (documentUri.authority == StorageVolumes.AUTHORITY) {
+      StorageVolumes.volumeOf(DocumentsContract.getDocumentId(documentUri))
+    } else {
+      null
+    }
+    if (volume != null && !isMounted(volume)) {
+      return TaxonomyException(
+        ErrorKind.PERMISSION_LOST,
+        "Storage volume of $documentUri is not mounted",
+        details = mapOf("reason" to "volume-absent")
+      )
+    }
+    return TaxonomyException(ErrorKind.NOT_FOUND, "No document at $documentUri")
+  }
+
+  private fun isMounted(volume: StorageVolumes.Volume): Boolean {
+    val storageManager = requireContext().getSystemService(StorageManager::class.java)
+    val match = storageManager.storageVolumes.firstOrNull {
+      when (volume) {
+        StorageVolumes.Volume.Primary -> it.isPrimary
+        is StorageVolumes.Volume.Uuid -> it.uuid.equals(volume.uuid, ignoreCase = true)
+      }
+    }
+    return match?.state == Environment.MEDIA_MOUNTED ||
+      match?.state == Environment.MEDIA_MOUNTED_READ_ONLY
   }
 
   /** The document to query for [uri]: a bare tree URI names its root. */

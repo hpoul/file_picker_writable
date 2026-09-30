@@ -158,7 +158,14 @@ Notes:
   `startAccessingSecurityScopedResource`; a `false` return is a loud
   `permission-lost`, never a silent proceed. A held scope on a path
   that is no longer reachable is `not-found`, and the hold is
-  dropped again. Results hop to main per the plugin's existing
+  dropped again. So is a path with a whole component equal to
+  `.Trash`, with `reason: trashed` in details: a Files delete moves
+  the folder into the provider's `.Trash` and the bookmark follows
+  it, so deleted would otherwise read as a live folder the app lists
+  and writes into. There is no public resource key for "in the
+  trash", and `FileManager.url(for: .trashDirectory…)` likely names a
+  different trash, so this is a narrow path guard, provider-specific
+  by nature. Results hop to main per the plugin's existing
   convention.
 - `release`: drop the token; last token on an identifier calls
   `stopAccessing…`. Unknown token is a no-op (idempotent), logged at
@@ -173,7 +180,11 @@ Notes:
   fail loud in the verbs that take a scope, never silently rebind.
   Holds left by a dead session linger until that first acquire or
   detach. Session-carrying verbs are root-isolate verbs; a helper
-  must never `acquire`.
+  must never `acquire`. The rule is stated in the `acquire` dartdoc
+  but not enforced: an acquire from a second isolate silently
+  releases the first one's holds, so native logs every session flip
+  that drops live tokens at warning level (expected once per hot
+  restart, a bug otherwise).
 - Leak backstop: none in v1 — `release` explicit + idempotent only.
   A debug-mode "scopes still held" dump can come later if leaks prove
   hard to find.
@@ -193,8 +204,28 @@ Notes:
   `path: null`. A null or empty cursor is `not-found`
   (`DocumentsProvider.query` returns null on a missing document;
   confirmed for ExternalStorageProvider on an API 36 emulator,
-  2026-09-30). No native resource is
+  2026-09-30) — except a detached volume. ExternalStorageProvider
+  drops an unmounted volume's root, `getRootFromDocId` throws, and
+  `DocumentsProvider.query` swallows that into a null cursor while
+  the grant survives, so a pulled stick would read as a deleted
+  folder. For `com.android.externalstorage.documents` only, the
+  document ID's tag before `:` (`primary`/`home`, or the volume's
+  fsUuid) is matched against `StorageManager.getStorageVolumes()`;
+  no match, or a state other than `MEDIA_MOUNTED` /
+  `MEDIA_MOUNTED_READ_ONLY`, is `permission-lost` with
+  `reason: volume-absent`. (Querying the provider's roots would be
+  cleaner but needs `MANAGE_DOCUMENTS`.) Other authorities are
+  opaque and keep `not-found`. No native resource is
   held, so refcounting is trivially satisfied.
+- `openDirectory` takes a read+write grant and falls back to
+  read-only, reporting `persistable` honestly, so a read-only tree
+  is still a successful pick rather than a coerced
+  `permission-lost`.
+- Persisted grants are capped (512 per app on current Android, the
+  oldest trimmed silently), and file picks share the cap with tree
+  grants. One grant per section folder keeps this far away, but an
+  app that also persists many file picks should dispose the ones it
+  no longer needs.
 - `release`: drop the token. No-op by design, kept for API symmetry
   so Dart code paths stay identical across platforms. The token set
   is still kept (same session rule as iOS) so the verbs that take a
@@ -213,8 +244,13 @@ grant is gone. Dart carrier (pinned, all gaps): `PlatformException`
 with the taxonomy kind as `code` and a details map carrying the
 native domain + code where available. Exhaustiveness rule: anything
 outside the taxonomy stays loud under its own native code — unknown
-failures are never coerced into a taxonomy kind. Rule stands: new
-kinds need a taxonomy review before graduation.
+failures are never coerced into a taxonomy kind. Two mappings on
+Android are deliberate, not coercions of unknowns: a
+`SecurityException` is the platform refusing a grant
+(`permission-lost`), and a `FileNotFoundException` the platform
+reporting a missing document (`not-found`). A `reason` in details
+(`trashed`, `volume-absent`) says which guard produced a kind. Rule
+stands: new kinds need a taxonomy review before graduation.
 
 ## 7. Testing plan
 
@@ -235,9 +271,9 @@ kinds need a taxonomy review before graduation.
   was not produced; the repair branch stays unexercised until some
   device reports staleness. And a Files delete moves the folder to
   `.Trash`, where the bookmark follows it too: acquire succeeds with
-  a `.Trash` path instead of `permission-lost`. Callers that must
-  not write into a trashed folder cannot rely on acquire for that
-  (see §9).
+  a `.Trash` path instead of `permission-lost`. So acquire now
+  guards `.Trash` explicitly (§5, §9); re-run, the same trashed
+  folder reads as `not-found` with `reason: trashed`.
 - Android device: acquire on live vs revoked grants (revoke via app
   settings); assert no temp growth (acquire must never copy).
   Observed on an API 36 emulator (2026-09-30, R1/1a PR): cancel →
@@ -273,11 +309,18 @@ Same bar as Gaps 1 and 2b, evaluated independently:
   API surface, or is fine-level logging enough? Lean logging for v1.
 - Repair storm: an app acquiring hundreds of moved files pays one
   re-bookmark each — acceptable, but measure during prototype.
-- Trashed folders (OPEN, found 2026-09-30 on the simulator): a Files
-  delete is a move into `.Trash`, and acquire follows it. Should
-  acquire report a path inside the provider's `.Trash` as
-  `not-found`? It is a path heuristic, so it is left out of v1
-  pending the owner's call.
+- Trashed folders (RESOLVED 2026-09-30, owner + #68 review): a Files
+  delete is a move into `.Trash`, and acquire follows it. Deleted
+  reads as `not-found` (`reason: trashed`) via a whole-component
+  path guard (§5). Rejected: a public "in trash" resource key (none
+  exists), `.trashDirectory` (likely a different trash), and a flag
+  on the scope (the silent state §6 avoids).
+- Detached volumes on Android (RESOLVED 2026-09-30, owner + #68
+  review): read as `permission-lost` (`reason: volume-absent`) for
+  ExternalStorageProvider via `StorageManager` (§5). Same principle
+  as the trash guard: two separate provider-specific guards, each
+  making the provider's real state loud. Other providers stay
+  `not-found`.
 
 ## 10. Recommendation
 

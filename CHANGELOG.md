@@ -15,6 +15,14 @@
   * Failures are `PlatformException`s whose `code` is the error kind
     (`permission-lost`, `not-found`, `scope-closed`), with the native
     domain and code in `details`. Other failures keep their own code.
+  * A folder deleted in the iOS Files app (moved into `.Trash`) reads as
+    `not-found`, `reason: trashed`. On Android a folder on an unmounted
+    volume of the system storage provider (a pulled USB stick or SD card)
+    reads as `permission-lost`, `reason: volume-absent`, not as deleted.
+  * `acquire` is a root-isolate verb: an acquire from a second isolate
+    releases the first one's holds, and is logged as a warning.
+  * On Android, `openDirectory` accepts a read-only tree and reports
+    `persistable` accordingly.
 * Android: every method-channel call now runs on a shared background
   TaskQueue instead of the main thread, so slow providers no longer block
   frames. The pickers and `init` still hop to the main thread. Launch URLs

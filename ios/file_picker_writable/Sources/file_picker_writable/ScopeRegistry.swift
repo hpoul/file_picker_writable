@@ -12,6 +12,8 @@ struct TaxonomyError: Error {
   let kind: String
   let message: String
   var underlying: Error? = nil
+  /// Extra entries for the error's details map, e.g. a `reason`.
+  var details: [String: Any] = [:]
 }
 
 /// Security-scope holds across Dart calls (doc/scope-registry-plan.md §5).

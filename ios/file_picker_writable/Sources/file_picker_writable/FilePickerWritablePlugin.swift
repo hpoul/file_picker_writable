@@ -54,7 +54,8 @@ public class FilePickerWritablePlugin: NSObject, FlutterPlugin {
   // when this plugin is integrated via CocoaPods.
   @objc(registerWithRegistrar:)
   public static func register(with registrar: FlutterPluginRegistrar) {
-    _ = FilePickerWritablePlugin(registrar: registrar)
+    // Published so the engine calls detachFromEngine(for:) on teardown.
+    registrar.publish(FilePickerWritablePlugin(registrar: registrar))
   }
 
   public init(registrar: FlutterPluginRegistrar) {
@@ -107,6 +108,11 @@ public class FilePickerWritablePlugin: NSObject, FlutterPlugin {
   private func logError(_ message: String) {
     print("ERROR", "FilePickerWritablePlugin:", message)
     sendEvent(event: ["type": "log", "level": "ERROR", "message": message])
+  }
+
+  private func logWarning(_ message: String) {
+    print("WARNING", "FilePickerWritablePlugin:", message)
+    sendEvent(event: ["type": "log", "level": "warning", "message": message])
   }
 
   public func handle(_ call: FlutterMethodCall, result: @escaping FlutterResult) {
@@ -333,7 +339,10 @@ public class FilePickerWritablePlugin: NSObject, FlutterPlugin {
       let acquired = try _scopes.acquire(url: url, session: session)
       token = acquired.token
       if acquired.dropped > 0 {
-        logDebug("New Dart session: balanced \(acquired.dropped) stale scope token(s).")
+        // Expected once after a hot restart. Anything else means a second
+        // isolate called acquire, which breaks the root-isolate rule and
+        // just released the other isolate's holds.
+        logWarning("New Dart session: released \(acquired.dropped) scope token(s) of the previous one. acquire is a root-isolate verb.")
       }
     } catch is ScopeRegistry.StartRefused {
       throw TaxonomyError(kind: ErrorKind.permissionLost, message: "startAccessingSecurityScopedResource refused for \(url)")
@@ -341,6 +350,17 @@ public class FilePickerWritablePlugin: NSObject, FlutterPlugin {
     do {
       guard (try? url.checkResourceIsReachable()) == true else {
         throw TaxonomyError(kind: ErrorKind.notFound, message: "Nothing at \(url.path)")
+      }
+      // A Files delete is a move into the provider's `.Trash`, and the
+      // bookmark follows it there. Deleted must read as gone, never as a
+      // live folder the app would list and write into. No public resource
+      // key reports "in the trash", so this matches a whole path component.
+      if url.standardizedFileURL.pathComponents.contains(".Trash") {
+        throw TaxonomyError(
+          kind: ErrorKind.notFound,
+          message: "\(url.lastPathComponent) is in the Trash",
+          details: ["reason": "trashed"]
+        )
       }
       let fresh = isStale ? try url.bookmarkData().base64EncodedString() : identifier
       logDebug("acquire: isStale=\(isStale), \(_scopes.counts) held.")
@@ -376,9 +396,10 @@ public class FilePickerWritablePlugin: NSObject, FlutterPlugin {
   /// anything else stays loud under its own domain.
   private func _taxonomyError(_ error: Error) -> FlutterError {
     if let taxonomy = error as? TaxonomyError {
-      var details: [String: Any] = [:]
+      var details = taxonomy.details
       if let underlying = taxonomy.underlying as NSError? {
-        details = ["domain": underlying.domain, "code": underlying.code]
+        details["domain"] = underlying.domain
+        details["code"] = underlying.code
       }
       return FlutterError(code: taxonomy.kind, message: taxonomy.message, details: details)
     }

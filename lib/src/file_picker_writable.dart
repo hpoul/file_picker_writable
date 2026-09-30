@@ -84,8 +84,14 @@ class FileInfo {
 /// Error kinds, carried as [PlatformException.code] with the native
 /// domain and code in [PlatformException.details] where available:
 /// - `permission-lost`: the grant was revoked, the media detached, the
-///   scope start was refused, or a bookmark no longer resolves.
-/// - `not-found`: the grant is held but the file or folder is gone.
+///   scope start was refused, or a bookmark no longer resolves. On Android
+///   a detached volume is recognized for the system's own storage provider
+///   (internal storage, SD card, USB), with `reason: volume-absent` in the
+///   details; other providers are opaque, and a detached volume there
+///   reads as `not-found`.
+/// - `not-found`: the grant is held but the file or folder is gone. On iOS
+///   a folder deleted in Files (moved into the provider's `.Trash`) reads
+///   as gone too, with `reason: trashed` in the details.
 /// - `scope-closed`: a released scope was used (verbs that take a scope).
 ///
 /// Anything else stays loud under its own native code.
@@ -206,7 +212,8 @@ class FilePickerWritable {
       final event = (eventArg as Map<dynamic, dynamic>).cast<String, String>();
       if (event['type'] == 'log') {
         final exception = event['exception'] ?? '';
-        _logger.fine(
+        _logger.log(
+          event['level'] == 'warning' ? Level.WARNING : Level.FINE,
           'Native Log: ${event['level']}: ${event['message']} '
           '${exception == '' ? '' : ' Exception: $exception'}',
         );
@@ -439,6 +446,12 @@ class FilePickerWritable {
   /// copies the file. Failures are [PlatformException]s with the kinds
   /// listed on [AcquiredScope].
   ///
+  /// Call this from the root isolate only. Native holds belong to one Dart
+  /// isolate at a time, so that a hot restart can release the old isolate's
+  /// holds: an acquire from a second isolate releases every hold the first
+  /// one had, and native logs a warning when that happens. Helper isolates
+  /// work under a scope the root acquired.
+  ///
   /// Android and iOS only; throws [UnsupportedError] elsewhere.
   @experimental
   Future<AcquiredScope> acquire({required String identifier}) async {
@@ -461,6 +474,9 @@ class FilePickerWritable {
   @experimental
   Future<void> release(AcquiredScope scope) async {
     _logger.finest('release()');
+    // Forgotten before the channel call, on purpose: the scope is released
+    // from Dart's view even if the native call fails, so a retry is the
+    // no-op, never a second native release.
     if (!_liveScopeIds.remove(scope.id)) {
       return;
     }
