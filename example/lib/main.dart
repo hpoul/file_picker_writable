@@ -32,15 +32,14 @@ class AppData implements HasToJson {
   final List<FileInfo> files;
 
   static AppData fromJson(Map<String, dynamic> json) => AppData(
-      files: (json['files'] as List<dynamic>)
-          .where((dynamic element) => element != null)
-          .map((dynamic e) => FileInfo.fromJson(e as Map<String, dynamic>))
-          .toList());
+    files: (json['files'] as List<dynamic>)
+        .where((dynamic element) => element != null)
+        .map((dynamic e) => FileInfo.fromJson(e as Map<String, dynamic>))
+        .toList(),
+  );
 
   @override
-  Map<String, dynamic> toJson() => <String, dynamic>{
-        'files': files,
-      };
+  Map<String, dynamic> toJson() => <String, dynamic>{'files': files};
 
   AppData copyWith({required List<FileInfo> files}) => AppData(files: files);
 }
@@ -57,11 +56,7 @@ class MyAppState extends State<MyApp> {
 
   @override
   Widget build(BuildContext context) {
-    return MaterialApp(
-      home: MainScreen(
-        appDataBloc: _appDataBloc,
-      ),
-    );
+    return MaterialApp(home: MainScreen(appDataBloc: _appDataBloc));
   }
 }
 
@@ -91,7 +86,8 @@ class MainScreenState extends State<MainScreen> {
         fileInfo,
         file,
         context,
-        bodyTextPrefix: 'Should open file from external app.\n\n'
+        bodyTextPrefix:
+            'Should open file from external app.\n\n'
             'fileName: ${fileInfo.fileName}\n'
             'uri: ${fileInfo.uri}\n\n\n',
       );
@@ -120,9 +116,7 @@ class MainScreenState extends State<MainScreen> {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      appBar: AppBar(
-        title: const Text('File Picker Example'),
-      ),
+      appBar: AppBar(title: const Text('File Picker Example')),
       body: SingleChildScrollView(
         child: SizedBox(
           width: double.infinity,
@@ -153,10 +147,12 @@ class MainScreenState extends State<MainScreen> {
                 DropTargetDemo(pickerState: _pickerState),
                 ...?(!snapshot.hasData
                     ? null
-                    : snapshot.data!.files.map((fileInfo) => FileInfoDisplay(
+                    : snapshot.data!.files.map(
+                        (fileInfo) => FileInfoDisplay(
                           fileInfo: fileInfo,
                           appDataBloc: _appDataBloc,
-                        ))),
+                        ),
+                      )),
               ],
             ),
           ),
@@ -166,12 +162,15 @@ class MainScreenState extends State<MainScreen> {
   }
 
   Future<void> _openFilePicker() async {
-    final fileInfo =
-        await FilePickerWritable().openFile((fileInfo, file) async {
+    final fileInfo = await FilePickerWritable().openFile((
+      fileInfo,
+      file,
+    ) async {
       _logger.fine('Got picker result: $fileInfo');
       final data = await _appDataBloc.store.load();
-      await _appDataBloc.store
-          .save(data.copyWith(files: data.files + [fileInfo]));
+      await _appDataBloc.store.save(
+        data.copyWith(files: data.files + [fileInfo]),
+      );
       return fileInfo;
     });
     if (fileInfo == null) {
@@ -193,8 +192,9 @@ class MainScreenState extends State<MainScreen> {
       return;
     }
     final data = await _appDataBloc.store.load();
-    await _appDataBloc.store
-        .save(data.copyWith(files: data.files + [fileInfo]));
+    await _appDataBloc.store.save(
+      data.copyWith(files: data.files + [fileInfo]),
+    );
   }
 }
 
@@ -250,12 +250,15 @@ class FileInfoDisplay extends StatelessWidget {
                     onPressed: () async {
                       try {
                         await FilePickerWritable().readFile(
-                            identifier: fileInfo.identifier,
-                            reader: (fileInfo, file) async {
-                              await SimpleAlertDialog
-                                  .readFileContentsAndShowDialog(
-                                      fileInfo, file, context);
-                            });
+                          identifier: fileInfo.identifier,
+                          reader: (fileInfo, file) async {
+                            await SimpleAlertDialog.readFileContentsAndShowDialog(
+                              fileInfo,
+                              file,
+                              context,
+                            );
+                          },
+                        );
                       } on Exception catch (e) {
                         if (!context.mounted) {
                           return;
@@ -268,26 +271,28 @@ class FileInfoDisplay extends StatelessWidget {
                   TextButton(
                     onPressed: () async {
                       await FilePickerWritable().writeFile(
-                          identifier: fileInfo.identifier,
-                          writer: (file) async {
-                            final content =
-                                'New Content written at ${DateTime.now()}.\n\n';
-                            await file.writeAsString(content);
-                            if (!context.mounted) {
-                              return;
-                            }
-                            await SimpleAlertDialog(
-                              bodyText: 'Written: $content',
-                            ).show(context);
-                          });
+                        identifier: fileInfo.identifier,
+                        writer: (file) async {
+                          final content =
+                              'New Content written at ${DateTime.now()}.\n\n';
+                          await file.writeAsString(content);
+                          if (!context.mounted) {
+                            return;
+                          }
+                          await SimpleAlertDialog(
+                            bodyText: 'Written: $content',
+                          ).show(context);
+                        },
+                      );
                     },
                     child: const Text('Overwrite'),
                   ),
                   IconButton(
                     onPressed: () async {
                       try {
-                        await FilePickerWritable()
-                            .disposeIdentifier(fileInfo.identifier);
+                        await FilePickerWritable().disposeIdentifier(
+                          fileInfo.identifier,
+                        );
                       } on Exception catch (e) {
                         if (!context.mounted) {
                           return;
@@ -295,15 +300,18 @@ class FileInfoDisplay extends StatelessWidget {
                         await SimpleAlertDialog.showErrorDialog(e, context);
                       }
                       final appData = await appDataBloc.store.load();
-                      await appDataBloc.store.save(appData.copyWith(
+                      await appDataBloc.store.save(
+                        appData.copyWith(
                           files: appData.files
                               .where((element) => element != fileInfo)
-                              .toList()));
+                              .toList(),
+                        ),
+                      );
                     },
                     icon: const Icon(Icons.remove_circle_outline),
                   ),
                 ],
-              )
+              ),
             ],
           ),
         ),
@@ -313,8 +321,7 @@ class FileInfoDisplay extends StatelessWidget {
 }
 
 class SimpleAlertDialog extends StatelessWidget {
-  const SimpleAlertDialog(
-      {super.key, this.titleText, required this.bodyText});
+  const SimpleAlertDialog({super.key, this.titleText, required this.bodyText});
   final String? titleText;
   final String bodyText;
 
@@ -329,10 +336,11 @@ class SimpleAlertDialog extends StatelessWidget {
       content: Text(bodyText),
       actions: <Widget>[
         TextButton(
-            child: const Text('Ok'),
-            onPressed: () {
-              Navigator.of(context).pop();
-            }),
+          child: const Text('Ok'),
+          onPressed: () {
+            Navigator.of(context).pop();
+          },
+        ),
       ],
     );
   }
@@ -397,7 +405,8 @@ class DropTargetDemoState extends State<DropTargetDemo> {
     for (final item in drop.items) {
       final bytes = await item.file.readAsBytes();
       summaries.add(
-          '${item.fileInfo.fileName ?? 'unnamed'} (${bytes.length} bytes)');
+        '${item.fileInfo.fileName ?? 'unnamed'} (${bytes.length} bytes)',
+      );
       _logger.fine('Drop: ${item.fileInfo}');
     }
     if (!mounted) {
@@ -450,17 +459,12 @@ class DropTargetDemoState extends State<DropTargetDemo> {
                   textAlign: TextAlign.center,
                 ),
               ),
-              ..._drops.map((summary) => Text(
-                    summary,
-                    style: theme.textTheme.bodySmall,
-                  )),
-              if (_drops.isEmpty)
-                ...[
-                  Text(
-                    'No drops yet.',
-                    style: theme.textTheme.bodySmall,
-                  ),
-                ],
+              ..._drops.map(
+                (summary) => Text(summary, style: theme.textTheme.bodySmall),
+              ),
+              if (_drops.isEmpty) ...[
+                Text('No drops yet.', style: theme.textTheme.bodySmall),
+              ],
             ],
           ),
         ),
