@@ -21,7 +21,7 @@ access:
 
 - Gap-2b chunk reads would pay bookmark-resolve + scope
   acquire/release per chunk (hundreds of round trips per file) and
-  could not hold a `FileHandle` open across chunks.
+  could not hold an open fd across chunks.
 - Stale bookmarks are detected but never repaired: the plugin reads
   `bookmarkDataIsStale` today and drops it on the floor, so a moved
   file silently keeps working until it doesn't, and the app never gets
@@ -127,9 +127,9 @@ Notes:
   and `repaired` makes it checkable. Old identifier keeps working
   until the app drops it; no flag day.
 - Single-shot vs repeated split (peer-confirmed): `listChildren`
-  (Gap 1) manages scope internally per call; `openRead`/`readChunk`
-  (Gap 2b) require a live `AcquiredScope` on every platform — 2b's
-  `openRead` takes the scope, never a raw identifier. Small one-shot
+  (Gap 1) manages scope internally per call; 2b's `openRead` takes
+  the scope, never a raw identifier, and `FdReader` checks token
+  liveness (reads are FFI, not channel verbs). Small one-shot
   reads on Apple (index files, fingerprint hashes) skip sessions
   entirely: `path` plus `dart:io` under the held scope.
 - `path` is null on Android by design (no filesystem path exists for
@@ -178,6 +178,8 @@ Notes:
   native resource is held, so refcounting is trivially satisfied.
 - `release`: drop the token. No-op by design, kept for API symmetry
   so Dart code paths stay identical across platforms.
+- Control threading: the shared concurrent background TaskQueue
+  (uniform rule for every Android control verb).
 
 ## 6. Error taxonomy
 
@@ -240,7 +242,7 @@ Same bar as Gaps 1 and 2b, evaluated independently:
 Ship 3a experimental on iOS first (the platform where it does real
 work), Android validation alongside for API symmetry, macOS stubbed
 (boundary decision, §9). Land before Gap-2b native code starts, since
-2b's iOS backend holds `FileHandle`s inside these scopes — but the
+2b's backends open fds under these scopes — but the
 Dart API review for all three gaps can run in parallel. The
 acquisition verb (Gap-3 plan) lands first of all; #20 is closed and
 no external spec gates native code.

@@ -147,8 +147,10 @@ Notes:
   URIs from `buildDocumentUriUsingTree`, embedding the tree ID so the
   tree is recoverable from any subdir identifier. Opaque to Dart —
   never parsed there.
-- Threading: cursor work on `Dispatchers.IO`, same as the existing
-  read path. Close the cursor in `finally`.
+- Threading: serve on the shared concurrent background TaskQueue
+  and run cursor work directly on queue threads (no second hop —
+  the queue is concurrent, so a slow provider does not stall other
+  control). Close the cursor in `finally`.
 
 ### iOS (Swift, after Gap 1a lands)
 
@@ -215,14 +217,21 @@ Same bar as Gap 2b, evaluated independently:
   prototypes test against it. #20 is closed — no external gating. The
   debug-only acquisition path stays rejected (throwaway URI shapes
   and flags can poison the prototypes).
-- Should `listChildren` accept a Gap-1a scope handle as an alternative
-  to a raw identifier on Apple? Lean no for v1 (per-call scope is one
-  round trip either way), but the peer's R-list may already pin this.
+- `listChildren` takes a raw identifier (CONFIRMED 2026-09-30,
+  peer-verified): per-call scope internally, no scope-handle
+  overload — the single-shot/repeated split stays clean.
 - `size`/`lastModified` null frequency across real providers? Measure
   during prototype; decides how loudly docs must warn.
 - Pagination for very large directories (cursor window vs full list)?
   Lean full list for v1; revisit if 10k-child memory or latency
   disappoints.
+- Containment for untrusted entry points: how does native prove a
+  picked directory is inside the blessed parent (the Gap-3 Add
+  refusal needs it)? Options: a containment query verb,
+  `findDocumentPath` (API 26+, absent below), tree-URI prefix
+  comparison, or the interim listing rule (reject anything the
+  parent listing doesn't show). Needs a decision before untrusted
+  picks are accepted.
 
 ## 10. Recommendation
 
