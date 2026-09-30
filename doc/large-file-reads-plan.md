@@ -70,10 +70,11 @@ Dart equivalent) rather than byte shoveling.
 ### 3d. dart:ffi fd handoff (rejected)
 
 Pipes kill the seeking that would justify it; blocking still needs
-isolate machinery; fd lifetime has no destructors behind it (leak =
-fd-table exhaustion in a media library); error surface is raw `errno`;
-and the plugin would own a reimplemented file API. Fewest copies,
-worst everything else.
+isolate machinery; fd lifetime has only GC-driven finalizers behind
+it (`NativeFinalizer` exists but fires nondeterministically — leak
+under churn = fd-table exhaustion in a media library); error surface
+is raw `errno`; and the plugin would own a reimplemented file API.
+Fewest copies, worst everything else.
 
 ### Overhead note (why 3a over 3c despite JNI's lower call cost)
 
