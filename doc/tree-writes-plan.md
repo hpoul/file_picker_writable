@@ -128,7 +128,7 @@ Future<ChildEntry> createDirectory({
 @experimental
 Future<void> deleteEntry({
   required String identifier, // Single-shot: scope handled internally.
-  bool recursive = false,     // Non-recursive on a non-empty dir is loud.
+  bool recursive = false,     // Non-recursive: checked-by-listing (best-effort).
 });
 
 @experimental
@@ -170,6 +170,15 @@ Notes:
   `already-exists`, so abort can never destroy an overwrite
   victim and crash partials stay identifiable for the orphan
   sweep. Callers needing overwrite delete first, deliberately.
+  Atomic on iOS (`O_CREAT|O_EXCL`); best-effort on Android — no
+  exclusive-create primitive exists, so a concurrent same-name
+  create may slip past list-first when the provider returns the
+  existing URI. Documented, not hidden.
+- Non-recursive delete is best-effort on both platforms:
+  emptiness is checked by listing first, but no atomic
+  delete-if-empty primitive exists — a concurrently created
+  child may be deleted anyway. Callers needing strictness must
+  quiesce writers. The race window is disclosed, not hidden.
 - Loud-on-taken-name is the documented `createDirectory` and
   `moveEntry` rule (peer-pinned): creating a folder or moving onto
   an existing sibling name throws `already-exists` — never a silent
@@ -203,7 +212,10 @@ Notes:
   name (auto-rename ⇒ delete the residue, loud `already-exists`).
   Open the fresh child for writing and hold the `OutputStream` in
   the session registry. Validate the scope token (released ⇒ loud
-  `scope-closed`).
+  `scope-closed`). Residual race (no exclusive-create primitive):
+  a concurrent same-name create may slip past list-first when the
+  provider returns the existing URI instead of auto-renaming —
+  verify-after only catches the auto-rename case.
 - `writeChunk`: append bytes, flush per chunk (provider visibility +
   crash hygiene), return the new total. Everything on
   `Dispatchers.IO`.
@@ -221,6 +233,8 @@ Notes:
   depth-first), because provider-side recursive delete is
   discretionary — never trust it. Non-recursive on a non-empty
   directory is loud `directory-not-empty`, checked by listing first.
+  Best-effort: no atomic delete-if-empty primitive — a child created
+  after the listing may be deleted anyway (see §4).
 - `moveEntry`: source parent comes from the passed scope — no
   `findDocumentPath` needed on any API level. List the target
   parent first; taken name is loud `already-exists`, not
@@ -235,9 +249,10 @@ Notes:
 
 - `openDirectory`: document picker in folder mode, bookmark the
   directory, same `FileInfo` encoding as file picks.
-- `openWrite`: resolve parent scope URL + name (taken name ⇒ loud
-  `already-exists`), create the file, hold a `FileHandle` for
-  writing. `writeChunk`: `write` +
+- `openWrite`: resolve parent scope URL + name, create the file
+  atomically with exclusive semantics (`O_CREAT|O_EXCL` — taken
+  name ⇒ loud `already-exists`, no TOCTOU), construct the
+  `FileHandle` from that descriptor for writing. `writeChunk`: `write` +
   `synchronizeFile` per chunk, return the total.
   `closeWrite`/`abortWrite` mirror Android (abort removes the
   partial). Off main; results hop to main per convention.
@@ -246,7 +261,9 @@ Notes:
   `moveEntry`: `FileManager` under a per-call scope (single-shot
   verbs), with the plugin's own recursive walk for
   `deleteEntry(recursive: true)` — same rule as Android: never
-  trust provider-side recursion. `FileManager` file-exists errors
+  trust provider-side recursion. Non-recursive checks emptiness
+  by listing first with the same best-effort race as Android
+  (`FileManager.removeItem` is itself recursive). `FileManager` file-exists errors
   map to loud `already-exists` (nothing is created, so no residue
   cleanup); target names are pre-checked before `moveItem`, and
   move-then-rename is sequenced like Android (source parent from
