@@ -23,12 +23,15 @@ class TaxonomyException(
  * stays loud under its own exception class, never coerced into a kind.
  */
 fun MethodChannel.Result.taxonomyError(e: Throwable) {
-  val native = (e as? TaxonomyException)?.cause ?: e
-  val details = mapOf(
-    "domain" to "java",
-    "code" to native.javaClass.name,
-    "message" to native.message
-  )
+  // A TaxonomyException raised by the plugin itself has no native code.
+  val native = if (e is TaxonomyException) e.cause else e
+  val details = native?.let {
+    mapOf(
+      "domain" to "java",
+      "code" to it.javaClass.name,
+      "message" to it.message
+    )
+  } ?: emptyMap()
   val code = when (e) {
     is TaxonomyException -> e.kind
     is SecurityException -> ErrorKind.PERMISSION_LOST

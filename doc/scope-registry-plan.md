@@ -191,8 +191,9 @@ Notes:
   (existing `readFileInfo` pattern; a bare tree URI is queried as
   its root document via `buildDocumentUriUsingTree`) and return
   `path: null`. A null or empty cursor is `not-found`
-  (`DocumentsProvider.query` returns null on a missing document —
-  AOSP from memory, confirm on device). No native resource is
+  (`DocumentsProvider.query` returns null on a missing document;
+  confirmed for ExternalStorageProvider on an API 36 emulator,
+  2026-09-30). No native resource is
   held, so refcounting is trivially satisfied.
 - `release`: drop the token. No-op by design, kept for API symmetry
   so Dart code paths stay identical across platforms. The token set
@@ -239,6 +240,12 @@ kinds need a taxonomy review before graduation.
   (see §9).
 - Android device: acquire on live vs revoked grants (revoke via app
   settings); assert no temp growth (acquire must never copy).
+  Observed on an API 36 emulator (2026-09-30, R1/1a PR): cancel →
+  null; tree pick → `fileName` is the folder label; acquire after
+  force-stop + relaunch holds; `disposeAllIdentifiers` →
+  `permission-lost`; folder removed under a live grant →
+  `not-found`; cache size unchanged across acquires; a cold-launch
+  and a warm VIEW intent each reached Dart exactly once.
 - Cross-doc interplay: Gap-1 listing then Gap-2b chunk reads under
   one scope, on each platform, once all three exist.
 
