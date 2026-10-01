@@ -585,6 +585,422 @@ class FilePickerWritableImpl(
   }
 
   /**
+   * Creates the directory [name] under the directory a live scope token
+   * names (tree-writes-plan §5). The name is looked up first, so a taken
+   * one is `already-exists` without trying; a stored name that differs
+   * from the request is undone by [requireCreatedName].
+   */
+  @WorkerThread
+  fun createDirectory(token: String, name: String): Map<String, Any?> {
+    requireLeaf(name)
+    val parent = requireWritableScope(token)
+    if (lookupChildRow(parent, name) != null) {
+      throw alreadyExists(name)
+    }
+    val contentResolver = requireContext().contentResolver
+    val created = onVolume(parent.documentUri) {
+      DocumentsContract.createDocument(
+        contentResolver, parent.documentUri, DocumentsContract.Document.MIME_TYPE_DIR, name
+      )
+    } ?: throw missingDocument(parent.documentUri)
+    val row = rowBelowRoot(created) ?: throw missingDocument(created)
+    requireCreatedName(parent, created, row, name)
+    return row.toResult(parent.treeUri)
+  }
+
+  /**
+   * Deletes the document [identifier] names; one that is already gone is
+   * success. A directory's children are the plugin's own depth-first walk
+   * (provider-side recursion is discretionary, so never trusted), and a
+   * non-empty one without [recursive] is `directory-not-empty`. Both are
+   * decided by listing: best-effort against a concurrent writer.
+   */
+  @WorkerThread
+  fun deleteEntry(identifier: String, recursive: Boolean) {
+    val uri = Uri.parse(identifier)
+    requireBelowRoot(uri)
+    requireWriteGrant(uri)
+    val documentUri = documentUriFor(uri)
+    val row = rowBelowRoot(documentUri) ?: return
+    if (row.isDirectory) {
+      val directory = Directory(
+        treeUriOf(uri), DocumentsContract.getDocumentId(documentUri), documentUri, isTreeRoot = false
+      )
+      val children = childrenBelowRoot(directory) ?: return
+      if (children.isNotEmpty()) {
+        if (!recursive) {
+          throw TaxonomyException(
+            ErrorKind.DIRECTORY_NOT_EMPTY, "${row.name} holds ${children.size} entries"
+          )
+        }
+        deleteChildren(directory, children)
+      }
+    }
+    deleteDocument(documentUri)
+  }
+
+  /**
+   * Moves [identifier] from the directory [sourceToken] names into the one
+   * [targetToken] names, renamed to [newName] when given (tree-writes-plan
+   * §4/§5). Taken target names are refused before anything moves; a
+   * parent change runs `moveDocument`, then `renameDocument`, rolling the
+   * move back when the rename fails.
+   */
+  @WorkerThread
+  fun moveEntry(
+    identifier: String,
+    sourceToken: String,
+    targetToken: String,
+    newName: String?
+  ): Map<String, Any?> {
+    if (newName != null) {
+      requireLeaf(newName)
+    }
+    val uri = Uri.parse(identifier)
+    requireBelowRoot(uri)
+    val source = requireWritableScope(sourceToken)
+    val target = requireWritableScope(targetToken)
+    requireWriteGrant(uri)
+    val itemUri = documentUriFor(uri)
+    val itemId = DocumentsContract.getDocumentId(itemUri)
+    requireSameVolume(uri, itemId, source, target)
+    val row = rowBelowRoot(itemUri) ?: throw missingDocument(itemUri)
+    requireChildOf(source, itemId)
+    val finalName = newName ?: row.name
+    if (source.documentId == target.documentId) {
+      if (finalName == row.name) {
+        return row.toResult(target.treeUri)
+      }
+      requireFree(target, finalName)
+      val renamed = renameVerified(target, itemUri, row.name, finalName)
+      return (rowBelowRoot(renamed) ?: throw missingDocument(renamed)).toResult(target.treeUri)
+    }
+    // Both names up front: a move must never strand the entry under a name
+    // the rename then cannot take.
+    requireFree(target, row.name)
+    if (finalName != row.name) {
+      requireFree(target, finalName)
+    }
+    val moved = moveDocument(itemUri, source, target, row.name)
+    if (finalName == row.name) {
+      return (rowBelowRoot(moved) ?: throw missingDocument(moved)).toResult(target.treeUri)
+    }
+    val renamed = try {
+      renameVerified(target, moved, row.name, finalName)
+    } catch (e: TaxonomyException) {
+      if (e.kind == ErrorKind.MOVE_PARTIAL) {
+        throw e
+      }
+      moveBack(moved, source, target, e)
+      throw e
+    } catch (e: Exception) {
+      moveBack(moved, source, target, e)
+      throw e
+    }
+    return (rowBelowRoot(renamed) ?: throw missingDocument(renamed)).toResult(target.treeUri)
+  }
+
+  private fun requireLeaf(name: String) {
+    if (!isLeafName(name)) {
+      throw TaxonomyException(ErrorKind.INVALID_NAME, "Not a single leaf name: \"$name\"")
+    }
+  }
+
+  /**
+   * The directory a live scope token names, under a persisted write grant
+   * (`scope-closed`, `permission-lost`, `not-a-directory`, `not-found`).
+   */
+  @WorkerThread
+  private fun requireWritableScope(token: String): Directory {
+    val identifier = scopes.identifierOf(token)
+      ?: throw TaxonomyException(ErrorKind.SCOPE_CLOSED, "Scope $token was released")
+    requireWriteGrant(Uri.parse(identifier))
+    return requireDirectory(identifier)
+  }
+
+  /**
+   * `permission-lost` unless a persisted write grant covers [uri]; a
+   * read-only grant (openDirectory accepts one) says so in the details.
+   */
+  @WorkerThread
+  private fun requireWriteGrant(uri: Uri) {
+    val contentResolver = requireContext().contentResolver
+    if (hasPersistedGrant(contentResolver, uri, write = true)) {
+      return
+    }
+    if (hasPersistedReadGrant(contentResolver, uri)) {
+      throw TaxonomyException(
+        ErrorKind.PERMISSION_LOST,
+        "The grant covering $uri is read-only",
+        details = mapOf("reason" to "read-only")
+      )
+    }
+    throw TaxonomyException(ErrorKind.PERMISSION_LOST, "No persisted grant covers $uri")
+  }
+
+  /**
+   * `root-protected` for a picker's own result: a tree's root, or a single
+   * picked document (not a tree URI at all). Only entries below a picked
+   * folder may be deleted or moved, so one wrong identifier cannot take a
+   * whole pick with it.
+   */
+  private fun requireBelowRoot(uri: Uri) {
+    val isPickedRoot = !DocumentsContract.isTreeUri(uri) ||
+      DocumentsContract.getDocumentId(documentUriFor(uri)) == DocumentsContract.getTreeDocumentId(uri)
+    if (isPickedRoot) {
+      throw TaxonomyException(
+        ErrorKind.ROOT_PROTECTED,
+        "$uri is a picked root: only entries inside a picked folder can be deleted or moved"
+      )
+    }
+  }
+
+  private fun treeUriOf(uri: Uri): Uri =
+    DocumentsContract.buildTreeDocumentUri(uri.authority, DocumentsContract.getTreeDocumentId(uri))
+
+  /**
+   * The row of a document below a tree's root, or null when it is gone:
+   * there the provider's tree check throws `IllegalArgumentException` for
+   * a missing document instead of returning no row. A detached volume is
+   * thrown as `volume-absent`, never answered as gone.
+   */
+  @WorkerThread
+  private fun rowBelowRoot(documentUri: Uri): DocumentRow? {
+    val row = try {
+      queryRow(documentUri)
+    } catch (e: IllegalArgumentException) {
+      plugin.logDebug("Row query threw ${e.message}; treating it as gone")
+      null
+    }
+    if (row == null) {
+      absentVolume(documentUri)?.let { throw it }
+    }
+    return row
+  }
+
+  /** [directory]'s children, or null when it is gone (as [rowBelowRoot]). */
+  @WorkerThread
+  private fun childrenBelowRoot(directory: Directory): List<DocumentRow>? {
+    val children = try {
+      queryChildren(directory)
+    } catch (e: IllegalArgumentException) {
+      null
+    }
+    if (children == null) {
+      absentVolume(directory.documentUri)?.let { throw it }
+    }
+    return children
+  }
+
+  /** Depth-first: every child before its directory. */
+  @WorkerThread
+  private fun deleteChildren(directory: Directory, children: List<DocumentRow>) {
+    for (child in children) {
+      val childUri = DocumentsContract.buildDocumentUriUsingTree(directory.treeUri, child.documentId)
+      if (child.isDirectory) {
+        val sub = Directory(directory.treeUri, child.documentId, childUri, isTreeRoot = false)
+        childrenBelowRoot(sub)?.let { deleteChildren(sub, it) }
+      }
+      deleteDocument(childUri)
+    }
+  }
+
+  /** Deletes one document; one that is gone by now is success. */
+  @WorkerThread
+  private fun deleteDocument(documentUri: Uri) {
+    val contentResolver = requireContext().contentResolver
+    val deleted = try {
+      onVolume(documentUri) { DocumentsContract.deleteDocument(contentResolver, documentUri) }
+    } catch (e: TaxonomyException) {
+      throw e
+    } catch (e: Exception) {
+      if (rowBelowRoot(documentUri) == null) {
+        return
+      }
+      throw e
+    }
+    if (!deleted && rowBelowRoot(documentUri) != null) {
+      throw IllegalStateException("The provider did not delete $documentUri")
+    }
+  }
+
+  /** Deletes a document the plugin just created by mistake, logging a failure. */
+  @WorkerThread
+  private fun deleteResidue(documentUri: Uri) {
+    try {
+      deleteDocument(documentUri)
+    } catch (e: Exception) {
+      plugin.logWarning("Could not delete the residue $documentUri: $e")
+    }
+  }
+
+  private fun alreadyExists(name: String) =
+    TaxonomyException(ErrorKind.ALREADY_EXISTS, "\"$name\" is taken", details = mapOf("name" to name))
+
+  /** `already-exists` when [name] is taken under [directory]. */
+  @WorkerThread
+  private fun requireFree(directory: Directory, name: String) {
+    if (lookupChildRow(directory, name) != null) {
+      throw alreadyExists(name)
+    }
+  }
+
+  /**
+   * Undoes a create whose stored name is not the requested [name]: the
+   * fresh, empty residue is deleted, then `already-exists` when [name] is
+   * taken by now (a concurrent create, and the provider auto-renamed
+   * ours), else `invalid-name` (the provider cleaned the name).
+   */
+  @WorkerThread
+  private fun requireCreatedName(parent: Directory, created: Uri, row: DocumentRow, name: String) {
+    if (row.name == name) {
+      return
+    }
+    val taken = lookupChildRow(parent, name) != null
+    deleteResidue(created)
+    if (taken) {
+      throw alreadyExists(name)
+    }
+    throw invalidName(name, row.name)
+  }
+
+  private fun invalidName(requested: String, actual: String) = TaxonomyException(
+    ErrorKind.INVALID_NAME,
+    "The provider stored \"$requested\" as \"$actual\"",
+    details = mapOf("requested" to requested, "actual" to actual)
+  )
+
+  /**
+   * `unsupported-move` unless the entry and both parents share a provider,
+   * and on ExternalStorageProvider a volume: a move across them is a copy
+   * plus a delete, out of scope for v1.
+   */
+  private fun requireSameVolume(uri: Uri, itemId: String, source: Directory, target: Directory) {
+    val authority = uri.authority
+    val sameProvider = source.treeUri.authority == authority && target.treeUri.authority == authority
+    val sameVolume = authority != StorageVolumes.AUTHORITY ||
+      StorageVolumes.volumeOf(itemId) == StorageVolumes.volumeOf(target.documentId)
+    if (!sameProvider || !sameVolume) {
+      throw TaxonomyException(
+        ErrorKind.UNSUPPORTED_MOVE,
+        "Moving $uri into ${target.documentUri} crosses a provider or volume: copy, then delete"
+      )
+    }
+  }
+
+  /**
+   * `not-found` unless [itemId] sits directly in [source]: derived from
+   * the ID on ExternalStorageProvider, by listing elsewhere.
+   */
+  @WorkerThread
+  private fun requireChildOf(source: Directory, itemId: String) {
+    val isChild = if (source.treeUri.authority == StorageVolumes.AUTHORITY) {
+      StorageVolumes.parentDocumentId(itemId) == source.documentId
+    } else {
+      requireChildren(source).any { it.documentId == itemId }
+    }
+    if (!isChild) {
+      throw TaxonomyException(
+        ErrorKind.NOT_FOUND,
+        "$itemId is not directly in ${source.documentId}",
+        details = mapOf("reason" to "not-a-child")
+      )
+    }
+  }
+
+  /**
+   * `moveDocument` from [source] into [target], returning the moved
+   * document's URI under the target's tree. The provider throws on a
+   * collision rather than renaming; a name taken since the pre-check reads
+   * as `already-exists`.
+   */
+  @WorkerThread
+  private fun moveDocument(itemUri: Uri, source: Directory, target: Directory, name: String): Uri {
+    val contentResolver = requireContext().contentResolver
+    val moved = try {
+      onVolume(itemUri) {
+        DocumentsContract.moveDocument(contentResolver, itemUri, source.documentUri, target.documentUri)
+      }
+    } catch (e: TaxonomyException) {
+      throw e
+    } catch (e: Exception) {
+      if (lookupChildRow(target, name) != null && rowBelowRoot(itemUri) != null) {
+        throw alreadyExists(name)
+      }
+      throw e
+    } ?: throw IllegalStateException("The provider did not move $itemUri")
+    return DocumentsContract.buildDocumentUriUsingTree(target.treeUri, DocumentsContract.getDocumentId(moved))
+  }
+
+  /**
+   * The rollback of a combined move + rename whose rename failed: moves
+   * [moved] back into [source]. If that fails too, the entry is stranded
+   * in [target] under its original name: `move-partial`, carrying its
+   * identifier there.
+   */
+  @WorkerThread
+  private fun moveBack(moved: Uri, source: Directory, target: Directory, cause: Exception) {
+    val contentResolver = requireContext().contentResolver
+    try {
+      onVolume(moved) {
+        DocumentsContract.moveDocument(contentResolver, moved, target.documentUri, source.documentUri)
+      } ?: throw IllegalStateException("The provider did not move $moved back")
+    } catch (e: Exception) {
+      plugin.logWarning("Rolling back the move of $moved failed: $e")
+      throw movePartial(moved, cause)
+    }
+  }
+
+  private fun movePartial(actual: Uri, cause: Throwable) = TaxonomyException(
+    ErrorKind.MOVE_PARTIAL,
+    "The entry was left at $actual",
+    cause,
+    details = mapOf("identifier" to actual.toString())
+  )
+
+  /**
+   * `renameDocument` of [documentUri] (named [original], under [parent])
+   * to [name], returning the renamed URI. The stored name is verified: a
+   * mismatch is renamed back to [original] (never deleted: it is the
+   * user's entry), then `already-exists` when [name] is taken by now, else
+   * `invalid-name`. A rename back that fails or lands elsewhere is
+   * `move-partial`.
+   */
+  @WorkerThread
+  private fun renameVerified(parent: Directory, documentUri: Uri, original: String, name: String): Uri {
+    val renamed = rename(parent, documentUri, name)
+    val row = rowBelowRoot(renamed) ?: throw missingDocument(renamed)
+    if (row.name == name) {
+      return renamed
+    }
+    val taken = lookupChildRow(parent, name) != null
+    val restored = try {
+      rename(parent, renamed, original)
+    } catch (e: Exception) {
+      throw movePartial(renamed, e)
+    }
+    val restoredRow = rowBelowRoot(restored)
+    if (restoredRow?.name != original) {
+      throw movePartial(restored, IllegalStateException("Renamed back as ${restoredRow?.name}"))
+    }
+    if (taken) {
+      throw alreadyExists(name)
+    }
+    throw invalidName(name, row.name)
+  }
+
+  /** One `renameDocument`, as a URI under [parent]'s tree. */
+  @WorkerThread
+  private fun rename(parent: Directory, documentUri: Uri, name: String): Uri {
+    val contentResolver = requireContext().contentResolver
+    // Null when the provider kept the document ID.
+    val renamed = onVolume(documentUri) {
+      DocumentsContract.renameDocument(contentResolver, documentUri, name)
+    } ?: documentUri
+    return DocumentsContract.buildDocumentUriUsingTree(parent.treeUri, DocumentsContract.getDocumentId(renamed))
+  }
+
+  /**
    * One level of the directory [identifier] names, in one cursor pass:
    * metadata only, never a copy. Android identifiers never go stale, so
    * the identifier is echoed unrepaired.
@@ -617,7 +1033,13 @@ class FilePickerWritableImpl(
       throw TaxonomyException(ErrorKind.INVALID_NAME, "Not a single leaf name: \"$name\"")
     }
     val directory = requireDirectory(identifier)
-    val child = if (directory.treeUri.authority == StorageVolumes.AUTHORITY) {
+    return lookupChildRow(directory, name)?.toResult(directory.treeUri)
+  }
+
+  /** [lookupChild]'s answer as a row, for verbs that hold the directory. */
+  @WorkerThread
+  private fun lookupChildRow(directory: Directory, name: String): DocumentRow? =
+    if (directory.treeUri.authority == StorageVolumes.AUTHORITY) {
       val childUri = DocumentsContract.buildDocumentUriUsingTree(
         directory.treeUri,
         StorageVolumes.childDocumentId(directory.documentId, name)
@@ -654,8 +1076,6 @@ class FilePickerWritableImpl(
     } else {
       requireChildren(directory).firstOrNull { it.name == name }
     }
-    return child?.toResult(directory.treeUri)
-  }
 
   private class Directory(
     val treeUri: Uri,
@@ -809,7 +1229,12 @@ class FilePickerWritableImpl(
    * authority and tree ID.
    */
   @WorkerThread
-  private fun hasPersistedReadGrant(contentResolver: ContentResolver, uri: Uri): Boolean {
+  private fun hasPersistedReadGrant(contentResolver: ContentResolver, uri: Uri): Boolean =
+    hasPersistedGrant(contentResolver, uri, write = false)
+
+  /** [hasPersistedReadGrant], for a read grant, or with [write] a write one. */
+  @WorkerThread
+  private fun hasPersistedGrant(contentResolver: ContentResolver, uri: Uri, write: Boolean): Boolean {
     val treeId = if (DocumentsContract.isTreeUri(uri)) {
       DocumentsContract.getTreeDocumentId(uri)
     } else {
@@ -817,7 +1242,7 @@ class FilePickerWritableImpl(
     }
     return contentResolver.persistedUriPermissions.any { permission ->
       val granted = permission.uri
-      permission.isReadPermission && (
+      (if (write) permission.isWritePermission else permission.isReadPermission) && (
         granted == uri || (
           treeId != null &&
             DocumentsContract.isTreeUri(granted) &&

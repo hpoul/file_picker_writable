@@ -113,6 +113,18 @@ struct ResolvedIdentifier {
     relativePath.isEmpty ? root : ChildIdentifier.make(root: root, path: relativePath)
   }
 
+  /// The entry `name` directly below this one, under the same root and
+  /// scope. `name` must satisfy the leaf-name rule.
+  func child(_ name: String) -> ResolvedIdentifier {
+    ResolvedIdentifier(
+      url: url.appendingPathComponent(name),
+      scopeURL: scopeURL,
+      isStale: isStale,
+      rootBookmark: rootBookmark,
+      relativePath: ChildIdentifier.join(relativePath, name)
+    )
+  }
+
   /// False when following symlinks takes `url` out of the root. Call with
   /// the root's scope held; the sandbox would refuse such an escape on a
   /// device, but the simulator does not enforce it, so the plugin does.

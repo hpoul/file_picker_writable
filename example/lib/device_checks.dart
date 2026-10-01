@@ -16,7 +16,10 @@
 //   sandbox's own answer);
 // - large-file reads (Gap 2b's openRead and FdReader) on a 32 MiB big.bin in
 //   the same folder: spot reads, a helper isolate reading it all, the
-//   error cases, and the open-descriptor count before and after.
+//   error cases, and the open-descriptor count before and after;
+// - tree verbs (createDirectory, deleteEntry, moveEntry) in a `tree/`
+//   folder of the fixture, rebuilt every run, and with two or more picks
+//   a probe folder moved from the first pick to the second and back.
 // Nothing outside the picked folder is read: the dart:io probe through
 // `out` logs only whether access was allowed and how many entries, never
 // names. FPW_CLEANUP=true removes the fixture folder again.
@@ -297,6 +300,9 @@ Future<void> runDeviceChecks(FileInfo directory) async {
     await _readChecks(plugin, big, nested, step, log);
   }
 
+  // 6. Tree verbs (doc/tree-writes-plan.md §7), in fixture/tree.
+  await _treeChecks(plugin, directory, root, step, log);
+
   // Saved for the next launch's relaunch checks.
   saved.writeAsStringSync(
     jsonEncode({
@@ -306,6 +312,297 @@ Future<void> runDeviceChecks(FileInfo directory) async {
     }),
   );
   log('=== done; saved ${saved.path}');
+}
+
+/// A move between two picked folders: a probe folder created in [first]
+/// is moved into [second] and back. Across storage volumes (an internal
+/// folder and a stick) that is `unsupported-move` and nothing moves; on
+/// one volume it is an ordinary move between two picks.
+Future<void> runCrossPickChecks(FileInfo first, FileInfo second) async {
+  const probeName = 'fpw-move-probe';
+  final plugin = FilePickerWritable();
+  void log(String line) => _logger.info('DEVICE $line');
+  Future<T?> step<T>(String label, Future<T> Function() run) async {
+    try {
+      final result = await run();
+      log('$label: $result');
+      return result;
+    } on Exception catch (e) {
+      log('$label: threw $e');
+      return null;
+    }
+  }
+
+  log('=== cross-pick: ${first.fileName} -> ${second.fileName}');
+  final from = await plugin.acquire(identifier: first.identifier);
+  final to = await plugin.acquire(identifier: second.identifier);
+  try {
+    for (final pick in [first, second]) {
+      final old = await plugin.lookupChild(
+        identifier: pick.identifier,
+        name: probeName,
+      );
+      if (old != null) {
+        await plugin.deleteEntry(identifier: old.identifier, recursive: true);
+      }
+    }
+    final probe = await step(
+      'cross: createDirectory $probeName in ${first.fileName}',
+      () => plugin.createDirectory(scope: from, name: probeName),
+    );
+    if (probe == null) {
+      return;
+    }
+    final moved = await step(
+      'cross: move it into ${second.fileName}',
+      () => plugin.moveEntry(
+        identifier: probe.identifier,
+        sourceParent: from,
+        newParent: to,
+      ),
+    );
+    Future<String> whereIsIt() async {
+      final inFirst = await plugin.lookupChild(
+        identifier: first.identifier,
+        name: probeName,
+      );
+      final inSecond = await plugin.lookupChild(
+        identifier: second.identifier,
+        name: probeName,
+      );
+      return 'in ${first.fileName}: ${inFirst != null}, '
+          'in ${second.fileName}: ${inSecond != null}';
+    }
+
+    await step('cross: after the move', whereIsIt);
+    if (moved != null) {
+      await step(
+        'cross: move it back',
+        () => plugin.moveEntry(
+          identifier: moved.identifier,
+          sourceParent: to,
+          newParent: from,
+        ),
+      );
+      await step('cross: after the move back', whereIsIt);
+    }
+    // Clean up wherever it ended.
+    for (final pick in [first, second]) {
+      final left = await plugin.lookupChild(
+        identifier: pick.identifier,
+        name: probeName,
+      );
+      if (left != null) {
+        await step(
+          'cross: delete the probe in ${pick.fileName}',
+          () => plugin
+              .deleteEntry(identifier: left.identifier, recursive: true)
+              .then((_) => 'ok'),
+        );
+      }
+    }
+  } finally {
+    await plugin.release(from);
+    await plugin.release(to);
+  }
+  log('=== cross-pick done');
+}
+
+/// createDirectory, deleteEntry and moveEntry in a `tree/` folder of the
+/// fixture [root], rebuilt on every run: taken names, provider-cleaned
+/// names, the residue that must not be left behind, renames, a move with a
+/// rename, the non-recursive refusal, recursion, idempotent delete, and
+/// the picked root's protection. Every expected failure is logged as
+/// "threw", so the log reads as the matrix.
+Future<void> _treeChecks(
+  FilePickerWritable plugin,
+  FileInfo picked,
+  String root,
+  Future<T?> Function<T>(String label, Future<T> Function() run) step,
+  void Function(String) log,
+) async {
+  Future<String> names(String identifier) async {
+    final listing = await plugin.listChildren(identifier: identifier);
+    return (listing.entries.map((e) => e.name).toList()..sort()).join(', ');
+  }
+
+  Future<String> ok(Future<void> run) => run.then((_) => 'ok');
+
+  final fixture = await plugin.acquire(identifier: root);
+  try {
+    final old = await plugin.lookupChild(identifier: root, name: 'tree');
+    if (old != null) {
+      await step(
+        'tree: delete the last run',
+        () =>
+            ok(plugin.deleteEntry(identifier: old.identifier, recursive: true)),
+      );
+    }
+    final tree = await step(
+      'tree: createDirectory tree',
+      () => plugin.createDirectory(scope: fixture, name: 'tree'),
+    );
+    if (tree == null) {
+      return;
+    }
+    await step(
+      'tree: createDirectory tree again (taken)',
+      () => plugin.createDirectory(scope: fixture, name: 'tree'),
+    );
+    final treeScope = await plugin.acquire(identifier: tree.identifier);
+    try {
+      // A file there and back: a move with a rename each way.
+      final probe = await plugin.lookupChild(
+        identifier: root,
+        name: 'probe.json',
+      );
+      if (probe != null) {
+        final moved = await step(
+          'tree: move probe.json into tree, renamed p.json',
+          () => plugin.moveEntry(
+            identifier: probe.identifier,
+            sourceParent: fixture,
+            newParent: treeScope,
+            newName: 'p.json',
+          ),
+        );
+        if (moved != null) {
+          await step(
+            'tree: move p.json back as probe.json',
+            () => plugin.moveEntry(
+              identifier: moved.identifier,
+              sourceParent: treeScope,
+              newParent: fixture,
+              newName: 'probe.json',
+            ),
+          );
+        }
+      }
+      final a = await step(
+        'tree: createDirectory a',
+        () => plugin.createDirectory(scope: treeScope, name: 'a'),
+      );
+      final b = await step(
+        'tree: createDirectory b',
+        () => plugin.createDirectory(scope: treeScope, name: 'b'),
+      );
+      await step(
+        'tree: createDirectory "12:30 ride" (FAT-style name)',
+        () => plugin.createDirectory(scope: treeScope, name: '12:30 ride'),
+      );
+      await step(
+        'tree: listing after the creates',
+        () => names(tree.identifier),
+      );
+      if (a == null || b == null) {
+        return;
+      }
+      final aScope = await plugin.acquire(identifier: a.identifier);
+      try {
+        await step(
+          'tree: createDirectory a/inner',
+          () => plugin.createDirectory(scope: aScope, name: 'inner'),
+        );
+        await step(
+          'tree: delete a, not recursive (holds inner)',
+          () => ok(plugin.deleteEntry(identifier: a.identifier)),
+        );
+        final c = await step(
+          'tree: rename b to c',
+          () => plugin.moveEntry(
+            identifier: b.identifier,
+            sourceParent: treeScope,
+            newParent: treeScope,
+            newName: 'c',
+          ),
+        );
+        await step(
+          'tree: rename a onto c (taken)',
+          () => plugin.moveEntry(
+            identifier: a.identifier,
+            sourceParent: treeScope,
+            newParent: treeScope,
+            newName: 'c',
+          ),
+        );
+        if (c != null) {
+          await step(
+            'tree: rename c to "x:y" (FAT-style name)',
+            () => plugin.moveEntry(
+              identifier: c.identifier,
+              sourceParent: treeScope,
+              newParent: treeScope,
+              newName: 'x:y',
+            ),
+          );
+          await step(
+            'tree: listing after the renames',
+            () => names(tree.identifier),
+          );
+          // A rename that landed on iOS moved c; find it again by listing.
+          final listing = await plugin.listChildren(
+            identifier: tree.identifier,
+          );
+          final current = listing.entries
+              .where((e) => e.name == 'c' || e.name == 'x:y')
+              .firstOrNull;
+          if (current != null) {
+            await step(
+              'tree: move ${current.name} into a, renamed d',
+              () => plugin.moveEntry(
+                identifier: current.identifier,
+                sourceParent: treeScope,
+                newParent: aScope,
+                newName: 'd',
+              ),
+            );
+          }
+        }
+        await step('tree: listing of a', () => names(a.identifier));
+        final inner = await plugin.lookupChild(
+          identifier: a.identifier,
+          name: 'inner',
+        );
+        if (inner != null) {
+          await step(
+            'tree: move inner with the wrong source parent',
+            () => plugin.moveEntry(
+              identifier: inner.identifier,
+              sourceParent: treeScope,
+              newParent: treeScope,
+            ),
+          );
+        }
+      } finally {
+        await plugin.release(aScope);
+      }
+      await step(
+        'tree: delete a, recursive',
+        () => ok(plugin.deleteEntry(identifier: a.identifier, recursive: true)),
+      );
+      await step(
+        'tree: delete a again (gone is success)',
+        () => ok(plugin.deleteEntry(identifier: a.identifier, recursive: true)),
+      );
+      await step('tree: final listing', () => names(tree.identifier));
+    } finally {
+      await plugin.release(treeScope);
+    }
+    // Not recursive on purpose: should the guard ever break, the picked
+    // folder still holds the fixture, so this is directory-not-empty, not
+    // a deleted pick.
+    await step(
+      'tree: delete the picked root (protected)',
+      () => ok(plugin.deleteEntry(identifier: picked.identifier)),
+    );
+    await step(
+      'tree: delete tree, recursive',
+      () =>
+          ok(plugin.deleteEntry(identifier: tree.identifier, recursive: true)),
+    );
+  } finally {
+    await plugin.release(fixture);
+  }
 }
 
 /// openRead on big.bin: spot reads on this isolate, a helper reading it all

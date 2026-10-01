@@ -33,6 +33,20 @@ object StorageVolumes {
   fun childDocumentId(parentId: String, name: String): String =
     if (parentId.endsWith(':')) "$parentId$name" else "$parentId/$name"
 
+  /**
+   * The inverse of [childDocumentId]: the document ID of the directory
+   * [documentId] sits in, or null for a volume root (`primary:`) or an ID
+   * without a root tag.
+   */
+  fun parentDocumentId(documentId: String): String? {
+    val colon = documentId.indexOf(':')
+    if (colon < 0 || colon == documentId.length - 1) {
+      return null
+    }
+    val slash = documentId.lastIndexOf('/')
+    return if (slash < colon) documentId.substring(0, colon + 1) else documentId.substring(0, slash)
+  }
+
   sealed class Volume {
     object Primary : Volume()
     data class Uuid(val uuid: String) : Volume()

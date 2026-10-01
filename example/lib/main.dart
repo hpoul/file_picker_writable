@@ -228,6 +228,9 @@ class MainScreenState extends State<MainScreen> {
           ? removeDeviceFixture(directory)
           : runDeviceChecks(directory));
     }
+    if (!cleanUp && data.directories.length >= 2) {
+      await runCrossPickChecks(data.directories[0], data.directories[1]);
+    }
   }
 
   Future<void> _openDirectory() async {

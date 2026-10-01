@@ -30,4 +30,23 @@ class LeafNameTest {
       StorageVolumes.childDocumentId("3C61-1EFF:FpwStick/2026", "trip.json")
     )
   }
+
+  @Test
+  fun parentIdsInvertChildIds() {
+    for ((parent, name) in listOf(
+      "primary:" to "Trips",
+      "primary:Trips" to ".howitwent",
+      "3C61-1EFF:FpwStick/2026" to "trip.json"
+    )) {
+      val child = StorageVolumes.childDocumentId(parent, name)
+      assertEquals(parent, StorageVolumes.parentDocumentId(child))
+    }
+  }
+
+  @Test
+  fun aVolumeRootOrUntaggedIdHasNoParent() {
+    assertEquals(null, StorageVolumes.parentDocumentId("primary:"))
+    assertEquals(null, StorageVolumes.parentDocumentId("3C61-1EFF:"))
+    assertEquals(null, StorageVolumes.parentDocumentId("opaque-id"))
+  }
 }

@@ -216,6 +216,42 @@ public class FilePickerWritablePlugin: NSObject, FlutterPlugin {
         _offMain(result) { [self] in
           try _openRead(token: token)
         }
+      case "createDirectory":
+        guard
+          let args = call.arguments as? [String: Any],
+          let token = args["scope"] as? String,
+          let name = args["name"] as? String
+        else {
+          throw FilePickerError.invalidArguments(message: "Expected 'scope' and 'name'")
+        }
+        _offMain(result) { [self] in
+          try _createDirectory(token: token, name: name)
+        }
+      case "deleteEntry":
+        guard
+          let args = call.arguments as? [String: Any],
+          let identifier = args["identifier"] as? String,
+          let recursive = args["recursive"] as? Bool
+        else {
+          throw FilePickerError.invalidArguments(message: "Expected 'identifier' and 'recursive'")
+        }
+        _offMain(result) { [self] in
+          try _deleteEntry(identifier: identifier, recursive: recursive)
+          return nil
+        }
+      case "moveEntry":
+        guard
+          let args = call.arguments as? [String: Any],
+          let identifier = args["identifier"] as? String,
+          let sourceToken = args["sourceParent"] as? String,
+          let targetToken = args["newParent"] as? String
+        else {
+          throw FilePickerError.invalidArguments(message: "Expected 'identifier', 'sourceParent' and 'newParent'")
+        }
+        let newName = args["newName"] as? String
+        _offMain(result) { [self] in
+          try _moveEntry(identifier: identifier, sourceToken: sourceToken, targetToken: targetToken, newName: newName)
+        }
       default:
         result(FlutterMethodNotImplemented)
       }
@@ -371,7 +407,7 @@ public class FilePickerWritablePlugin: NSObject, FlutterPlugin {
     let token: String
     do {
       // A child's access is its root's scope, so the hold is on the root.
-      let acquired = try _scopes.acquire(url: resolved.scopeURL, target: url, session: session)
+      let acquired = try _scopes.acquire(url: resolved.scopeURL, target: resolved, session: session)
       token = acquired.token
       if acquired.dropped > 0 {
         // Expected once after a hot restart. Anything else means a second
@@ -473,7 +509,7 @@ public class FilePickerWritablePlugin: NSObject, FlutterPlugin {
   /// it here as `not-a-file`. The file is the token's target as resolved at
   /// acquire: renamed since, it reads as `not-found`.
   private func _openRead(token: String) throws -> [String: Any] {
-    guard let url = _scopes.target(of: token) else {
+    guard let url = _scopes.target(of: token)?.url else {
       throw TaxonomyError(kind: ErrorKind.scopeClosed, message: "Scope \(token) was released")
     }
     try _requireLive(url)
@@ -520,6 +556,165 @@ public class FilePickerWritablePlugin: NSObject, FlutterPlugin {
       message: "\(message): \(String(cString: strerror(code)))",
       details: ["domain": "errno", "code": Int(code)]
     )
+  }
+
+  /// Creates the directory `name` under the directory a live scope token
+  /// names (tree-writes-plan §5), under that token's held scope. Nothing
+  /// is created on a taken name, so there is no residue to clean.
+  private func _createDirectory(token: String, name: String) throws -> [String: Any] {
+    try _requireLeaf(name)
+    let parent = try _requireDirectoryScope(token)
+    let child = parent.child(name)
+    do {
+      try FileManager.default.createDirectory(at: child.url, withIntermediateDirectories: false)
+    } catch let error as NSError where error.domain == NSCocoaErrorDomain && error.code == NSFileWriteFileExistsError {
+      throw TaxonomyError(kind: ErrorKind.alreadyExists, message: "\"\(name)\" is taken", underlying: error, details: ["name": name])
+    }
+    return try _childEntry(child.url, identifierKey: "identifier", identifierValue: child.identifier(withRoot: child.currentRoot()))
+  }
+
+  /// Deletes what `identifier` names, under a per-call scope (single-shot
+  /// verb); gone is success. Recursion is the plugin's own depth-first
+  /// walk, and symlinks are removed as links, never followed. Emptiness is
+  /// decided by listing: best-effort against a concurrent writer.
+  private func _deleteEntry(identifier: String, recursive: Bool) throws {
+    let resolved = try _resolve(identifier)
+    try _requireBelowRoot(resolved)
+    guard resolved.scopeURL.startAccessingSecurityScopedResource() else {
+      throw TaxonomyError(kind: ErrorKind.permissionLost, message: "startAccessingSecurityScopedResource refused for \(resolved.scopeURL)")
+    }
+    defer {
+      resolved.scopeURL.stopAccessingSecurityScopedResource()
+    }
+    try _requireContained(resolved)
+    let url = resolved.url
+    // Gone, or gone into the Trash with its root: either way deleted.
+    guard (try? url.checkResourceIsReachable()) == true || Self._isSymlink(url),
+      !url.standardizedFileURL.pathComponents.contains(".Trash")
+    else {
+      return
+    }
+    if try Self._isRealDirectory(url) {
+      let children = try FileManager.default.contentsOfDirectory(at: url, includingPropertiesForKeys: nil, options: [])
+      if !children.isEmpty {
+        guard recursive else {
+          throw TaxonomyError(
+            kind: ErrorKind.directoryNotEmpty,
+            message: "\(url.lastPathComponent) holds \(children.count) entries"
+          )
+        }
+        try Self._deleteChildren(children)
+      }
+    }
+    try Self._removeIfPresent(url)
+  }
+
+  /// Moves `identifier` from the directory `sourceToken` names into the one
+  /// `targetToken` names, renamed to `newName` when given, under the two
+  /// tokens' held scopes. One `rename(2)` does both the move and the rename,
+  /// so unlike Android there is no intermediate state and no rollback.
+  private func _moveEntry(identifier: String, sourceToken: String, targetToken: String, newName: String?) throws -> [String: Any] {
+    if let newName = newName {
+      try _requireLeaf(newName)
+    }
+    let item = try _resolve(identifier)
+    try _requireBelowRoot(item)
+    let source = try _requireDirectoryScope(sourceToken)
+    let target = try _requireDirectoryScope(targetToken)
+    try _requireContained(item)
+    try _requireLive(item.url)
+    guard item.url.deletingLastPathComponent().standardizedFileURL.path == source.url.standardizedFileURL.path else {
+      throw TaxonomyError(
+        kind: ErrorKind.notFound,
+        message: "\(item.relativePath) is not directly in \(source.url.lastPathComponent)",
+        details: ["reason": "not-a-child"]
+      )
+    }
+    let itemVolume = try item.url.resourceValues(forKeys: [.volumeIdentifierKey]).volumeIdentifier as? NSObject
+    let targetVolume = try target.url.resourceValues(forKeys: [.volumeIdentifierKey]).volumeIdentifier as? NSObject
+    guard itemVolume != nil, itemVolume == targetVolume else {
+      throw TaxonomyError(
+        kind: ErrorKind.unsupportedMove,
+        message: "Moving \(item.url.lastPathComponent) into \(target.url.lastPathComponent) crosses a volume: copy, then delete"
+      )
+    }
+    let name = newName ?? item.url.lastPathComponent
+    let destination = target.child(name)
+    if destination.url.standardizedFileURL.path != item.url.standardizedFileURL.path {
+      // Checked first so the answer does not depend on how moveItem
+      // reports a collision; moveItem still refuses one that races in.
+      if (try? destination.url.checkResourceIsReachable()) == true || Self._isSymlink(destination.url) {
+        throw TaxonomyError(kind: ErrorKind.alreadyExists, message: "\"\(name)\" is taken", details: ["name": name])
+      }
+      do {
+        try FileManager.default.moveItem(at: item.url, to: destination.url)
+      } catch let error as NSError where error.domain == NSCocoaErrorDomain && error.code == NSFileWriteFileExistsError {
+        throw TaxonomyError(kind: ErrorKind.alreadyExists, message: "\"\(name)\" is taken", underlying: error, details: ["name": name])
+      }
+    }
+    return try _childEntry(destination.url, identifierKey: "identifier", identifierValue: destination.identifier(withRoot: destination.currentRoot()))
+  }
+
+  private func _requireLeaf(_ name: String) throws {
+    guard ChildIdentifier.isLeafName(name) else {
+      throw TaxonomyError(kind: ErrorKind.invalidName, message: "Not a single leaf name: \"\(name)\"")
+    }
+  }
+
+  /// The live directory a scope token names (`scope-closed`, `not-found`,
+  /// `not-a-directory`). Its scope is the token's hold.
+  private func _requireDirectoryScope(_ token: String) throws -> ResolvedIdentifier {
+    guard let resolved = _scopes.target(of: token) else {
+      throw TaxonomyError(kind: ErrorKind.scopeClosed, message: "Scope \(token) was released")
+    }
+    try _requireLive(resolved.url)
+    guard (try resolved.url.resourceValues(forKeys: [.isDirectoryKey])).isDirectory == true else {
+      throw TaxonomyError(kind: ErrorKind.notADirectory, message: "\(resolved.url.lastPathComponent) is not a directory")
+    }
+    return resolved
+  }
+
+  /// `root-protected` for a picker's own result (a plain bookmark, file or
+  /// folder): only entries inside a picked folder may be deleted or moved,
+  /// so one wrong identifier cannot take a whole pick with it.
+  private func _requireBelowRoot(_ resolved: ResolvedIdentifier) throws {
+    guard !resolved.relativePath.isEmpty else {
+      throw TaxonomyError(
+        kind: ErrorKind.rootProtected,
+        message: "\(resolved.url.lastPathComponent) is a picked root: only entries inside a picked folder can be deleted or moved"
+      )
+    }
+  }
+
+  private static func _isSymlink(_ url: URL) -> Bool {
+    (try? url.resourceValues(forKeys: [.isSymbolicLinkKey]))?.isSymbolicLink == true
+  }
+
+  /// A directory itself, not a symlink to one (resource values do not
+  /// follow the final link, but say so explicitly).
+  private static func _isRealDirectory(_ url: URL) throws -> Bool {
+    let values = try url.resourceValues(forKeys: [.isDirectoryKey, .isSymbolicLinkKey])
+    return values.isDirectory == true && values.isSymbolicLink != true
+  }
+
+  /// Depth-first: every child before its directory; links removed as links.
+  private static func _deleteChildren(_ children: [URL]) throws {
+    for child in children {
+      if try _isRealDirectory(child) {
+        let grandchildren = try FileManager.default.contentsOfDirectory(at: child, includingPropertiesForKeys: nil, options: [])
+        try _deleteChildren(grandchildren)
+      }
+      try _removeIfPresent(child)
+    }
+  }
+
+  /// `removeItem`, where something already gone is success.
+  private static func _removeIfPresent(_ url: URL) throws {
+    do {
+      try FileManager.default.removeItem(at: url)
+    } catch let error as NSError where error.domain == NSCocoaErrorDomain && error.code == NSFileNoSuchFileError {
+      return
+    }
   }
 
   private static let _childKeys: [URLResourceKey] = [
