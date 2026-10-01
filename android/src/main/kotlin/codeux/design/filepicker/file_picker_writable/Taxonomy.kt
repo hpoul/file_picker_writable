@@ -8,6 +8,8 @@ object ErrorKind {
   const val PERMISSION_LOST = "permission-lost"
   const val NOT_FOUND = "not-found"
   const val SCOPE_CLOSED = "scope-closed"
+  const val NOT_A_DIRECTORY = "not-a-directory"
+  const val INVALID_NAME = "invalid-name"
 }
 
 /**

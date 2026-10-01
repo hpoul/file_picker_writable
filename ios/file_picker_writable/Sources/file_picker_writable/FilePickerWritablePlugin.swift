@@ -185,6 +185,27 @@ public class FilePickerWritablePlugin: NSObject, FlutterPlugin {
           logDebug("release: \(_scopes.counts) held.")
           return nil
         }
+      case "listChildren":
+        guard
+          let args = call.arguments as? [String: Any],
+          let identifier = args["identifier"] as? String
+        else {
+          throw FilePickerError.invalidArguments(message: "Expected 'identifier'")
+        }
+        _offMain(result) { [self] in
+          try _listChildren(identifier: identifier)
+        }
+      case "lookupChild":
+        guard
+          let args = call.arguments as? [String: Any],
+          let identifier = args["identifier"] as? String,
+          let name = args["name"] as? String
+        else {
+          throw FilePickerError.invalidArguments(message: "Expected 'identifier' and 'name'")
+        }
+        _offMain(result) { [self] in
+          try _lookupChild(identifier: identifier, name: name)
+        }
       default:
         result(FlutterMethodNotImplemented)
       }
@@ -196,27 +217,30 @@ public class FilePickerWritablePlugin: NSObject, FlutterPlugin {
   }
     
   func readFile(identifier: String, result: @escaping FlutterResult) throws {
-    guard let bookmark = Data(base64Encoded: identifier) else {
+    if !identifier.hasPrefix(ChildIdentifier.prefix), Data(base64Encoded: identifier) == nil {
       result(FlutterError(code: "InvalidDataError", message: "Unable to decode bookmark.", details: nil))
       return
     }
-    var isStale = false
-    let url = try URL(resolvingBookmarkData: bookmark, bookmarkDataIsStale: &isStale)
-    logDebug("url: \(url) / isStale: \(isStale)")
+    // A plain bookmark or a child identifier; a child reads under its
+    // root's scope.
+    let resolved = try _resolve(identifier)
+    let url = resolved.url
+    logDebug("url: \(url) / isStale: \(resolved.isStale)")
     DispatchQueue.global(qos: .userInitiated).async { [self] in
-      let securityScope = url.startAccessingSecurityScopedResource()
+      let securityScope = resolved.scopeURL.startAccessingSecurityScopedResource()
       defer {
         if securityScope {
-          url.stopAccessingSecurityScopedResource()
+          resolved.scopeURL.stopAccessingSecurityScopedResource()
         }
       }
       if !securityScope {
-        logDebug("Warning: startAccessingSecurityScopedResource is false for \(url).")
+        logDebug("Warning: startAccessingSecurityScopedResource is false for \(resolved.scopeURL).")
       }
       do {
+        try _requireContained(resolved)
         let copiedFile = try _copyToTempDirectory(url: url)
         DispatchQueue.main.async { [self] in
-          result(_fileInfoResult(tempFile: copiedFile, originalURL: url, bookmark: bookmark))
+          result(_fileInfoResult(tempFile: copiedFile, originalURL: url, identifier: identifier))
         }
       } catch {
         DispatchQueue.main.async {
@@ -227,18 +251,27 @@ public class FilePickerWritablePlugin: NSObject, FlutterPlugin {
   }
     
   func writeFile(identifier: String, path: String, result: @escaping FlutterResult) throws {
-    guard let bookmark = Data(base64Encoded: identifier) else {
+    if !identifier.hasPrefix(ChildIdentifier.prefix), Data(base64Encoded: identifier) == nil {
       throw FilePickerError.invalidArguments(message: "Unable to decode bookmark/identifier.")
     }
-    var isStale = false
-    let url = try URL(resolvingBookmarkData: bookmark, bookmarkDataIsStale: &isStale)
-    logDebug("url: \(url) / isStale: \(isStale)")
+    let resolved = try _resolve(identifier)
+    let url = resolved.url
+    logDebug("url: \(url) / isStale: \(resolved.isStale)")
     DispatchQueue.global(qos: .userInitiated).async { [self] in
+      // A child identifier writes under its root's scope; for a plain
+      // bookmark this is the file's own scope, started again below.
+      let rootScope = resolved.scopeURL.startAccessingSecurityScopedResource()
+      defer {
+        if rootScope {
+          resolved.scopeURL.stopAccessingSecurityScopedResource()
+        }
+      }
       do {
+        try _requireContained(resolved)
         try _writeFile(path: path, destination: url)
         let sourceFile = URL(fileURLWithPath: path)
         DispatchQueue.main.async { [self] in
-          result(_fileInfoResult(tempFile: sourceFile, originalURL: url, bookmark: bookmark))
+          result(_fileInfoResult(tempFile: sourceFile, originalURL: url, identifier: identifier))
         }
       } catch {
         DispatchQueue.main.async {
@@ -323,20 +356,12 @@ public class FilePickerWritablePlugin: NSObject, FlutterPlugin {
   /// Resolves the bookmark and holds its scope until `release`. A stale
   /// bookmark is repaired: new bookmark bytes, `repaired: true`.
   private func _acquire(identifier: String, session: String) throws -> [String: Any] {
-    guard let bookmark = Data(base64Encoded: identifier) else {
-      throw FilePickerError.invalidArguments(message: "Unable to decode bookmark.")
-    }
-    var isStale = false
-    let url: URL
-    do {
-      url = try URL(resolvingBookmarkData: bookmark, bookmarkDataIsStale: &isStale)
-    } catch {
-      // Stale but unresolvable: from the caller's view the grant is gone.
-      throw TaxonomyError(kind: ErrorKind.permissionLost, message: "Bookmark no longer resolves: \(error)", underlying: error)
-    }
+    let resolved = try _resolve(identifier)
+    let url = resolved.url
     let token: String
     do {
-      let acquired = try _scopes.acquire(url: url, session: session)
+      // A child's access is its root's scope, so the hold is on the root.
+      let acquired = try _scopes.acquire(url: resolved.scopeURL, session: session)
       token = acquired.token
       if acquired.dropped > 0 {
         // Expected once after a hot restart. Anything else means a second
@@ -348,32 +373,190 @@ public class FilePickerWritablePlugin: NSObject, FlutterPlugin {
       throw TaxonomyError(kind: ErrorKind.permissionLost, message: "startAccessingSecurityScopedResource refused for \(url)")
     }
     do {
-      guard (try? url.checkResourceIsReachable()) == true else {
-        throw TaxonomyError(kind: ErrorKind.notFound, message: "Nothing at \(url.path)")
-      }
-      // A Files delete is a move into the provider's `.Trash`, and the
-      // bookmark follows it there. Deleted must read as gone, never as a
-      // live folder the app would list and write into. No public resource
-      // key reports "in the trash", so this matches a whole path component.
-      if url.standardizedFileURL.pathComponents.contains(".Trash") {
-        throw TaxonomyError(
-          kind: ErrorKind.notFound,
-          message: "\(url.lastPathComponent) is in the Trash",
-          details: ["reason": "trashed"]
-        )
-      }
-      let fresh = isStale ? try url.bookmarkData().base64EncodedString() : identifier
-      logDebug("acquire: isStale=\(isStale), \(_scopes.counts) held.")
+      try _requireContained(resolved)
+      try _requireLive(url)
+      let fresh = try resolved.currentIdentifier()
+      logDebug("acquire: isStale=\(resolved.isStale), \(_scopes.counts) held.")
       return [
         "id": token,
         "identifier": fresh,
-        "repaired": isStale,
+        "repaired": resolved.isStale,
         "path": url.path,
         "displayName": url.lastPathComponent,
       ]
     } catch {
       _scopes.release(token: token)
       throw error
+    }
+  }
+
+  /// One level of the directory `identifier` names, under a scope held for
+  /// this call only. A stale bookmark is repaired as in `_acquire`.
+  private func _listChildren(identifier: String) throws -> [String: Any] {
+    try _withDirectory(identifier) { resolved in
+      let started = Date()
+      let children = try FileManager.default.contentsOfDirectory(
+        at: resolved.url,
+        includingPropertiesForKeys: Self._childKeys,
+        // No .skipsHiddenFiles: names starting with `.` are ordinary names.
+        options: []
+      )
+      let listed = Date()
+      // The root bookmark goes once per listing, as the shared identifier
+      // prefix; each entry carries only its encoded name, and Dart
+      // composes prefix + suffix (25.8 MB → ~0.13 MB of identifiers for
+      // 10k children).
+      // Minted once: a stale root costs a fresh bookmark per call.
+      let root = try resolved.currentRoot()
+      let identifierPrefix = ChildIdentifier.listingPrefix(
+        root: root,
+        parentPath: resolved.relativePath
+      )
+      var suffixBytes = 0
+      let entries = try children.map { child in
+        let suffix = ChildIdentifier.encode(child.lastPathComponent)
+        suffixBytes += suffix.utf8.count
+        return try _childEntry(child, identifierKey: "identifierSuffix", identifierValue: suffix)
+      }
+      logDebug(String(
+        format: "listChildren: %d rows, directory read %.0f ms, entries %.0f ms, identifier bytes %d (prefix) + %d (suffixes)",
+        children.count,
+        listed.timeIntervalSince(started) * 1000,
+        Date().timeIntervalSince(listed) * 1000,
+        identifierPrefix.utf8.count,
+        suffixBytes
+      ))
+      return [
+        "identifier": resolved.identifier(withRoot: root),
+        "repaired": resolved.isStale,
+        "identifierPrefix": identifierPrefix,
+        "entries": entries,
+      ]
+    }
+  }
+
+  /// The child `name` of the directory `identifier`, or nil when absent.
+  private func _lookupChild(identifier: String, name: String) throws -> [String: Any]? {
+    guard ChildIdentifier.isLeafName(name) else {
+      throw TaxonomyError(kind: ErrorKind.invalidName, message: "Not a single leaf name: \"\(name)\"")
+    }
+    return try _withDirectory(identifier) { resolved in
+      let child = resolved.url.appendingPathComponent(name)
+      guard (try? child.checkResourceIsReachable()) == true else {
+        return nil
+      }
+      // One entry: the full identifier, nothing to share.
+      return try _childEntry(
+        child,
+        identifierKey: "identifier",
+        identifierValue: ChildIdentifier.make(
+          root: try resolved.currentRoot(),
+          path: ChildIdentifier.join(resolved.relativePath, name)
+        )
+      )
+    }
+  }
+
+  private static let _childKeys: [URLResourceKey] = [
+    .nameKey, .isDirectoryKey, .fileSizeKey, .contentModificationDateKey,
+  ]
+
+  /// An entry map with the identifier under `identifierKey`: the full
+  /// `identifier`, or, in a listing, the `identifierSuffix` that Dart
+  /// appends to the listing's shared `identifierPrefix`.
+  private func _childEntry(_ url: URL, identifierKey: String, identifierValue: String) throws -> [String: Any] {
+    let values = try url.resourceValues(forKeys: Set(Self._childKeys))
+    let isDirectory = values.isDirectory ?? false
+    let size: Any = isDirectory ? NSNull() : (values.fileSize.map { $0 as Any } ?? NSNull())
+    let modified: Any = values.contentModificationDate
+      .map { Int64($0.timeIntervalSince1970 * 1000) as Any } ?? NSNull()
+    return [
+      "name": values.name ?? url.lastPathComponent,
+      identifierKey: identifierValue,
+      "isDirectory": isDirectory,
+      "size": size,
+      "lastModified": modified,
+    ]
+  }
+
+  /// Resolves a directory bookmark and holds its scope around `body` only
+  /// (single-shot verbs manage scope per call, scope-registry-plan §4).
+  private func _withDirectory<T>(_ identifier: String, _ body: (ResolvedIdentifier) throws -> T) throws -> T {
+    let resolved = try _resolve(identifier)
+    let url = resolved.url
+    guard resolved.scopeURL.startAccessingSecurityScopedResource() else {
+      throw TaxonomyError(kind: ErrorKind.permissionLost, message: "startAccessingSecurityScopedResource refused for \(resolved.scopeURL)")
+    }
+    defer {
+      resolved.scopeURL.stopAccessingSecurityScopedResource()
+    }
+    try _requireContained(resolved)
+    try _requireLive(url)
+    guard (try url.resourceValues(forKeys: [.isDirectoryKey])).isDirectory == true else {
+      throw TaxonomyError(kind: ErrorKind.notADirectory, message: "\(url.lastPathComponent) is not a directory")
+    }
+    return try body(resolved)
+  }
+
+  /// Resolves a plain bookmark or a child identifier (root bookmark plus
+  /// relative path) to what it names and the root whose scope covers it.
+  private func _resolve(_ identifier: String) throws -> ResolvedIdentifier {
+    let (rootBookmark, path) = try ChildIdentifier.parse(identifier) ?? (identifier, "")
+    let (root, isStale) = try _resolveBookmark(rootBookmark)
+    let url = path.isEmpty
+      ? root
+      : ChildIdentifier.components(of: path).reduce(root) { $0.appendingPathComponent($1) }
+    return ResolvedIdentifier(
+      url: url,
+      scopeURL: root,
+      isStale: isStale,
+      rootBookmark: rootBookmark,
+      relativePath: path
+    )
+  }
+
+  private func _resolveBookmark(_ identifier: String) throws -> (URL, Bool) {
+    guard let bookmark = Data(base64Encoded: identifier) else {
+      throw FilePickerError.invalidArguments(message: "Unable to decode bookmark.")
+    }
+    var isStale = false
+    do {
+      let url = try URL(resolvingBookmarkData: bookmark, bookmarkDataIsStale: &isStale)
+      return (url, isStale)
+    } catch {
+      // Stale but unresolvable: from the caller's view the grant is gone.
+      throw TaxonomyError(kind: ErrorKind.permissionLost, message: "Bookmark no longer resolves: \(error)", underlying: error)
+    }
+  }
+
+  /// `not-found` when a child identifier's path, followed through
+  /// symlinks, leaves its root. Call with the root's scope held.
+  private func _requireContained(_ resolved: ResolvedIdentifier) throws {
+    guard resolved.isContained else {
+      throw TaxonomyError(
+        kind: ErrorKind.notFound,
+        message: "\(resolved.relativePath) leaves its root",
+        details: ["reason": "outside-root"]
+      )
+    }
+  }
+
+  /// `not-found` unless `url` is reachable and outside the Trash. Call with
+  /// the scope held.
+  private func _requireLive(_ url: URL) throws {
+    guard (try? url.checkResourceIsReachable()) == true else {
+      throw TaxonomyError(kind: ErrorKind.notFound, message: "Nothing at \(url.path)")
+    }
+    // A Files delete is a move into the provider's `.Trash`, and the
+    // bookmark follows it there. Deleted must read as gone, never as a
+    // live folder the app would list and write into. No public resource
+    // key reports "in the trash", so this matches a whole path component.
+    if url.standardizedFileURL.pathComponents.contains(".Trash") {
+      throw TaxonomyError(
+        kind: ErrorKind.notFound,
+        message: "\(url.lastPathComponent) is in the Trash",
+        details: ["reason": "trashed"]
+      )
     }
   }
 
@@ -477,8 +660,11 @@ public class FilePickerWritablePlugin: NSObject, FlutterPlugin {
   }
     
   private func _fileInfoResult(tempFile: URL, originalURL: URL, bookmark: Data, persistable: Bool = true) -> [String: String] {
-    let identifier = bookmark.base64EncodedString()
-    return [
+    _fileInfoResult(tempFile: tempFile, originalURL: originalURL, identifier: bookmark.base64EncodedString(), persistable: persistable)
+  }
+
+  private func _fileInfoResult(tempFile: URL, originalURL: URL, identifier: String, persistable: Bool = true) -> [String: String] {
+    [
       "path": tempFile.path,
       "identifier": identifier,
       "persistable": "\(persistable)",

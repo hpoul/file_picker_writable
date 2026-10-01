@@ -222,7 +222,19 @@ Notes:
   acquires; `sm unmount` (grant still persisted) →
   `permission-lost` with `reason: volume-absent`; `sm mount` →
   acquires again; the folder removed on the mounted volume →
-  `not-found`. No native resource is
+  `not-found`. A removed disk (`sm set-virtual-disk false`, the
+  volume gone from `sm list-volumes`, grant still persisted) →
+  `permission-lost` `volume-absent` as well. A physical removal can
+  instead make the provider throw: cycling_storyteller #407 saw
+  `IllegalArgumentException("… No root for <uuid>")` from the tree
+  check after a PCI removal, and a plain document URI throws
+  `FileNotFoundException`, which would map to `not-found`. The cause
+  does not cross Binder, so the plugin never matches on the class:
+  any exception from a provider query first runs the same volume
+  check, and only a mounted volume lets the exception through. The
+  throwing variant is covered by that construction, not yet by a
+  run (the PCI removal needs `adb root`, which a Play Store image
+  refuses). No native resource is
   held, so refcounting is trivially satisfied.
 - `openDirectory` takes a read+write grant and falls back to
   read-only, reporting `persistable` honestly, so a read-only tree

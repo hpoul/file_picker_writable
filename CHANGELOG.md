@@ -23,6 +23,26 @@
     releases the first one's holds, and is logged as a warning.
   * On Android, `openDirectory` accepts a read-only tree and reports
     `persistable` accordingly.
+  * `listChildren(identifier:)` lists one level of a picked directory in
+    one call, metadata only (`ChildEntry`: name, identifier, isDirectory,
+    size, lastModified), never copying a file. Child identifiers work
+    wherever an identifier is taken, including `listChildren` and
+    `acquire`. Dotfiles are listed like any other name.
+  * `lookupChild(identifier:, name:)` answers "is there a child called
+    this?" without listing: the entry, or null when absent. A gone
+    parent is loud. On Android's system storage provider it is one row
+    query, not a listing, and it matches like the file system:
+    case-insensitively on shared storage and FAT/exFAT, where the
+    returned name echoes the requested spelling. Treat a hit as "taken";
+    stored names come from `listChildren`. A name that is not a single
+    leaf throws `ArgumentError` (natively `invalid-name`).
+  * Directory errors add `not-a-directory`; a missing or detached parent
+    reuses `not-found` / `permission-lost` (`reason: volume-absent` or
+    `trashed`).
+  * On iOS, child identifiers are the picked folder's bookmark plus a
+    relative path, and access comes from that folder's scope. Persist the
+    picked folder's identifier and re-derive children by listing: a child
+    identifier follows a rename only through its root, as on Android.
 * Android: every method-channel call now runs on a shared background
   TaskQueue instead of the main thread, so slow providers no longer block
   frames. The pickers and `init` still hop to the main thread. Launch URLs

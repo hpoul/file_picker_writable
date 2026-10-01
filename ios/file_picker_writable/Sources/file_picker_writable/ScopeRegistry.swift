@@ -5,6 +5,8 @@ enum ErrorKind {
   static let permissionLost = "permission-lost"
   static let notFound = "not-found"
   static let scopeClosed = "scope-closed"
+  static let notADirectory = "not-a-directory"
+  static let invalidName = "invalid-name"
 }
 
 /// A failure that belongs to the taxonomy, raised as `kind`.

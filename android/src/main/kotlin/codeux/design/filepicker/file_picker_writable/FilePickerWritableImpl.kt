@@ -57,6 +57,14 @@ class FilePickerWritableImpl(
     const val REQUEST_CODE_OPEN_FILE = 40832
     const val REQUEST_CODE_CREATE_FILE = 40833
     const val REQUEST_CODE_OPEN_DIRECTORY = 40834
+
+    private val DOCUMENT_PROJECTION = arrayOf(
+      DocumentsContract.Document.COLUMN_DOCUMENT_ID,
+      DocumentsContract.Document.COLUMN_DISPLAY_NAME,
+      DocumentsContract.Document.COLUMN_MIME_TYPE,
+      DocumentsContract.Document.COLUMN_SIZE,
+      DocumentsContract.Document.COLUMN_LAST_MODIFIED
+    )
   }
 
   // Every mutable field below is touched on the main hop only, except the
@@ -467,7 +475,7 @@ class FilePickerWritableImpl(
       throw TaxonomyException(ErrorKind.PERMISSION_LOST, "No persisted grant covers $uri")
     }
     val documentUri = documentUriFor(uri)
-    val name = queryDisplayName(documentUri, contentResolver)
+    val name = onVolume(documentUri) { queryDisplayName(documentUri, contentResolver) }
       ?: throw missingDocument(documentUri)
     val (token, dropped) = scopes.add(session, identifier)
     if (dropped > 0) {
@@ -496,6 +504,221 @@ class FilePickerWritableImpl(
       plugin.logDebug("release: unknown scope token $token, ignored.")
     }
     plugin.logDebug("release: ${scopes.size} scope token(s) live.")
+  }
+
+  /**
+   * One level of the directory [identifier] names, in one cursor pass:
+   * metadata only, never a copy. Android identifiers never go stale, so
+   * the identifier is echoed unrepaired.
+   */
+  @WorkerThread
+  fun listChildren(identifier: String): Map<String, Any?> {
+    val started = System.nanoTime()
+    val directory = requireDirectory(identifier)
+    val entries = requireChildren(directory)
+    plugin.logDebug(
+      "listChildren: ${entries.size} rows in ${(System.nanoTime() - started) / 1_000_000} ms"
+    )
+    return mapOf(
+      "identifier" to identifier,
+      "repaired" to false,
+      "entries" to entries.map { it.toResult(directory.treeUri) }
+    )
+  }
+
+  /**
+   * The child [name] of the directory [identifier], or null when absent.
+   * ExternalStorageProvider IDs are paths, so the child's ID is derived
+   * and queried as one row; any other provider is opaque, so it falls back
+   * to scanning the listing (same answer, listing cost; names match
+   * exactly there, unlike ExternalStorageProvider's file system match).
+   */
+  @WorkerThread
+  fun lookupChild(identifier: String, name: String): Map<String, Any?>? {
+    if (!isLeafName(name)) {
+      throw TaxonomyException(ErrorKind.INVALID_NAME, "Not a single leaf name: \"$name\"")
+    }
+    val directory = requireDirectory(identifier)
+    val child = if (directory.treeUri.authority == StorageVolumes.AUTHORITY) {
+      val childUri = DocumentsContract.buildDocumentUriUsingTree(
+        directory.treeUri,
+        StorageVolumes.childDocumentId(directory.documentId, name)
+      )
+      try {
+        queryRow(childUri)
+      } catch (e: IllegalArgumentException) {
+        // The provider's tree check (isChildDocument) throws for a child it
+        // cannot resolve — a missing file ("Failed to determine if … is
+        // child of …", measured API 36), but also a canonicalize failure on
+        // a failing stick, or a parent that vanished since requireDirectory.
+        // So never decide on the exception: re-query the parent. Only a
+        // parent that is still a live directory makes this the absent child.
+        plugin.logDebug("lookupChild: child query threw ${e.message}; re-checking the parent")
+        val parent = directoryRow(directory.documentUri, directory.isTreeRoot)
+        if (!parent.isDirectory) {
+          // Replaced by a file mid-call.
+          throw TaxonomyException(ErrorKind.NOT_A_DIRECTORY, "${parent.name} is not a directory")
+        }
+        // Usually the absent child ("Missing file for …", logged above).
+        // The residual case is a live parent whose child could not be
+        // canonicalized (a failing stick): the answer is still absent, but
+        // it is kept visible. The message picks the log level only, never
+        // the answer.
+        if (e.message?.contains("Missing file for") != true) {
+          plugin.logWarning("lookupChild: answering absent for a live parent after: ${e.message}")
+        }
+        null
+      } ?: run {
+        // A volume detached since requireDirectory reads as a null row.
+        absentVolume(childUri)?.let { throw it }
+        null
+      }
+    } else {
+      requireChildren(directory).firstOrNull { it.name == name }
+    }
+    return child?.toResult(directory.treeUri)
+  }
+
+  private class Directory(
+    val treeUri: Uri,
+    val documentId: String,
+    val documentUri: Uri,
+    /** The picked tree's own root, whose tree check never runs. */
+    val isTreeRoot: Boolean
+  )
+
+  private class DocumentRow(
+    val documentId: String,
+    val name: String,
+    val mimeType: String?,
+    val size: Long?,
+    val lastModified: Long?
+  ) {
+    val isDirectory: Boolean
+      get() = mimeType == DocumentsContract.Document.MIME_TYPE_DIR
+
+    fun toResult(treeUri: Uri): Map<String, Any?> = mapOf(
+      "name" to name,
+      "identifier" to DocumentsContract.buildDocumentUriUsingTree(treeUri, documentId).toString(),
+      "isDirectory" to isDirectory,
+      // A directory's size is the file system's block size, not content:
+      // null, as on iOS.
+      "size" to if (isDirectory) null else size,
+      "lastModified" to lastModified
+    )
+  }
+
+  /**
+   * Resolves [identifier] to a directory under a live persisted tree grant:
+   * `not-a-directory` unless it is a tree URI naming a directory,
+   * `permission-lost` without a grant, and [missingDocument] when gone.
+   */
+  @WorkerThread
+  private fun requireDirectory(identifier: String): Directory {
+    val uri = Uri.parse(identifier)
+    if (!DocumentsContract.isTreeUri(uri)) {
+      throw TaxonomyException(ErrorKind.NOT_A_DIRECTORY, "Not a directory tree URI: $uri")
+    }
+    if (!hasPersistedReadGrant(requireContext().contentResolver, uri)) {
+      throw TaxonomyException(ErrorKind.PERMISSION_LOST, "No persisted grant covers $uri")
+    }
+    val treeUri = DocumentsContract.buildTreeDocumentUri(
+      uri.authority, DocumentsContract.getTreeDocumentId(uri)
+    )
+    val documentUri = documentUriFor(uri)
+    val documentId = DocumentsContract.getDocumentId(documentUri)
+    val isTreeRoot = documentId == DocumentsContract.getTreeDocumentId(uri)
+    val row = directoryRow(documentUri, isTreeRoot)
+    if (!row.isDirectory) {
+      throw TaxonomyException(ErrorKind.NOT_A_DIRECTORY, "${row.name} is not a directory")
+    }
+    return Directory(treeUri, documentId, documentUri, isTreeRoot)
+  }
+
+  /**
+   * The row of a directory that must still exist, else [missingDocument]
+   * (`not-found`, or `volume-absent`). A gone tree root reads as a null
+   * row, but anything below it goes through the provider's tree check,
+   * which throws `IllegalArgumentException` for a missing file instead
+   * (FileSystemProvider wraps the FileNotFoundException). So for a
+   * non-root directory that exception means gone, never a raw error.
+   */
+  @WorkerThread
+  private fun directoryRow(documentUri: Uri, isTreeRoot: Boolean): DocumentRow {
+    // The provider's message ("Missing file for", "Failed to
+    // canonicalize", "No root for") travels on as the cause, so details
+    // can tell them apart.
+    val (row, cause) = try {
+      queryRow(documentUri) to null
+    } catch (e: IllegalArgumentException) {
+      if (isTreeRoot) {
+        throw e
+      }
+      plugin.logDebug("Directory query threw ${e.message}; treating it as gone")
+      null to e
+    }
+    return row ?: throw missingDocument(documentUri, cause)
+  }
+
+  /**
+   * All children of [directory], else [missingDocument]: a folder removed
+   * since [requireDirectory] shows up here, as a null cursor or, below the
+   * tree root, as the tree check's `IllegalArgumentException`.
+   */
+  @WorkerThread
+  private fun requireChildren(directory: Directory): List<DocumentRow> {
+    val (children, cause) = try {
+      queryChildren(directory) to null
+    } catch (e: IllegalArgumentException) {
+      if (directory.isTreeRoot) {
+        throw e
+      }
+      plugin.logDebug("Children query threw ${e.message}; treating the directory as gone")
+      null to e
+    }
+    return children ?: throw missingDocument(directory.documentUri, cause)
+  }
+
+  /** The one row for [documentUri], or null when the provider has none. */
+  @WorkerThread
+  private fun queryRow(documentUri: Uri): DocumentRow? = onVolume(documentUri) {
+    requireContext().contentResolver.query(documentUri, DOCUMENT_PROJECTION, null, null, null)
+      ?.use { cursor -> if (cursor.moveToFirst()) cursor.toDocumentRow() else null }
+  }
+
+  /** All children of [directory] in one pass, or null for a null cursor. */
+  @WorkerThread
+  private fun queryChildren(directory: Directory): List<DocumentRow>? {
+    val childrenUri = DocumentsContract.buildChildDocumentsUriUsingTree(
+      directory.treeUri, directory.documentId
+    )
+    return onVolume(directory.documentUri) {
+      requireContext().contentResolver
+        .query(childrenUri, DOCUMENT_PROJECTION, null, null, null)
+        ?.use { cursor ->
+          buildList {
+            while (cursor.moveToNext()) {
+              add(cursor.toDocumentRow())
+            }
+          }
+        }
+    }
+  }
+
+  private fun Cursor.toDocumentRow(): DocumentRow {
+    val id = getColumnIndexOrThrow(DocumentsContract.Document.COLUMN_DOCUMENT_ID)
+    val name = getColumnIndexOrThrow(DocumentsContract.Document.COLUMN_DISPLAY_NAME)
+    val mime = getColumnIndex(DocumentsContract.Document.COLUMN_MIME_TYPE)
+    val size = getColumnIndex(DocumentsContract.Document.COLUMN_SIZE)
+    val modified = getColumnIndex(DocumentsContract.Document.COLUMN_LAST_MODIFIED)
+    return DocumentRow(
+      documentId = getString(id),
+      name = getString(name),
+      mimeType = if (mime < 0 || isNull(mime)) null else getString(mime),
+      size = if (size < 0 || isNull(size)) null else getLong(size),
+      // Providers that don't track it report 0: that is "won't say".
+      lastModified = if (modified < 0 || isNull(modified)) null else getLong(modified).takeIf { it > 0 }
+    )
   }
 
   fun onDetachedFromEngine() {
@@ -534,21 +757,48 @@ class FilePickerWritableImpl(
    * opaque, so a detached volume there still reads as `not-found`.
    */
   @WorkerThread
-  private fun missingDocument(documentUri: Uri): TaxonomyException {
-    val volume = if (documentUri.authority == StorageVolumes.AUTHORITY) {
-      StorageVolumes.volumeOf(DocumentsContract.getDocumentId(documentUri))
-    } else {
-      null
+  private fun missingDocument(documentUri: Uri, cause: Throwable? = null): TaxonomyException =
+    absentVolume(documentUri, cause)
+      ?: TaxonomyException(ErrorKind.NOT_FOUND, "No document at $documentUri", cause)
+
+  /**
+   * `permission-lost` (`volume-absent`) when [documentUri] lives on an
+   * ExternalStorageProvider volume that is absent or unmounted, else null.
+   */
+  @WorkerThread
+  private fun absentVolume(documentUri: Uri, cause: Throwable? = null): TaxonomyException? {
+    if (documentUri.authority != StorageVolumes.AUTHORITY) {
+      return null
     }
-    if (volume != null && !isMounted(volume)) {
-      return TaxonomyException(
-        ErrorKind.PERMISSION_LOST,
-        "Storage volume of $documentUri is not mounted",
-        details = mapOf("reason" to "volume-absent")
-      )
+    val volume = StorageVolumes.volumeOf(DocumentsContract.getDocumentId(documentUri))
+    if (volume == null || isMounted(volume)) {
+      return null
     }
-    return TaxonomyException(ErrorKind.NOT_FOUND, "No document at $documentUri")
+    return TaxonomyException(
+      ErrorKind.PERMISSION_LOST,
+      "Storage volume of $documentUri is not mounted",
+      cause,
+      details = mapOf("reason" to "volume-absent")
+    )
   }
+
+  /**
+   * Runs a provider call on [documentUri]. A removed volume does not
+   * always read as a null row: once its root is gone the provider's tree
+   * check throws `IllegalArgumentException("… No root for <uuid>")`, and a
+   * plain document URI throws `FileNotFoundException`. The cause does not
+   * cross Binder, so rather than match on the class or message, any
+   * exception is first checked against the volume's state.
+   */
+  @WorkerThread
+  private inline fun <T> onVolume(documentUri: Uri, block: () -> T): T =
+    try {
+      block()
+    } catch (e: Exception) {
+      val absent = absentVolume(documentUri, e) ?: throw e
+      plugin.logDebug("Volume absent; the provider threw ${e.javaClass.name}: ${e.message}")
+      throw absent
+    }
 
   private fun isMounted(volume: StorageVolumes.Volume): Boolean {
     val storageManager = requireContext().getSystemService(StorageManager::class.java)

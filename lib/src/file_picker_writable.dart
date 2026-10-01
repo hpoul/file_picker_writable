@@ -141,6 +141,136 @@ class AcquiredScope {
       'path: $path, displayName: $displayName}';
 }
 
+/// Metadata for one direct child of a directory, from
+/// [FilePickerWritable.listChildren] or [FilePickerWritable.lookupChild].
+/// Listing never copies a file or touches temp storage.
+@experimental
+class ChildEntry {
+  ChildEntry({
+    required this.name,
+    required String identifier,
+    required this.isDirectory,
+    required this.size,
+    required this.lastModified,
+  }) : _identifierPrefix = '',
+       _identifierSuffix = identifier;
+
+  ChildEntry._composed(
+    this._identifierPrefix,
+    this._identifierSuffix, {
+    required this.name,
+    required this.isDirectory,
+    required this.size,
+    required this.lastModified,
+  });
+
+  /// [result] carries either a full `identifier` (a lookup; Android) or an
+  /// `identifierSuffix` to append to the listing's shared
+  /// [identifierPrefix] (an iOS listing, where the prefix is the ~2.5 KB
+  /// root bookmark: sent and kept once, not once per child).
+  static ChildEntry _fromResult(
+    Map<Object?, Object?> result, {
+    String? identifierPrefix,
+  }) {
+    final lastModified = result['lastModified'] as int?;
+    final suffix = result['identifierSuffix'] as String?;
+    final full = result['identifier'] as String?;
+    if ((suffix == null) == (full == null)) {
+      throw StateError(
+        'A child entry needs exactly one of identifier and identifierSuffix',
+      );
+    }
+    if (suffix != null && identifierPrefix == null) {
+      throw StateError('Got an identifierSuffix without an identifierPrefix');
+    }
+    return ChildEntry._composed(
+      suffix == null ? '' : identifierPrefix!,
+      suffix ?? full!,
+      name: result['name']! as String,
+      isDirectory: result['isDirectory']! as bool,
+      size: result['size'] as int?,
+      // 0 (or less) is a provider that doesn't track it: "won't say".
+      // Normalized here so the rule holds on every platform.
+      lastModified: lastModified == null || lastModified <= 0
+          ? null
+          : DateTime.fromMillisecondsSinceEpoch(lastModified, isUtc: true),
+    );
+  }
+
+  /// The child's name as the provider stores it. Names starting with `.`
+  /// are ordinary names; nothing filters them.
+  final String name;
+
+  /// Opaque identifier for the child, usable wherever an identifier is
+  /// taken (including [FilePickerWritable.listChildren] for a
+  /// subdirectory). Never parse it, and never compare it: the same child
+  /// can come back under a different identifier (a repaired root rewrites
+  /// every child's, and a lookup echoes the requested spelling). It is a
+  /// locator for this session; persist the picked folder's identifier and
+  /// re-derive children by name.
+  ///
+  /// Composed on first read from a prefix shared by the whole listing, so a
+  /// large listing holds the prefix once and pays for a full identifier
+  /// only on the entries whose identifier is actually used.
+  late final String identifier = _identifierPrefix + _identifierSuffix;
+
+  final String _identifierPrefix;
+  final String _identifierSuffix;
+
+  final bool isDirectory;
+
+  /// Size in bytes, or null when the provider won't say. Always null for a
+  /// directory.
+  final int? size;
+
+  /// Last modification time, or null when the provider won't say (a
+  /// provider reporting 0 counts as not saying).
+  final DateTime? lastModified;
+
+  @override
+  String toString() =>
+      'ChildEntry{name: $name, isDirectory: $isDirectory, size: $size, '
+      'lastModified: $lastModified}';
+}
+
+/// One level of a directory, from [FilePickerWritable.listChildren].
+@experimental
+class DirectoryListing {
+  DirectoryListing({
+    required this.entries,
+    required this.identifier,
+    required this.repaired,
+  });
+
+  static DirectoryListing _fromResult(Map<String, Object?> result) {
+    final identifierPrefix = result['identifierPrefix'] as String?;
+    return DirectoryListing(
+      entries: [
+        for (final entry in result['entries']! as List<Object?>) ...[
+          ChildEntry._fromResult(
+            entry! as Map<Object?, Object?>,
+            identifierPrefix: identifierPrefix,
+          ),
+        ],
+      ],
+      identifier: result['identifier']! as String,
+      repaired: result['repaired']! as bool,
+    );
+  }
+
+  /// The direct children, in the provider's order, which is unspecified.
+  final List<ChildEntry> entries;
+
+  /// The directory identifier to use from now on. Equal to the listed
+  /// identifier unless [repaired].
+  final String identifier;
+
+  /// True when the listed identifier was stale and [identifier] is a
+  /// fresh replacement the app MUST persist, as with
+  /// [AcquiredScope.repaired].
+  final bool repaired;
+}
+
 typedef FileReader<T> = Future<T> Function(FileInfo fileInfo, File file);
 
 /// Singleton to accessing services of the FilePickerWritable plugin.
@@ -481,6 +611,82 @@ class FilePickerWritable {
       return;
     }
     await _channel.invokeMethod<void>('release', {'id': scope.id});
+  }
+
+  /// Lists one level of the directory [identifier] names: metadata only,
+  /// in one call, never copying a file. Recurse by passing a child's
+  /// [ChildEntry.identifier] back in.
+  ///
+  /// Manages native scope itself for the duration of the call. A stale
+  /// directory identifier is repaired like [acquire]'s: see
+  /// [DirectoryListing.repaired].
+  ///
+  /// Failures are [PlatformException]s with the kinds listed on
+  /// [AcquiredScope], plus `not-a-directory` when [identifier] resolves to
+  /// something that is not a listable directory. One exception to
+  /// loudness: Android's system storage provider lists a directory it
+  /// cannot read (e.g. on a failing stick) as empty, so an empty listing
+  /// is not proof of an empty folder.
+  ///
+  /// Android and iOS only; throws [UnsupportedError] elsewhere.
+  @experimental
+  Future<DirectoryListing> listChildren({required String identifier}) async {
+    _logger.finest('listChildren()');
+    _requireScopePlatform('listChildren');
+    final result = await _channel.invokeMapMethod<String, Object?>(
+      'listChildren',
+      {'identifier': identifier},
+    );
+    if (result == null) {
+      throw StateError('Got null response for listChildren');
+    }
+    return DirectoryListing._fromResult(result);
+  }
+
+  /// Looks up the child called [name] directly under the directory
+  /// [identifier], without listing it. Returns null when there is no such
+  /// child: absence is an answer, not an error. A gone or unreadable
+  /// directory is loud, with the same kinds as [listChildren].
+  ///
+  /// [name] is a single leaf name: empty, `.`, `..`, or anything containing
+  /// `/` or NUL throws [ArgumentError]. On Android's system storage
+  /// provider matching is the file system's: case-insensitive on shared
+  /// storage and FAT/exFAT sticks, which also ignore trailing dots and
+  /// spaces, so `TRIP.JSON` or `trip.json ` find `trip.json`, and
+  /// [ChildEntry.name] echoes the requested spelling rather than the stored
+  /// one. Other providers match the exact name. Treat a hit as "that name
+  /// is taken", and read stored names from [listChildren].
+  ///
+  /// Unlike [listChildren], a stale directory identifier is not reported
+  /// here; [acquire] or [listChildren] repair it.
+  ///
+  /// Android and iOS only; throws [UnsupportedError] elsewhere.
+  @experimental
+  Future<ChildEntry?> lookupChild({
+    required String identifier,
+    required String name,
+  }) async {
+    _logger.finest('lookupChild()');
+    _requireScopePlatform('lookupChild');
+    _requireLeafName(name);
+    final result = await _channel.invokeMapMethod<String, Object?>(
+      'lookupChild',
+      {'identifier': identifier, 'name': name},
+    );
+    if (result == null) {
+      return null;
+    }
+    return ChildEntry._fromResult(result);
+  }
+
+  static void _requireLeafName(String name) {
+    if (name.isEmpty ||
+        name == '.' ||
+        name == '..' ||
+        name.contains('/') ||
+        name.contains('\u0000')) {
+      throw ArgumentError.value(name, 'name', 'Not a single leaf name');
+    }
   }
 
   void _requireScopePlatform(String verb) {
