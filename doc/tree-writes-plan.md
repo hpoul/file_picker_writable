@@ -571,10 +571,15 @@ before graduation.
     again ⇒ success; the picked root ⇒ `root-protected`. Across
     picks: internal → stick ⇒ `unsupported-move`, nothing moved;
     two picks on one volume (simulator) ⇒ moved and moved back.
+  - The same tree matrix on a physical iPhone XR (iOS 18.7, debug
+    build of the example, sandbox enforced), at efad722: every
+    step as on the simulator. Only one folder is picked there, so
+    no cross-pick move. The fixture was removed afterwards
+    (`FPW_CLEANUP`).
   - Not run yet: `move-partial` (needs a rename that fails after
     a move; no provider failure can be forced on the emulator), a
     provider auto-rename racing a create, an opaque provider (the
-    listing fallbacks), a read-only grant, the physical iPhone.
+    listing fallbacks), a read-only grant.
 
 ## 8. Graduation (experimental → stable)
 
