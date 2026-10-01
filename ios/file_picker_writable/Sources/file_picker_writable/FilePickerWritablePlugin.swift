@@ -569,6 +569,9 @@ public class FilePickerWritablePlugin: NSObject, FlutterPlugin {
       try FileManager.default.createDirectory(at: child.url, withIntermediateDirectories: false)
     } catch let error as NSError where error.domain == NSCocoaErrorDomain && error.code == NSFileWriteFileExistsError {
       throw TaxonomyError(kind: ErrorKind.alreadyExists, message: "\"\(name)\" is taken", underlying: error, details: ["name": name])
+    } catch let error as NSError where error.domain == NSCocoaErrorDomain && error.code == NSFileNoSuchFileError {
+      // The parent went away since it was checked.
+      throw TaxonomyError(kind: ErrorKind.notFound, message: "\(parent.url.lastPathComponent) is gone", underlying: error)
     }
     return try _childEntry(child.url, identifierKey: "identifier", identifierValue: child.identifier(withRoot: child.currentRoot()))
   }
@@ -589,12 +592,13 @@ public class FilePickerWritablePlugin: NSObject, FlutterPlugin {
     try _requireContained(resolved)
     let url = resolved.url
     // Gone, or gone into the Trash with its root: either way deleted.
-    guard (try? url.checkResourceIsReachable()) == true || Self._isSymlink(url),
+    guard (try? url.checkResourceIsReachable()) == true || TreeWalk.isSymlink(url),
       !url.standardizedFileURL.pathComponents.contains(".Trash")
     else {
       return
     }
-    if try Self._isRealDirectory(url) {
+    try _requireRealPathBelowRoot(resolved)
+    if try TreeWalk.isRealDirectory(url) {
       let children = try FileManager.default.contentsOfDirectory(at: url, includingPropertiesForKeys: nil, options: [])
       if !children.isEmpty {
         guard recursive else {
@@ -603,10 +607,10 @@ public class FilePickerWritablePlugin: NSObject, FlutterPlugin {
             message: "\(url.lastPathComponent) holds \(children.count) entries"
           )
         }
-        try Self._deleteChildren(children)
+        try TreeWalk.deleteChildren(children)
       }
     }
-    try Self._removeIfPresent(url)
+    try TreeWalk.removeIfPresent(url)
   }
 
   /// Moves `identifier` from the directory `sourceToken` names into the one
@@ -623,6 +627,7 @@ public class FilePickerWritablePlugin: NSObject, FlutterPlugin {
     let target = try _requireDirectoryScope(targetToken)
     try _requireContained(item)
     try _requireLive(item.url)
+    try _requireRealPathBelowRoot(item)
     guard item.url.deletingLastPathComponent().standardizedFileURL.path == source.url.standardizedFileURL.path else {
       throw TaxonomyError(
         kind: ErrorKind.notFound,
@@ -643,7 +648,7 @@ public class FilePickerWritablePlugin: NSObject, FlutterPlugin {
     if destination.url.standardizedFileURL.path != item.url.standardizedFileURL.path {
       // Checked first so the answer does not depend on how moveItem
       // reports a collision; moveItem still refuses one that races in.
-      if (try? destination.url.checkResourceIsReachable()) == true || Self._isSymlink(destination.url) {
+      if (try? destination.url.checkResourceIsReachable()) == true || TreeWalk.isSymlink(destination.url) {
         throw TaxonomyError(kind: ErrorKind.alreadyExists, message: "\"\(name)\" is taken", details: ["name": name])
       }
       do {
@@ -676,9 +681,11 @@ public class FilePickerWritablePlugin: NSObject, FlutterPlugin {
 
   /// `root-protected` for a picker's own result (a plain bookmark, file or
   /// folder): only entries inside a picked folder may be deleted or moved,
-  /// so one wrong identifier cannot take a whole pick with it.
+  /// so one wrong identifier cannot take a whole pick with it. A path
+  /// component FAT would strip to nothing (`.. `) is refused too, as on
+  /// Android: on such a volume `a/.. ` could name the root.
   private func _requireBelowRoot(_ resolved: ResolvedIdentifier) throws {
-    guard !resolved.relativePath.isEmpty else {
+    guard !resolved.relativePath.isEmpty, !TreeWalk.hasStrippableComponent(resolved.relativePath) else {
       throw TaxonomyError(
         kind: ErrorKind.rootProtected,
         message: "\(resolved.url.lastPathComponent) is a picked root: only entries inside a picked folder can be deleted or moved"
@@ -686,34 +693,35 @@ public class FilePickerWritablePlugin: NSObject, FlutterPlugin {
     }
   }
 
-  private static func _isSymlink(_ url: URL) -> Bool {
-    (try? url.resourceValues(forKeys: [.isSymbolicLinkKey]))?.isSymbolicLink == true
-  }
-
-  /// A directory itself, not a symlink to one (resource values do not
-  /// follow the final link, but say so explicitly).
-  private static func _isRealDirectory(_ url: URL) throws -> Bool {
-    let values = try url.resourceValues(forKeys: [.isDirectoryKey, .isSymbolicLinkKey])
-    return values.isDirectory == true && values.isSymbolicLink != true
-  }
-
-  /// Depth-first: every child before its directory; links removed as links.
-  private static func _deleteChildren(_ children: [URL]) throws {
-    for child in children {
-      if try _isRealDirectory(child) {
-        let grandchildren = try FileManager.default.contentsOfDirectory(at: child, includingPropertiesForKeys: nil, options: [])
-        try _deleteChildren(grandchildren)
-      }
-      try _removeIfPresent(child)
+  /// The kernel's answer for an entry about to be deleted or moved: its
+  /// real path must lie strictly below the root's real path. Containment
+  /// above is textual plus symlinks; this closes any alias the file system
+  /// itself resolves (case, normalization, stripped characters), including
+  /// ones nobody has thought of. Call with the scope held, on an entry
+  /// that exists.
+  private func _requireRealPathBelowRoot(_ resolved: ResolvedIdentifier) throws {
+    guard
+      let root = TreeWalk.realPath(resolved.scopeURL),
+      let entry = TreeWalk.realEntryPath(resolved.url)
+    else {
+      throw TaxonomyError(
+        kind: ErrorKind.notFound,
+        message: "\(resolved.relativePath) does not resolve to a path",
+        details: ["reason": "outside-root"]
+      )
     }
-  }
-
-  /// `removeItem`, where something already gone is success.
-  private static func _removeIfPresent(_ url: URL) throws {
-    do {
-      try FileManager.default.removeItem(at: url)
-    } catch let error as NSError where error.domain == NSCocoaErrorDomain && error.code == NSFileNoSuchFileError {
-      return
+    if entry == root {
+      throw TaxonomyError(
+        kind: ErrorKind.rootProtected,
+        message: "\(resolved.relativePath) is the picked root itself"
+      )
+    }
+    guard root != "/", entry.hasPrefix(root + "/") else {
+      throw TaxonomyError(
+        kind: ErrorKind.notFound,
+        message: "\(resolved.relativePath) leaves its root",
+        details: ["reason": "outside-root"]
+      )
     }
   }
 

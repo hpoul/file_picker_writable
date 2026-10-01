@@ -13,3 +13,10 @@ swiftc -parse-as-library \
   ios/test/ChildIdentifierTests.swift \
   -o "$out/child_identifier_tests"
 "$out/child_identifier_tests"
+
+swiftc -parse-as-library \
+  ios/file_picker_writable/Sources/file_picker_writable/ChildIdentifier.swift \
+  ios/file_picker_writable/Sources/file_picker_writable/TreeWalk.swift \
+  ios/test/TreeWalkTests.swift \
+  -o "$out/tree_walk_tests"
+"$out/tree_walk_tests"

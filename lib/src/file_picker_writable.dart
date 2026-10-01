@@ -756,7 +756,10 @@ class FilePickerWritable {
   /// folder deleted before the throw, so nothing is left behind). A
   /// provider that cleaned the name (FAT-style characters on Android) is
   /// loud `invalid-name` with the provider's name in the details, again
-  /// with the residue deleted. [ChildEntry.name] is the stored name.
+  /// with the residue deleted. Only a fresh, empty folder is ever deleted:
+  /// should a provider hand back an existing folder instead, it is kept,
+  /// and the details say so (`residue: kept`, its `identifier`).
+  /// [ChildEntry.name] is the stored name.
   ///
   /// [name] follows the leaf-name rule of [lookupChild] ([ArgumentError]).
   /// Other failures: `scope-closed`, `not-a-directory`, `not-found`, and
@@ -787,7 +790,9 @@ class FilePickerWritable {
   /// plugin holds access for this call only.
   ///
   /// Idempotent: an entry that is already gone is success, never
-  /// `not-found`. A non-empty directory without [recursive] is loud
+  /// `not-found`. "Gone" is proven, never assumed: a provider that does not
+  /// answer, or a failing stick, stays loud rather than reading as deleted.
+  /// A non-empty directory without [recursive] is loud
   /// `directory-not-empty`; with it, the plugin deletes depth-first
   /// itself rather than trusting a provider's own recursion. Both checks
   /// are best-effort: emptiness is decided by listing, so a child created
@@ -796,7 +801,9 @@ class FilePickerWritable {
   /// A picked folder's own root (the identifier [openDirectory] returned,
   /// or its repaired form) is refused as `root-protected`: only entries
   /// inside a picked folder can be deleted, so one wrong identifier cannot
-  /// wipe a whole pick.
+  /// wipe a whole pick. That includes other spellings of the root on iOS
+  /// and on Android's system storage provider; other Android providers are
+  /// opaque, and there only the root's own identifier is recognized.
   ///
   /// Other failures: `permission-lost` (on Android also for a read-only
   /// grant, `reason: read-only`).
@@ -832,6 +839,14 @@ class FilePickerWritable {
   /// so the caller can find it. A move across providers or storage volumes
   /// is `unsupported-move` and is not attempted (copy, then delete). A
   /// picked folder's own root is `root-protected`, as for [deleteEntry].
+  /// A rename that changes only letter case is `already-exists` where the
+  /// storage ignores case (shared storage and FAT on Android, APFS on iOS).
+  ///
+  /// A move or rename can fail after it landed: when the volume goes away
+  /// while the result is verified, the error is `permission-lost` (`reason:
+  /// volume-absent`), and on Android a move with a rename adds `state:
+  /// unknown` and the `candidates` identifiers instead of guessing at a
+  /// rollback. List the parent before retrying.
   ///
   /// [newName] follows the leaf-name rule of [lookupChild]
   /// ([ArgumentError]). Other failures: `scope-closed`, `not-a-directory`,

@@ -228,8 +228,12 @@ class MainScreenState extends State<MainScreen> {
           ? removeDeviceFixture(directory)
           : runDeviceChecks(directory));
     }
-    if (!cleanUp && data.directories.length >= 2) {
-      await runCrossPickChecks(data.directories[0], data.directories[1]);
+    if (!cleanUp) {
+      // The first pick against every other one (another volume, or the
+      // same volume under another tree).
+      for (final other in data.directories.skip(1)) {
+        await runCrossPickChecks(data.directories.first, other);
+      }
     }
   }
 

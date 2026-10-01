@@ -67,6 +67,12 @@ class FilePickerWritableImpl(
       DocumentsContract.Document.COLUMN_SIZE,
       DocumentsContract.Document.COLUMN_LAST_MODIFIED
     )
+
+    /**
+     * How deep a recursive delete walks. Shared-storage paths end far
+     * sooner (4096 bytes); the cap only stops a provider whose tree loops.
+     */
+    private const val MAX_WALK_DEPTH = 256
   }
 
   // Every mutable field below is touched on the main hop only, except the
@@ -672,7 +678,11 @@ class FilePickerWritableImpl(
         return row.toResult(target.treeUri)
       }
       requireFree(target, finalName)
-      val renamed = renameVerified(target, itemUri, row.name, finalName)
+      val renamed = try {
+        renameVerified(target, itemUri, row.name, finalName)
+      } catch (e: RenamedBack) {
+        throw e.error
+      }
       return (rowBelowRoot(renamed) ?: throw missingDocument(renamed)).toResult(target.treeUri)
     }
     // Both names up front: a move must never strand the entry under a name
@@ -687,9 +697,19 @@ class FilePickerWritableImpl(
     }
     val renamed = try {
       renameVerified(target, moved, row.name, finalName)
+    } catch (e: RenamedBack) {
+      // Back under its original name, at the URI the rename back returned
+      // (the ID may have changed twice): roll the move back from there.
+      moveBack(e.restored, source, target, e.error)
+      throw e.error
     } catch (e: TaxonomyException) {
       if (e.kind == ErrorKind.MOVE_PARTIAL) {
         throw e
+      }
+      if (e.details["reason"] == "volume-absent") {
+        // The rename may or may not have landed before the volume went:
+        // a rollback now would act on a guess.
+        throw locationUnknown(e, moved, target, finalName)
       }
       moveBack(moved, source, target, e)
       throw e
@@ -698,6 +718,39 @@ class FilePickerWritableImpl(
       throw e
     }
     return (rowBelowRoot(renamed) ?: throw missingDocument(renamed)).toResult(target.treeUri)
+  }
+
+  /**
+   * [renameVerified] undid a rename it could not accept: the entry is back
+   * under its original name at [restored], and [error] says why.
+   */
+  private class RenamedBack(val restored: Uri, val error: TaxonomyException) :
+    Exception(error.message, error)
+
+  /**
+   * `volume-absent` mid-move, after the move landed: the entry is under
+   * [target], under its original name or already under [finalName]. Both
+   * candidates go in the details (the second only where the ID can be
+   * derived), so the caller can look once the volume is back.
+   */
+  private fun locationUnknown(
+    cause: TaxonomyException,
+    moved: Uri,
+    target: Directory,
+    finalName: String
+  ): TaxonomyException {
+    val candidates = mutableListOf(moved.toString())
+    if (target.treeUri.authority == StorageVolumes.AUTHORITY) {
+      candidates += DocumentsContract.buildDocumentUriUsingTree(
+        target.treeUri, StorageVolumes.childDocumentId(target.documentId, finalName)
+      ).toString()
+    }
+    return TaxonomyException(
+      ErrorKind.PERMISSION_LOST,
+      "The volume went away mid-move; the entry is at one of $candidates",
+      cause,
+      details = mapOf("reason" to "volume-absent", "state" to "unknown", "candidates" to candidates)
+    )
   }
 
   private fun requireLeaf(name: String) {
@@ -770,26 +823,90 @@ class FilePickerWritableImpl(
     DocumentsContract.buildTreeDocumentUri(uri.authority, DocumentsContract.getTreeDocumentId(uri))
 
   /**
-   * The row of a document below a tree's root, or null when it is gone:
-   * there the provider's tree check throws `IllegalArgumentException` for
-   * a missing document instead of returning no row. A detached volume is
-   * thrown as `volume-absent`, never answered as gone.
+   * The row of a document below a tree's root, or null only when it is
+   * provably gone ([requireGone]). A detached volume is thrown as
+   * `volume-absent`, and an absence that cannot be proven stays loud:
+   * "gone" lets a delete report success, so it is never a guess.
    */
   @WorkerThread
   private fun rowBelowRoot(documentUri: Uri): DocumentRow? {
-    val row = try {
-      queryRow(documentUri)
+    val (row, cause) = try {
+      queryRow(documentUri) to null
     } catch (e: IllegalArgumentException) {
-      plugin.logDebug("Row query threw ${e.message}; treating it as gone")
-      null
+      null to e
     }
-    if (row == null) {
-      absentVolume(documentUri)?.let { throw it }
+    if (row != null) {
+      return row
     }
-    return row
+    absentVolume(documentUri, cause)?.let { throw it }
+    requireGone(documentUri, cause)
+    return null
   }
 
-  /** [directory]'s children, or null when it is gone (as [rowBelowRoot]). */
+  /**
+   * Throws unless an absent row means the document is gone. A dead
+   * provider's query returns null too (`ContentResolver.query` swallows the
+   * `RemoteException`), and a failing stick throws other
+   * `IllegalArgumentException`s ("Failed to canonicalize"). On
+   * ExternalStorageProvider a missing document below the root is the tree
+   * check's "Missing file for", and the nearest ancestor that exists must
+   * be a live directory (its parent may be gone too, inside a deleted
+   * folder). Other providers are opaque: there a null row counts as gone
+   * only while the tree's root still answers.
+   */
+  @WorkerThread
+  private fun requireGone(documentUri: Uri, cause: IllegalArgumentException?) {
+    val treeUri = treeUriOf(documentUri)
+    val treeId = DocumentsContract.getTreeDocumentId(documentUri)
+    val proven = if (documentUri.authority == StorageVolumes.AUTHORITY) {
+      cause?.message?.contains("Missing file for") == true &&
+        hasLiveAncestor(treeUri, treeId, DocumentsContract.getDocumentId(documentUri))
+    } else {
+      val root = DocumentsContract.buildDocumentUriUsingTree(treeUri, treeId)
+      cause == null && (try {
+        queryRow(root)
+      } catch (e: IllegalArgumentException) {
+        null
+      }) != null
+    }
+    if (!proven) {
+      val answer = if (cause == null) "returned no row" else "threw: ${cause.message}"
+      throw IllegalStateException("Cannot tell whether $documentUri is gone: the provider $answer", cause)
+    }
+  }
+
+  /**
+   * Walks up from [documentId] to the nearest ancestor that exists: true
+   * when that is a live directory (the tree root included), false for any
+   * other answer, so that only a plain "Missing file for" chain ending in a
+   * live directory reads as gone.
+   */
+  @WorkerThread
+  private fun hasLiveAncestor(treeUri: Uri, treeId: String, documentId: String): Boolean {
+    var id = StorageVolumes.parentDocumentId(documentId) ?: return false
+    while (true) {
+      val isRoot = id == treeId
+      if (!isRoot && !StorageVolumes.isStrictlyBelow(treeId, id)) {
+        return false
+      }
+      val row = try {
+        queryRow(DocumentsContract.buildDocumentUriUsingTree(treeUri, id))
+      } catch (e: IllegalArgumentException) {
+        if (isRoot || e.message?.contains("Missing file for") != true) {
+          return false
+        }
+        id = StorageVolumes.parentDocumentId(id) ?: return false
+        continue
+      }
+      return row?.isDirectory == true
+    }
+  }
+
+  /**
+   * [directory]'s children, or null when it is provably gone: a listing
+   * that fails is decided by the directory's own row ([rowBelowRoot]), so
+   * a failing provider stays loud.
+   */
   @WorkerThread
   private fun childrenBelowRoot(directory: Directory): List<DocumentRow>? {
     val children = try {
@@ -797,20 +914,38 @@ class FilePickerWritableImpl(
     } catch (e: IllegalArgumentException) {
       null
     }
-    if (children == null) {
-      absentVolume(directory.documentUri)?.let { throw it }
+    if (children != null) {
+      return children
     }
-    return children
+    rowBelowRoot(directory.documentUri) ?: return null
+    throw IllegalStateException("The provider listed nothing for ${directory.documentUri}, which still exists")
   }
 
-  /** Depth-first: every child before its directory. */
+  /**
+   * Depth-first: every child before its directory. An opaque provider's
+   * graph may hold a document twice or loop, so each document is visited
+   * once, and the walk refuses to go deeper than [MAX_WALK_DEPTH] levels.
+   */
   @WorkerThread
-  private fun deleteChildren(directory: Directory, children: List<DocumentRow>) {
+  private fun deleteChildren(
+    directory: Directory,
+    children: List<DocumentRow>,
+    visited: MutableSet<String> = mutableSetOf(directory.documentId),
+    depth: Int = 1
+  ) {
+    if (depth > MAX_WALK_DEPTH) {
+      throw IllegalStateException(
+        "More than $MAX_WALK_DEPTH levels below ${directory.documentUri}: refusing to walk deeper"
+      )
+    }
     for (child in children) {
+      if (!visited.add(child.documentId)) {
+        continue
+      }
       val childUri = DocumentsContract.buildDocumentUriUsingTree(directory.treeUri, child.documentId)
       if (child.isDirectory) {
         val sub = Directory(directory.treeUri, child.documentId, childUri, isTreeRoot = false)
-        childrenBelowRoot(sub)?.let { deleteChildren(sub, it) }
+        childrenBelowRoot(sub)?.let { deleteChildren(sub, it, visited, depth + 1) }
       }
       deleteDocument(childUri)
     }
@@ -825,7 +960,15 @@ class FilePickerWritableImpl(
     } catch (e: TaxonomyException) {
       throw e
     } catch (e: Exception) {
-      if (rowBelowRoot(documentUri) == null) {
+      // Gone by now is success; anything unproven keeps the original error.
+      val gone = try {
+        rowBelowRoot(documentUri) == null
+      } catch (check: TaxonomyException) {
+        throw check
+      } catch (check: Exception) {
+        false
+      }
+      if (gone) {
         return
       }
       throw e
@@ -845,8 +988,8 @@ class FilePickerWritableImpl(
     }
   }
 
-  private fun alreadyExists(name: String) =
-    TaxonomyException(ErrorKind.ALREADY_EXISTS, "\"$name\" is taken", details = mapOf("name" to name))
+  private fun alreadyExists(name: String, extra: Map<String, Any?> = emptyMap()) =
+    TaxonomyException(ErrorKind.ALREADY_EXISTS, "\"$name\" is taken", details = mapOf("name" to name) + extra)
 
   /** `already-exists` when [name] is taken under [directory]. */
   @WorkerThread
@@ -857,10 +1000,14 @@ class FilePickerWritableImpl(
   }
 
   /**
-   * Undoes a create whose stored name is not the requested [name]: the
-   * fresh, empty residue is deleted, then `already-exists` when [name] is
-   * taken by now (a concurrent create, and the provider auto-renamed
-   * ours), else `invalid-name` (the provider cleaned the name).
+   * Undoes a create whose stored name is not the requested [name], then
+   * throws `already-exists` when [name] is taken by now (a concurrent
+   * create, and the provider auto-renamed ours), else `invalid-name` (the
+   * provider cleaned the name). Only a residue that is provably fresh, an
+   * empty directory, is deleted: a provider may hand back an EXISTING
+   * folder for the cleaned name (ExternalStorageProvider never does; it
+   * always makes a new one), and deleting that would delete the user's
+   * files. Anything else is left alone, its identifier in the details.
    */
   @WorkerThread
   private fun requireCreatedName(parent: Directory, created: Uri, row: DocumentRow, name: String) {
@@ -868,18 +1015,31 @@ class FilePickerWritableImpl(
       return
     }
     val taken = lookupChildRow(parent, name) != null
-    deleteResidue(created)
-    if (taken) {
-      throw alreadyExists(name)
+    val residue = Directory(parent.treeUri, DocumentsContract.getDocumentId(created), created, isTreeRoot = false)
+    val isFresh = row.isDirectory && try {
+      childrenBelowRoot(residue)?.isEmpty() == true
+    } catch (e: Exception) {
+      false
     }
-    throw invalidName(name, row.name)
+    val extra = if (isFresh) {
+      deleteResidue(created)
+      emptyMap()
+    } else {
+      plugin.logWarning("Not deleting $created: not an empty, fresh directory")
+      mapOf("identifier" to row.toResult(parent.treeUri)["identifier"], "residue" to "kept")
+    }
+    if (taken) {
+      throw alreadyExists(name, extra)
+    }
+    throw invalidName(name, row.name, extra)
   }
 
-  private fun invalidName(requested: String, actual: String) = TaxonomyException(
-    ErrorKind.INVALID_NAME,
-    "The provider stored \"$requested\" as \"$actual\"",
-    details = mapOf("requested" to requested, "actual" to actual)
-  )
+  private fun invalidName(requested: String, actual: String, extra: Map<String, Any?> = emptyMap()) =
+    TaxonomyException(
+      ErrorKind.INVALID_NAME,
+      "The provider stored \"$requested\" as \"$actual\"",
+      details = mapOf("requested" to requested, "actual" to actual) + extra
+    )
 
   /**
    * `unsupported-move` unless the entry and both parents share a provider,
@@ -973,7 +1133,8 @@ class FilePickerWritableImpl(
    * `renameDocument` of [documentUri] (named [original], under [parent])
    * to [name], returning the renamed URI. The stored name is verified: a
    * mismatch is renamed back to [original] (never deleted: it is the
-   * user's entry), then `already-exists` when [name] is taken by now, else
+   * user's entry), then [RenamedBack] carrying where it is now and the
+   * error: `already-exists` when [name] is taken by now, else
    * `invalid-name`. A rename back that fails or lands elsewhere is
    * `move-partial`.
    */
@@ -990,14 +1151,15 @@ class FilePickerWritableImpl(
     } catch (e: Exception) {
       throw movePartial(renamed, e)
     }
-    val restoredRow = rowBelowRoot(restored)
+    val restoredRow = try {
+      rowBelowRoot(restored)
+    } catch (e: Exception) {
+      throw movePartial(restored, e)
+    }
     if (restoredRow?.name != original) {
       throw movePartial(restored, IllegalStateException("Renamed back as ${restoredRow?.name}"))
     }
-    if (taken) {
-      throw alreadyExists(name)
-    }
-    throw invalidName(name, row.name)
+    throw RenamedBack(restored, if (taken) alreadyExists(name) else invalidName(name, row.name))
   }
 
   /** One `renameDocument`, as a URI under [parent]'s tree. */

@@ -387,7 +387,13 @@ Notes:
   miss means provider-cleaned → delete the residue, loud
   `invalid-name` with the actual name. The returned entry always
   carries the actual name. (Implemented in PR 4; on device the
-  `invalid-name` path leaves no residue, internal and vfat.)
+  `invalid-name` path leaves no residue, internal and vfat.) The
+  residue is deleted only when provably fresh — a directory with
+  no children (#71 review M3): a provider that sanitizes AND hands
+  back the existing folder for the cleaned name would otherwise
+  get the user's folder deleted. ExternalStorageProvider always
+  creates a new one (`buildUniqueFile`, then `mkdir`); anything
+  else is kept and named in the details (`residue: kept`).
 - `deleteEntry`: resolve identifier; `deleteDocument`. A gone
   identifier is success on every delete path (idempotent; the
   consumer's delete-if-present shape) — never loud `not-found`.
@@ -397,11 +403,20 @@ Notes:
   Non-recursive on a non-empty directory is loud
   `directory-not-empty`, checked by listing first.
   Best-effort: no atomic delete-if-empty primitive — a child created
-  after the listing may be deleted anyway (see §4). Gone is
-  decided like the directory verbs: below the tree root the
-  provider's tree check throws `IllegalArgumentException` for a
-  missing document, and a detached volume is `volume-absent`,
-  never "gone, so success". A picked root — a tree's own root, or
+  after the listing may be deleted anyway (see §4). Gone must be
+  PROVEN, because it reports success (#71 review M1): a dead
+  provider's query also returns null (`ContentResolver.query`
+  swallows the `RemoteException`), and a failing stick throws other
+  `IllegalArgumentException`s ("Failed to canonicalize"). So on
+  ExternalStorageProvider gone is only the tree check's "Missing
+  file for" with the nearest existing ancestor a live directory;
+  on other providers a null row counts only while the tree root
+  still answers; anything else stays loud, and a detached volume
+  is `volume-absent`. The walk visits each document once and stops
+  at 256 levels, against an opaque provider whose graph loops
+  (review S5; links cannot exist on ExternalStorageProvider's
+  volumes, see below, and one pointing out of the pick would fail
+  the provider's own canonicalizing tree check, loudly). A picked root — a tree's own root, or
   a single-document pick (not a tree URI) — is `root-protected`
   (§6, the owner's decision 2026-10-01): one wrong identifier must
   not take a whole pick with it. "Root" is decided by shape, not by
@@ -417,7 +432,12 @@ Notes:
   root. On the API 36 emulator `fpw-device-fixture/.. ` lists as
   `not-found` on internal and vfat storage alike (not stripped),
   so this is defense in depth, not an observed escape. Opaque
-  providers fall back to ID equality. The other route to the root,
+  providers fall back to ID equality, which is NOT exhaustive:
+  DownloadStorageProvider's root `downloads` is also named by
+  `raw:<public Download dir>`, and its tree check accepts that.
+  The plugin never mints such an ID; a caller would have to build
+  it by hand. So `root-protected` is exhaustive on
+  ExternalStorageProvider and iOS only (#71 review S3). The other route to the root,
   a symlink inside the tree pointing back at it, cannot arise on
   shared storage: `ln -s` there is refused even to the adb shell
   user, on emulated and vfat volumes alike (API 36 emulator).
@@ -452,8 +472,13 @@ Notes:
   additionally move the file back to the source parent after the
   rename-back (a bare rename-back would leave the source moved,
   contradicting the rollback contract); either restoration step
-  failing ⇒ `move-partial` with the actual identifier. Always
-  re-stat into a fresh
+  failing ⇒ `move-partial` with the actual identifier. The
+  rollback moves from wherever the rename back left the entry
+  (its URI may change twice on ID-changing providers), and never
+  runs on a guess: a volume that goes away while a landed rename
+  is verified is `volume-absent` with `state: unknown` and both
+  candidate identifiers, not a rollback naming the wrong place
+  (#71 review S1/S2). Always re-stat into a fresh
   `ChildEntry`. Cross-provider is loud `unsupported-move`, not
   attempted — and so is a move across ExternalStorageProvider
   volumes (internal ↔ stick: same provider, but `moveDocument`
@@ -483,8 +508,17 @@ Notes:
   never per-call). Non-recursive checks emptiness
   by listing first with the same best-effort race as Android
   (`FileManager.removeItem` is itself recursive). The walk removes
-  symlinks as links and never follows them (the fixture's
-  `out -> ../..` included). `FileManager` file-exists errors
+  symlinks as links and never follows them, pinned by a host test
+  (`ios/test/TreeWalkTests.swift`: links out to a sibling with a
+  canary, and one back to the root; verified to fail when the walk
+  follows links). (Corrected in review S4: an earlier sentence said
+  the device fixture's `out -> ../..` proved this; the tree checks
+  never reach it.) Before deleting or moving, the entry's real path
+  (`realpath(3)`, or for a link its directory's plus its name) must
+  lie strictly below the root's (#71 review M2): containment is
+  otherwise textual plus symlinks, and this closes any alias the
+  file system resolves. A path component FAT would strip to
+  nothing is refused as on Android. `FileManager` file-exists errors
   map to loud `already-exists` (nothing is created, so no residue
   cleanup); the target name is pre-checked before `moveItem`.
   Implementation correction: a move and a rename are ONE
@@ -592,10 +626,18 @@ before graduation.
     step as on the simulator. Only one folder is picked there, so
     no cross-pick move. The fixture was removed afterwards
     (`FPW_CLEANUP`).
-  - Not run yet: `move-partial` (needs a rename that fails after
-    a move; no provider failure can be forced on the emulator), a
-    provider auto-rename racing a create, an opaque provider (the
-    listing fallbacks), a read-only grant.
+  - Not run yet: `move-partial` and the `state: unknown` path
+    (need a rename that fails after a move, or a detach between a
+    landed rename and its check; neither can be forced on the
+    emulator), a provider auto-rename racing a create, an opaque
+    provider (the listing fallbacks, the "gone" proof via the tree
+    root, a residue that is not fresh), a dead provider, a
+    read-only grant.
+  - After the #71 review fixes (API 36 emulator): the whole matrix
+    again on internal and vfat, the repeated delete now through the
+    proven-gone path ("Missing file for" plus a live ancestor), and
+    a move between two picks on one volume (two tree URIs,
+    `FpwTree` → `FpwTree2` and back) on Android too.
 
 ## 8. Graduation (experimental → stable)
 
