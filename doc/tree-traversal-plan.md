@@ -374,7 +374,10 @@ taxonomy review before graduation (see §8).
       writes;
     - 10k children: 329 / 281 / 280 ms end to end in Dart over
       three runs; identifiers 2,575 bytes each, 25.8 MB in total
-      (§8);
+      (§8). After the shared-prefix change, re-run the same way:
+      240 / 201 / 200 ms, 91 KB of identifiers on the wire; child
+      and grandchild read/write, lookups and the symlink refusal
+      unchanged;
     - symlink `out -> ..` inside the folder: listed as an entry
       (`isDirectory: false`); `listChildren`, `lookupChild` and
       `readFile` through it ⇒ `not-found` `reason: outside-root`
@@ -398,10 +401,12 @@ Same bar as Gap 2b, evaluated independently:
    XR (2,575 bytes each, 280–329 ms end to end). `listChildren`
    now sends the shared identifier prefix once per listing and an
    encoded-name suffix per entry; Dart keeps the prefix once and
-   composes `identifier` on read. Simulator, 10k children:
-   1.6 KB prefix + 89 KB suffixes ≈ 91 KB instead of 16.5 MB
-   (~180×); 91–195 ms end to end over six runs (the simulator
-   is too noisy to show a time gain; the device decides).
+   composes `identifier` on read. iPhone XR (iOS 18.7.10, debug),
+   10k children: 2.5 KB prefix + 89 KB suffixes ≈ 91 KB instead of
+   25.8 MB (~280×), and 240 / 201 / 200 ms end to end in Dart
+   instead of 329 / 281 / 280 ms (native: directory read ~30 ms,
+   entries ~108 ms). Simulator: 91 KB instead of 16.5 MB, 91–195
+   ms (too noisy to show the time gain).
 3. Observed failures all map into the taxonomy — no new error kinds
    needed in the wild.
 
