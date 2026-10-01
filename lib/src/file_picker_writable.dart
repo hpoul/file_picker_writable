@@ -1,9 +1,11 @@
 import 'dart:async';
 import 'dart:convert';
+import 'dart:ffi';
 import 'dart:io';
 import 'dart:math';
 
 import 'package:file_picker_writable/src/event_handling.dart';
+import 'package:file_picker_writable/src/fd_native.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 import 'package:logging/logging.dart';
@@ -11,6 +13,8 @@ import 'package:meta/meta.dart' show experimental;
 import 'package:path/path.dart' as path;
 import 'package:path_provider/path_provider.dart';
 import 'package:synchronized/synchronized.dart';
+
+part 'fd_reading.dart';
 
 final _logger = Logger('file_picker_writable');
 
@@ -677,6 +681,70 @@ class FilePickerWritable {
       return null;
     }
     return ChildEntry._fromResult(result);
+  }
+
+  /// Opens the file [scope] holds for reading and hands its descriptor to
+  /// Dart: a control call that never reads a byte. Read it with an
+  /// [FdReader] in the isolate that consumes the bytes (see
+  /// [ReadSession]); a session that is never wrapped is closed with
+  /// [closeRead].
+  ///
+  /// [scope] must still be acquired (`scope-closed` otherwise) and stay
+  /// acquired until the reader closes. Failures are [PlatformException]s
+  /// with the kinds listed on [AcquiredScope], or `errno-<n>` for a failed
+  /// system call outside them (a directory is `errno-21`).
+  ///
+  /// Root isolate only, like [acquire]. Android and iOS only; throws
+  /// [UnsupportedError] elsewhere.
+  @experimental
+  Future<ReadSession> openRead({required AcquiredScope scope}) async {
+    _logger.finest('openRead()');
+    _requireScopePlatform('openRead');
+    _requireScopeLive(scope.id);
+    final result = await _channel.invokeMapMethod<String, Object?>('openRead', {
+      'scope': scope.id,
+    });
+    if (result == null) {
+      throw StateError('Got null response for openRead');
+    }
+    return ReadSession._(
+      result['fd']! as int,
+      scope.id,
+      seekable: result['seekable']! as bool,
+      length: result['length'] as int?,
+    );
+  }
+
+  /// Closes a [ReadSession] that no [FdReader] took over. Idempotent; on a
+  /// session that has a reader it closes the reader. A handed-off session
+  /// belongs to the helper: closing it here is a [StateError].
+  @experimental
+  Future<void> closeRead(ReadSession session) async {
+    session._requireOwned('closeRead');
+    final reader = session._reader;
+    if (reader != null) {
+      reader.close();
+      return;
+    }
+    if (session._closed) {
+      return;
+    }
+    session._closed = true;
+    final result = fpw_close(session.fd);
+    if (result < 0) {
+      throw _errnoException(-result, 'close');
+    }
+  }
+
+  /// `scope-closed` unless [id] is a scope this isolate acquired and has
+  /// not released.
+  void _requireScopeLive(String id) {
+    if (!_liveScopeIds.contains(id)) {
+      throw PlatformException(
+        code: 'scope-closed',
+        message: 'The scope $id was released (or never acquired here)',
+      );
+    }
   }
 
   static void _requireLeafName(String name) {

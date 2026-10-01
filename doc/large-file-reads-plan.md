@@ -220,9 +220,17 @@ Notes:
 - Cross-platform from day one: identical Dart verbs; Android fds
   come from ContentResolver + `detachFd`, iOS fds from `open(2)`
   under the held scope. Reads are Dart FFI plus one small shared
-  C shim (close finalizer + `-errno` wrappers — needs a build
-  step in the podspec and in the Android plugin). macOS and other
-  stub platforms throw `UnsupportedError` — loud beats silent.
+  C shim (close finalizer + `-errno` wrappers). Its build step is
+  a Dart native-assets build hook (`hook/build.dart`, `CBuilder`
+  from `native_toolchain_c`), not the podspec, the Swift package
+  or Gradle: one build for every platform, bound with `@Native`,
+  and it also runs under `flutter test`, so the VM tests exercise
+  the real shim. (Implementation correction: the plan named a
+  podspec and an Android plugin step. A gotcha found on the way:
+  an app built before the hook existed can keep its cached
+  `build_hooks` target even after `pub get`, and ship without the
+  shim until `flutter clean`.) macOS and other stub platforms
+  throw `UnsupportedError` — loud beats silent.
 - Single-owner rule: the fd has exactly one Dart owner at a time.
   `handoff()` transfers ownership to the helper isolate; the
   sender must not close afterwards. Double-close across isolates
@@ -301,7 +309,16 @@ Notes:
   `getStatSize` for seekability + length, `detachFd()` to transfer
   ownership to Dart. Never `fromFd` without retaining the PFD —
   its finalizer closes the fd mid-read (measured: `pread64
-  interrupted by close()`, then `EBADF`).
+  interrupted by close()`, then `EBADF`). Errors follow the
+  directory verbs (implementation detail, settled in code): the
+  persisted grant is checked first (revoked ⇒ `permission-lost`);
+  any exception from the open runs the volume check first (a
+  pulled stick is `volume-absent` whatever the provider threw);
+  below the tree root the provider's `IllegalArgumentException`
+  is the missing file (`not-found`). A directory opens fine as an
+  fd and `getStatSize` would call it a pipe, so `openRead`
+  `fstat`s and refuses it as `errno-21` (EISDIR), the code a read
+  would have failed with — not a new taxonomy kind.
 - No native handle registry: nothing is held past the call, so
   there is no session map, no native mutex, no leak surface. All
   Android complexity is fd acquisition + error mapping.
@@ -324,7 +341,13 @@ Notes:
 ### iOS (Swift, inside a Gap-1a scope)
 
 - `openRead` requires a live `AcquiredScope`, opens the path with
-  `open(2)` `O_RDONLY`, `fstat`s for length, returns the fd.
+  `open(2)` `O_RDONLY`, `fstat`s for length, returns the fd. The
+  registry keeps each token's target next to its hold (holds are
+  on the root's scope, so a child's token would otherwise not
+  know its file). Only a regular file is seekable with a length,
+  as on Android; a directory is `errno-21`; a failed `open` is
+  `not-found` (ENOENT), `permission-lost` (EACCES/EPERM), else
+  `errno-<n>`.
   Reads are Dart FFI afterwards — but the scope discipline
   stays uniform: `FdReader` checks token liveness in Dart at
   construction and close, not per op (same-isolate path; the
@@ -358,13 +381,22 @@ Notes:
   open fds); `EBADF` ⇒ `session-closed` (use after close / double
   close — never a live fd). The set is to-be-confirmed on device
   (FUSE transports may surface `ENOTCONN`). Everything else stays
-  loud under its own code per the exhaustiveness rule.
+  loud under its own code per the exhaustiveness rule, as
+  `errno-<n>` with `{domain: errno, code: n}` in details. The
+  first `permission-lost` closes the reader at once, fd and
+  buffer, before throwing: a pulled volume can get the processes
+  still holding descriptors on it killed (vold's unmount kills
+  holders), so a dead read must not keep its fd for the caller's
+  eventual `close`.
 - Helper channel access: the `FilePickerWritable()` singleton
   installs a Dart-side handler, which
-  `BackgroundIsolateBinaryMessenger` refuses — so helpers use a
-  dedicated handler-free channel client
+  `BackgroundIsolateBinaryMessenger` refuses — so helpers that
+  need control calls use a dedicated handler-free channel client
   (`ensureInitialized(rootToken)` + raw `MethodChannel` invoke, no
-  listen) shipped by the plugin. Token liveness is a Dart-side
+  listen) shipped by the plugin. Reads need none (implementation
+  finding): `handoff()` checks the scope root-side and the helper
+  only makes FFI calls, so the client moves to Gap 3, whose
+  helper does make control calls. Token liveness is a Dart-side
   live-set of unreleased scope ids. Same-isolate `fromSession`
   checks membership at construction and close, not per op (a
   per-op round trip would add 20–80% per read); a mid-session
@@ -414,6 +446,29 @@ into a taxonomy kind.
   run, internal storage via ExternalStorageProvider plus a USB-3
   OTG SSD. Emulator + warm-cache numbers are a strong prior, not
   the answer.
+- Results of the first implementation (2026-10-01):
+  - VM tests (`test/fd_reading_test.dart`, real fds from libc,
+    the real shim via the build hook): lifecycle, views, EOF,
+    short reads, bounds, single owner, `fromSession` ↔ `closeRead`
+    linkage, a helper reading through `Isolate.run`, the kill path
+    (`Isolate.spawn` + kill, then the fd is closed — `fpw_close`
+    answers EBADF), and pipes (forward skip, backward
+    `seek-unsupported`). The `EINTR` retry is not stubbed: it sits
+    inside the C shim, below what Dart can inject.
+  - The example's device run (`example/lib/device_checks.dart`,
+    `FPW_AUTOCHECK`) on a 32 MiB fixture, iOS simulator and an API
+    36 emulator (fixture pushed with adb): spot reads and a full
+    helper read verified byte for byte, `closeRead` twice,
+    `scope-closed` for an open and for a reader close after
+    release, `errno-21` for a directory, and on Android
+    `/proc/self/fd` the same before and after (163/163).
+  - Throughput, warm cache, 1 MiB chunks through the non-leaf
+    shim: emulator 1.7–2.5 GiB/s, in line with the C1 emulator
+    row (2.2 GiB/s at 1M) — the leaf-vs-non-leaf delta looks like
+    noise, but the S24 re-run §3a asks for is still open, and so
+    is the cold-cache gate.
+  - Not run yet: media detach mid-read, revoked grant with an
+    open fd, a pipe-backed provider, the iPhone.
 
 ## 8. Graduation (experimental → stable)
 

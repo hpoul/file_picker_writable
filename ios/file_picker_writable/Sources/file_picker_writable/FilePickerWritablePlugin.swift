@@ -206,6 +206,16 @@ public class FilePickerWritablePlugin: NSObject, FlutterPlugin {
         _offMain(result) { [self] in
           try _lookupChild(identifier: identifier, name: name)
         }
+      case "openRead":
+        guard
+          let args = call.arguments as? [String: Any],
+          let token = args["scope"] as? String
+        else {
+          throw FilePickerError.invalidArguments(message: "Expected 'scope'")
+        }
+        _offMain(result) { [self] in
+          try _openRead(token: token)
+        }
       default:
         result(FlutterMethodNotImplemented)
       }
@@ -361,7 +371,7 @@ public class FilePickerWritablePlugin: NSObject, FlutterPlugin {
     let token: String
     do {
       // A child's access is its root's scope, so the hold is on the root.
-      let acquired = try _scopes.acquire(url: resolved.scopeURL, session: session)
+      let acquired = try _scopes.acquire(url: resolved.scopeURL, target: url, session: session)
       token = acquired.token
       if acquired.dropped > 0 {
         // Expected once after a hot restart. Anything else means a second
@@ -455,6 +465,60 @@ public class FilePickerWritablePlugin: NSObject, FlutterPlugin {
         )
       )
     }
+  }
+
+  /// Opens the file a live scope token names with `open(2)` under the
+  /// held scope and hands the fd to Dart (large-file-reads-plan §5).
+  /// Never reads a byte. A directory opens fine as an fd, so it is refused
+  /// here as `errno-21` (EISDIR), the code a read on it would fail with.
+  private func _openRead(token: String) throws -> [String: Any] {
+    guard let url = _scopes.target(of: token) else {
+      throw TaxonomyError(kind: ErrorKind.scopeClosed, message: "Scope \(token) was released")
+    }
+    try _requireLive(url)
+    let fd = open(url.path, O_RDONLY | O_CLOEXEC)
+    guard fd >= 0 else {
+      throw Self._errnoError(errno, "open \(url.lastPathComponent)")
+    }
+    var info = stat()
+    guard fstat(fd, &info) == 0 else {
+      let error = Self._errnoError(errno, "fstat \(url.lastPathComponent)")
+      close(fd)
+      throw error
+    }
+    let type = info.st_mode & S_IFMT
+    if type == S_IFDIR {
+      close(fd)
+      throw Self._errnoError(EISDIR, "\(url.lastPathComponent) is a directory")
+    }
+    // As on Android: only a regular file is seekable with a length.
+    let isRegular = type == S_IFREG
+    logDebug("openRead: fd \(fd), regular \(isRegular), size \(info.st_size)")
+    return [
+      "fd": Int(fd),
+      "seekable": isRegular,
+      "length": isRegular ? Int64(info.st_size) as Any : NSNull(),
+    ]
+  }
+
+  /// A failed syscall: `not-found` for ENOENT, `permission-lost` for a
+  /// refused access (the scope no longer covers the file), else loud as
+  /// `errno-<n>`, the same code Dart's reader uses.
+  private static func _errnoError(_ code: Int32, _ message: String) -> TaxonomyError {
+    let kind: String
+    switch code {
+    case ENOENT:
+      kind = ErrorKind.notFound
+    case EACCES, EPERM:
+      kind = ErrorKind.permissionLost
+    default:
+      kind = "errno-\(code)"
+    }
+    return TaxonomyError(
+      kind: kind,
+      message: "\(message): \(String(cString: strerror(code)))",
+      details: ["domain": "errno", "code": Int(code)]
+    )
   }
 
   private static let _childKeys: [URLResourceKey] = [
