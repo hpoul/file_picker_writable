@@ -533,7 +533,11 @@ into a taxonomy kind.
     a prior only; the S24 re-run §3a asks for is still open, and
     so is the cold-cache gate.
   - Not run yet: media detach mid-read, revoked grant with an
-    open fd, a pipe-backed provider, a Windows build.
+    open fd, a pipe-backed provider, a Windows build. The last
+    means the review's M3 fix (the hook returns early for
+    Windows) is reasoned, not verified: it has never been compiled
+    on Windows (skipped for now by the owner's decision), unlike
+    M2's web fix, which a probe app built.
 
 ## 8. Graduation (experimental → stable)
 
