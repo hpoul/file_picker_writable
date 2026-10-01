@@ -513,7 +513,12 @@ into a taxonomy kind.
     `scope-closed` for an open and for a reader close after
     release, `not-a-file` for a directory, and on Android
     `/proc/self/fd` the same before and after (159/159), re-run on
-    the review fixes.
+    the review fixes. The same run on a physical iPhone XR (iOS
+    18.7, debug build of the example, signed, so `fpw_fd.framework`
+    embedding and signing hold on a device), at 086a6db: all of the
+    above passed. Its timed reads (~10 GiB/s) are the page cache of
+    a file written seconds before, not storage. The fixture was
+    removed afterwards (`FPW_CLEANUP`).
   - The emulator caught what host and simulator could not: the
     first fix encoded the owner record's address as an int64, and
     Android heap pointers carry a tag in the top byte (negative as
@@ -528,7 +533,7 @@ into a taxonomy kind.
     a prior only; the S24 re-run §3a asks for is still open, and
     so is the cold-cache gate.
   - Not run yet: media detach mid-read, revoked grant with an
-    open fd, a pipe-backed provider, the iPhone.
+    open fd, a pipe-backed provider, a Windows build.
 
 ## 8. Graduation (experimental → stable)
 
