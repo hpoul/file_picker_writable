@@ -411,7 +411,12 @@ Notes:
   itself, and a recursive delete of one would empty the pick. An
   entry counts as below the root only as the tree ID, its
   separator, then leaf names (`StorageVolumes.isStrictlyBelow`;
-  verified on device: all three spellings refused). Opaque
+  verified on device: all three spellings refused). A component
+  FAT would strip to nothing (`.. `, `. .`, `...`: trailing dots and
+  spaces) is refused as well, since `x/.. ` could then name the
+  root. On the API 36 emulator `fpw-device-fixture/.. ` lists as
+  `not-found` on internal and vfat storage alike (not stripped),
+  so this is defense in depth, not an observed escape. Opaque
   providers fall back to ID equality. The other route to the root,
   a symlink inside the tree pointing back at it, cannot arise on
   shared storage: `ln -s` there is refused even to the adb shell

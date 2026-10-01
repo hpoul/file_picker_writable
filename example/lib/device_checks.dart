@@ -603,7 +603,20 @@ Future<void> _treeChecks(
     if (picked.identifier.startsWith('content://') && at >= 0) {
       final encodedTree = picked.identifier.substring(at + treeMarker.length);
       final treeId = Uri.decodeComponent(encodedTree);
+      // What FAT's trailing-dot/space stripping makes of `x/.. `: listing
+      // it is harmless, and says whether it reaches the root.
+      final dotDotSpace =
+          '${picked.identifier}/document/'
+          '${Uri.encodeComponent('$treeId/$_fixtureName/.. ')}';
+      await step(
+        'tree: list "$_fixtureName/.. " (FAT strips the space)',
+        () async => (await plugin.listChildren(
+          identifier: dotDotSpace,
+        )).entries.map((e) => e.name).join(', '),
+      );
       for (final spelling in [
+        '$treeId/$_fixtureName/.. ',
+        '$treeId/$_fixtureName/. .',
         '$treeId/',
         '$treeId/.',
         treeId.toLowerCase() == treeId

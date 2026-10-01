@@ -48,6 +48,8 @@ class LeafNameTest {
     assertTrue(StorageVolumes.isStrictlyBelow("primary:Trips", "primary:Trips/a"))
     assertTrue(StorageVolumes.isStrictlyBelow("primary:Trips", "primary:Trips/a/.howitwent"))
     assertTrue(StorageVolumes.isStrictlyBelow("3C61-1EFF:", "3C61-1EFF:Trips"))
+    // Dots and spaces inside a name are ordinary.
+    assertTrue(StorageVolumes.isStrictlyBelow("primary:Trips", "primary:Trips/a. b/.prev"))
     // Spellings that may name the root itself, or leave it.
     for (id in listOf(
       "primary:Trips",
@@ -58,6 +60,11 @@ class LeafNameTest {
       "primary:trips/a",
       "primary:TripsX/a",
       "primary:Trips/../Trips",
+      "primary:Trips/a/.. ",
+      "primary:Trips/a/. .",
+      "primary:Trips/a/...",
+      "primary:Trips/ ",
+      "primary:/Trips",
       "3C61-1EFF:"
     )) {
       val tree = if (id.startsWith("3C61")) "3C61-1EFF:" else "primary:Trips"

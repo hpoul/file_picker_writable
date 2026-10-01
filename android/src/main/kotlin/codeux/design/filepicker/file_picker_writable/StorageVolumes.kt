@@ -40,14 +40,20 @@ object StorageVolumes {
    * spellings may still name the root itself (`primary:Trips/`,
    * `primary:Trips/.`, `primary:trips` on case-insensitive storage), and
    * a recursive delete of one of those would empty the whole pick. So
-   * anything not in exactly this shape is "not below the root".
+   * anything not in exactly this shape is "not below the root". A
+   * component FAT would strip to nothing (trailing dots and spaces: `.. `,
+   * `. .`, `...`) is refused too, since `x/.. ` could then name the root;
+   * the API 36 emulator does not strip it, but nothing promises that for
+   * every kernel and provider.
    */
   fun isStrictlyBelow(treeId: String, documentId: String): Boolean {
     val prefix = if (treeId.endsWith(':')) treeId else "$treeId/"
     if (!documentId.startsWith(prefix) || documentId.length == prefix.length) {
       return false
     }
-    return documentId.substring(prefix.length).split('/').all(::isLeafName)
+    return documentId.substring(prefix.length).split('/').all { component ->
+      isLeafName(component) && component.trimEnd('.', ' ').isNotEmpty()
+    }
   }
 
   /**
