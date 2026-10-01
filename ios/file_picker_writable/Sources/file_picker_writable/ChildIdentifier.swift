@@ -104,8 +104,13 @@ struct ResolvedIdentifier {
 
   /// This identifier as the caller should now persist it.
   func currentIdentifier() throws -> String {
-    let root = try currentRoot()
-    return relativePath.isEmpty ? root : ChildIdentifier.make(root: root, path: relativePath)
+    identifier(withRoot: try currentRoot())
+  }
+
+  /// This identifier over `root`, for callers that already minted
+  /// `currentRoot()` (a stale root costs a bookmark each time).
+  func identifier(withRoot root: String) -> String {
+    relativePath.isEmpty ? root : ChildIdentifier.make(root: root, path: relativePath)
   }
 
   /// False when following symlinks takes `url` out of the root. Call with
@@ -115,39 +120,56 @@ struct ResolvedIdentifier {
     if relativePath.isEmpty {
       return true
     }
-    let root = Self.resolvedPath(scopeURL)
-    return Self.resolvedPath(url).hasPrefix(root.hasSuffix("/") ? root : root + "/")
+    guard let root = Self.resolvedPath(scopeURL), let child = Self.resolvedPath(url), root != "/" else {
+      // A loop on either side, or a root that is the file system root:
+      // never contained.
+      return false
+    }
+    return child.hasPrefix(root + "/")
   }
 
-  /// `url` with every symlink resolved, including on a path that does not
-  /// exist yet: `resolvingSymlinksInPath` leaves such a path alone, so a
-  /// new file through a symlinked directory would look contained. Resolve
-  /// the deepest existing ancestor (checked without following its final
-  /// link) and append the rest. A dangling symlink exists to that check
-  /// but `resolvingSymlinksInPath` leaves it as it is, and a create
-  /// through it would land at its target, so a symlink there is followed
-  /// by hand. A loop resolves to "/", which no root contains.
-  static func resolvedPath(_ url: URL, depth: Int = 0) -> String {
+  /// The path the kernel reaches for `url`, or nil when that cannot be
+  /// determined (a symlink loop).
+  ///
+  /// Resolved component by component, the way the kernel walks a path:
+  /// `..` only ever pops a prefix that is already resolved and holds no
+  /// symlinks, and every symlink met (existing target or dangling, final
+  /// or in the middle) is replaced by its target, relative to the
+  /// resolved directory it sits in. Textual helpers get both wrong:
+  /// `resolvingSymlinksInPath` leaves a not-yet-existing or dangling path
+  /// alone, and `standardizedFileURL` collapses `..` against components
+  /// that may themselves be symlinks (#69 review F1). Components that do
+  /// not exist are taken literally, as a create would name them.
+  static func resolvedPath(_ url: URL) -> String? {
     let fm = FileManager.default
-    var existing = url.standardizedFileURL
-    var tail: [String] = []
-    while (try? fm.attributesOfItem(atPath: existing.path)) == nil,
-          existing.pathComponents.count > 1 {
-      tail.insert(existing.lastPathComponent, at: 0)
-      existing = existing.deletingLastPathComponent()
-    }
-    if let destination = try? fm.destinationOfSymbolicLink(atPath: existing.path) {
-      guard depth < 32 else {
-        return "/"
+    var resolved: [String] = []
+    var pending = ChildIdentifier.components(of: url.path).filter { !$0.isEmpty }
+    var hops = 0
+    while !pending.isEmpty {
+      let part = pending.removeFirst()
+      if part == "." {
+        continue
       }
-      let target = destination.hasPrefix("/")
-        ? URL(fileURLWithPath: destination)
-        : existing.deletingLastPathComponent().appendingPathComponent(destination)
-      return resolvedPath(
-        tail.reduce(target) { $0.appendingPathComponent($1) },
-        depth: depth + 1
-      )
+      if part == ".." {
+        if !resolved.isEmpty {
+          resolved.removeLast()
+        }
+        continue
+      }
+      let candidate = "/" + (resolved + [part]).joined(separator: "/")
+      if let destination = try? fm.destinationOfSymbolicLink(atPath: candidate) {
+        hops += 1
+        guard hops <= 40 else {
+          return nil
+        }
+        if destination.hasPrefix("/") {
+          resolved = []
+        }
+        pending = ChildIdentifier.components(of: destination).filter { !$0.isEmpty } + pending
+        continue
+      }
+      resolved.append(part)
     }
-    return tail.reduce(existing.resolvingSymlinksInPath()) { $0.appendingPathComponent($1) }.path
+    return "/" + resolved.joined(separator: "/")
   }
 }

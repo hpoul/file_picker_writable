@@ -174,12 +174,18 @@ class ChildEntry {
   }) {
     final lastModified = result['lastModified'] as int?;
     final suffix = result['identifierSuffix'] as String?;
+    final full = result['identifier'] as String?;
+    if ((suffix == null) == (full == null)) {
+      throw StateError(
+        'A child entry needs exactly one of identifier and identifierSuffix',
+      );
+    }
     if (suffix != null && identifierPrefix == null) {
       throw StateError('Got an identifierSuffix without an identifierPrefix');
     }
     return ChildEntry._composed(
       suffix == null ? '' : identifierPrefix!,
-      suffix ?? result['identifier']! as String,
+      suffix ?? full!,
       name: result['name']! as String,
       isDirectory: result['isDirectory']! as bool,
       size: result['size'] as int?,
@@ -203,10 +209,10 @@ class ChildEntry {
   /// locator for this session; persist the picked folder's identifier and
   /// re-derive children by name.
   ///
-  /// Composed on each read from a prefix shared by the whole listing, so a
-  /// large listing holds the prefix once; keep the string only as long as
-  /// you need it.
-  String get identifier => _identifierPrefix + _identifierSuffix;
+  /// Composed on first read from a prefix shared by the whole listing, so a
+  /// large listing holds the prefix once and pays for a full identifier
+  /// only on the entries whose identifier is actually used.
+  late final String identifier = _identifierPrefix + _identifierSuffix;
 
   final String _identifierPrefix;
   final String _identifierSuffix;

@@ -269,20 +269,30 @@ Notes:
   literal. An unknown prefix (`fpwchild2:`) is not parsed as a
   child, and the bookmark decoder then refuses it, so it stays
   loud. After resolving, every verb checks containment: the path
-  with all symlinks resolved — the deepest existing ancestor, then
-  the rest, since `resolvingSymlinksInPath` leaves a not-yet-existing
-  path alone; a dangling symlink at that point is followed by hand
-  (`destinationOfSymbolicLink`, loops cut at depth 32), since a
-  create through it would land at its target — must stay under the
-  resolved root, else `not-found`
-  `reason: outside-root`. On a device the sandbox refuses such an
-  escape by itself (measured, iPhone XR: raw `dart:io` through a
-  `out -> ..` symlink inside the held folder gets `EPERM`), so the
-  check is defense in depth there; the simulator does not enforce
-  the sandbox, so there it is the only guard. Pinned by
-  host tests (`ios/test/ChildIdentifierTests.swift`, run by
-  `tool/swift_unit_tests.sh`; red-checked by mutating the
-  component check, the scalar split and the ancestor resolution).
+  the kernel would reach must stay under the root the kernel
+  reaches, else `not-found` `reason: outside-root`. Both are
+  resolved component by component, the way the kernel walks a
+  path: `..` only pops an already resolved, symlink-free prefix,
+  and every symlink met — final or in the middle, existing target
+  or dangling — is replaced by its target relative to the resolved
+  directory it sits in; components that do not exist yet are taken
+  as a create would name them. A loop (over 40 links) or a root
+  resolving to `/` is never contained. Textual helpers got this
+  wrong twice: `resolvingSymlinksInPath` leaves a not-yet-existing
+  or dangling path alone, and `standardizedFileURL` collapses `..`
+  against components that may be symlinks (#69 review F1: a link
+  to `../x` reached through a symlinked parent read as inside). On
+  a device the sandbox refuses such an escape by itself (measured,
+  iPhone XR: raw `dart:io` through an `out -> ..` symlink inside
+  the held folder gets `EPERM`), so the check is defense in depth
+  there; the simulator does not enforce the sandbox (measured: the
+  same `dart:io` probe is ALLOWED there), so there it is the only
+  guard. Pinned by host tests (`ios/test/ChildIdentifierTests.swift`,
+  run by `tool/swift_unit_tests.sh`): `..` through a symlinked
+  parent, links in the middle of existing paths leading in and
+  out, dangling links, a root that is itself a symlink, a looping
+  root and a looping child. The resolver from before the review
+  fails the F1 and looping-root cases.
 - `lookupChild`: resolve parent URL (same stale-refresh),
   `startAccessing…`, `FileManager` attributes query on
   parentURL + name → `ChildEntry` or null when absent,
@@ -365,7 +375,9 @@ taxonomy review before graduation (see §8).
     example's `--dart-define=FPW_AUTOCHECK=true` run
     (`example/lib/device_checks.dart`) over a folder picked in On
     My iPhone, with a throwaway tree created inside it and removed
-    afterwards:
+    afterwards (the example now builds that tree in its own
+    `fpw-device-fixture/` folder with names no app would take for
+    its data, and runs only in debug builds — #69 review F7):
     - fresh launch after the pick: child and grandchild `readFile`
       / `writeFile` / `lookupChild` work under the root's scope;
       root listing 12 ms, a 2-entry child listing 10 ms;

@@ -406,8 +406,10 @@ public class FilePickerWritablePlugin: NSObject, FlutterPlugin {
       // prefix; each entry carries only its encoded name, and Dart
       // composes prefix + suffix (25.8 MB → ~0.13 MB of identifiers for
       // 10k children).
+      // Minted once: a stale root costs a fresh bookmark per call.
+      let root = try resolved.currentRoot()
       let identifierPrefix = ChildIdentifier.listingPrefix(
-        root: try resolved.currentRoot(),
+        root: root,
         parentPath: resolved.relativePath
       )
       var suffixBytes = 0
@@ -425,7 +427,7 @@ public class FilePickerWritablePlugin: NSObject, FlutterPlugin {
         suffixBytes
       ))
       return [
-        "identifier": try resolved.currentIdentifier(),
+        "identifier": resolved.identifier(withRoot: root),
         "repaired": resolved.isStale,
         "identifierPrefix": identifierPrefix,
         "entries": entries,

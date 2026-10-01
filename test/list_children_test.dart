@@ -223,6 +223,32 @@ void main() {
       },
     );
 
+    for (final (label, keys) in [
+      ('both identifier kinds', {'identifier': 'P:x', 'identifierSuffix': 'x'}),
+      ('neither identifier kind', <String, String>{}),
+    ]) {
+      test('an entry with $label is loud', () async {
+        backend = (call) async => <String, Object?>{
+          'identifier': 'dir',
+          'repaired': false,
+          'identifierPrefix': 'P:',
+          'entries': [
+            {
+              'name': 'x',
+              ...keys,
+              'isDirectory': false,
+              'size': 1,
+              'lastModified': 1,
+            },
+          ],
+        };
+        await expectLater(
+          FilePickerWritable().listChildren(identifier: 'dir'),
+          throwsStateError,
+        );
+      });
+    }
+
     test('a subdirectory identifier round-trips back in', () async {
       backend = (call) async {
         final id = (call.arguments as Map)['identifier'];

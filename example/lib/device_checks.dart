@@ -1,20 +1,22 @@
 // The device run for #69 (doc/tree-traversal-plan.md §7): what the
 // simulator cannot show, because it does not enforce the sandbox.
 //
-// Debug builds only, and only with --dart-define=FPW_AUTOCHECK=true. On
-// every launch it checks each picked directory, logging one `DEVICE` line
-// per step:
+// Debug builds only (kDebugMode), and only with
+// --dart-define=FPW_AUTOCHECK=true. On every launch it checks each picked
+// directory, logging one `DEVICE` line per step:
 // - identifiers saved by the previous launch: acquire and read them again;
-// - a throwaway test tree inside the picked folder (created once, through
-//   the acquired path with dart:io): trip.json, .howitwent, media/clip.mp4,
-//   media/deep/, big/ with 10k files, and a symlink `out` -> `..`;
+// - a throwaway test tree in its own `fpw-device-fixture/` folder inside
+//   the picked folder (created once, through the acquired path with
+//   dart:io), with names no app would take for its own data:
+//   probe.json, .fpw-probe, nested/leaf.bin, nested/deeper/, many/ with
+//   10k files, and a symlink `out` -> `../..` (out of the picked folder);
 // - listChildren, lookupChild, readFile and writeFile on child and
-//   grandchild identifiers; the 10k listing timed with its identifier
-//   bytes; what the symlink does, through the plugin and through raw
-//   dart:io (the sandbox's own answer).
+//   grandchild identifiers of that folder; the 10k listing timed; what the
+//   symlink does, through the plugin and through raw dart:io (the
+//   sandbox's own answer).
 // Nothing outside the picked folder is read: the dart:io probe through
 // `out` logs only whether access was allowed and how many entries, never
-// names.
+// names. FPW_CLEANUP=true removes the fixture folder again.
 
 // ignore_for_file: experimental_member_use
 
@@ -22,60 +24,53 @@ import 'dart:convert';
 import 'dart:io';
 
 import 'package:file_picker_writable/file_picker_writable.dart';
+import 'package:flutter/foundation.dart';
 import 'package:logging/logging.dart';
 import 'package:path_provider/path_provider.dart';
 
 final _logger = Logger('device_checks');
 
-const autoCheck = bool.fromEnvironment('FPW_AUTOCHECK');
+/// The device run is debug-only: a release or profile build ignores the
+/// define.
+const autoCheck = kDebugMode && bool.fromEnvironment('FPW_AUTOCHECK');
 
 /// With --dart-define=FPW_CLEANUP=true (and FPW_AUTOCHECK=true), the run
 /// removes the test tree it created instead of checking.
 const cleanUp = bool.fromEnvironment('FPW_CLEANUP');
 
-/// Deletes exactly the fixture's own entries in the picked folder (the
-/// `out` link itself, never its target) and the saved identifiers.
+const _fixtureName = 'fpw-device-fixture';
+
+const _manyCount = 10000;
+
+Future<File> _savedIds() async => File(
+  '${(await getApplicationDocumentsDirectory()).path}/fpw_saved_ids.json',
+);
+
+/// Deletes the fixture folder (a recursive delete removes the `out` link
+/// itself, never its target) and the saved identifiers.
 Future<void> removeDeviceFixture(FileInfo directory) async {
   final plugin = FilePickerWritable();
   final scope = await plugin.acquire(identifier: directory.identifier);
   try {
-    final path = scope.path!;
-    for (final name in ['trip.json', '.howitwent', 'fpw-fixture.txt']) {
-      final file = File('$path/$name');
-      if (file.existsSync()) {
-        file.deleteSync();
-      }
-    }
-    final link = Link('$path/out');
-    if (link.existsSync()) {
-      link.deleteSync();
-    }
-    for (final name in ['media', 'big']) {
-      final dir = Directory('$path/$name');
-      if (dir.existsSync()) {
-        dir.deleteSync(recursive: true);
-      }
+    final fixture = Directory('${scope.path!}/$_fixtureName');
+    if (fixture.existsSync()) {
+      fixture.deleteSync(recursive: true);
     }
     _logger.info(
       'DEVICE fixture removed; ${directory.fileName} now holds '
-      '${Directory(path).listSync().length} entries',
+      '${Directory(scope.path!).listSync().length} entries',
     );
   } finally {
     await plugin.release(scope);
   }
-  final saved = File(
-    '${(await getApplicationDocumentsDirectory()).path}/fpw_saved_ids.json',
-  );
+  final saved = await _savedIds();
   if (saved.existsSync()) {
     saved.deleteSync();
   }
 }
 
-const _bigCount = 10000;
-
 Future<void> runDeviceChecks(FileInfo directory) async {
   final plugin = FilePickerWritable();
-  final root = directory.identifier;
 
   void log(String line) => _logger.info('DEVICE $line');
 
@@ -136,9 +131,7 @@ Future<void> runDeviceChecks(FileInfo directory) async {
   log('=== start for ${directory.fileName}');
 
   // 2. Identifiers saved by the previous launch.
-  final saved = File(
-    '${(await getApplicationDocumentsDirectory()).path}/fpw_saved_ids.json',
-  );
+  final saved = await _savedIds();
   if (saved.existsSync()) {
     final ids = (jsonDecode(saved.readAsStringSync()) as Map)
         .cast<String, String>();
@@ -156,61 +149,70 @@ Future<void> runDeviceChecks(FileInfo directory) async {
     log('no identifiers saved by a previous launch');
   }
 
-  await _ensureFixture(plugin, root, log);
+  await _ensureFixture(plugin, directory.identifier, log);
+  final fixtureEntry = await plugin.lookupChild(
+    identifier: directory.identifier,
+    name: _fixtureName,
+  );
+  if (fixtureEntry == null) {
+    log('=== no fixture folder found; stopping');
+    return;
+  }
+  final root = fixtureEntry.identifier;
 
   // 1. The tree, through the plugin, in this fresh launch.
-  final listing = await timedList('root', root);
+  final listing = await timedList('fixture', root);
   await step(
-    'lookup .howitwent',
-    () => plugin.lookupChild(identifier: root, name: '.howitwent'),
+    'lookup .fpw-probe',
+    () => plugin.lookupChild(identifier: root, name: '.fpw-probe'),
   );
   await step(
     'lookup missing.txt',
     () => plugin.lookupChild(identifier: root, name: 'missing.txt'),
   );
-  final trip = named(listing, 'trip.json');
-  final media = named(listing, 'media');
-  if (trip != null) {
-    await step('readFile child trip.json', () => read(trip.identifier));
+  final probe = named(listing, 'probe.json');
+  final nested = named(listing, 'nested');
+  if (probe != null) {
+    await step('readFile child probe.json', () => read(probe.identifier));
     await step(
-      'writeFile child trip.json',
-      () => write(trip.identifier, '{"written":"${DateTime.now()}"}'),
+      'writeFile child probe.json',
+      () => write(probe.identifier, '{"written":"${DateTime.now()}"}'),
     );
   }
-  ChildEntry? clip;
-  if (media != null) {
-    final mediaListing = await timedList('child media', media.identifier);
-    clip = named(mediaListing, 'clip.mp4');
-    final deep = named(mediaListing, 'deep');
-    if (clip != null) {
-      final grandchild = clip.identifier;
-      await step('readFile grandchild clip.mp4', () => read(grandchild));
+  ChildEntry? leaf;
+  if (nested != null) {
+    final nestedListing = await timedList('child nested', nested.identifier);
+    leaf = named(nestedListing, 'leaf.bin');
+    final deeper = named(nestedListing, 'deeper');
+    if (leaf != null) {
+      final grandchild = leaf.identifier;
+      await step('readFile grandchild leaf.bin', () => read(grandchild));
       await step(
-        'writeFile grandchild clip.mp4',
-        () => write(grandchild, 'clip ${DateTime.now()}'),
+        'writeFile grandchild leaf.bin',
+        () => write(grandchild, 'leaf ${DateTime.now()}'),
       );
       await step(
-        'lookup grandchild clip.mp4',
+        'lookup grandchild leaf.bin',
         () =>
-            plugin.lookupChild(identifier: media.identifier, name: 'clip.mp4'),
+            plugin.lookupChild(identifier: nested.identifier, name: 'leaf.bin'),
       );
     }
-    if (deep != null) {
-      await timedList('grandchild deep', deep.identifier);
+    if (deeper != null) {
+      await timedList('grandchild deeper', deeper.identifier);
     }
   }
 
   // 3. 10k children, three runs.
-  final big = named(listing, 'big');
-  if (big != null) {
+  final many = named(listing, 'many');
+  if (many != null) {
     for (var run = 1; run <= 3; run++) {
-      await timedList('big run $run', big.identifier);
+      await timedList('many run $run', many.identifier);
     }
   }
 
-  // 4. The symlink out of the root, through the plugin.
+  // 4. The symlink out of the picked folder, through the plugin.
   final out = named(listing, 'out');
-  log('out in root listing: $out');
+  log('out in fixture listing: $out');
   if (out != null) {
     await timedList('symlink out', out.identifier);
     await step(
@@ -223,9 +225,9 @@ Future<void> runDeviceChecks(FileInfo directory) async {
   // Saved for the next launch's relaunch checks.
   saved.writeAsStringSync(
     jsonEncode({
-      if (trip != null) ...{'child trip.json': trip.identifier},
-      if (clip != null) ...{'grandchild clip.mp4': clip.identifier},
-      if (media != null) ...{'child media/': media.identifier},
+      if (probe != null) ...{'child probe.json': probe.identifier},
+      if (leaf != null) ...{'grandchild leaf.bin': leaf.identifier},
+      if (nested != null) ...{'child nested/': nested.identifier},
     }),
   );
   log('=== done; saved ${saved.path}');
@@ -241,19 +243,20 @@ Future<void> _ensureFixture(
 ) async {
   final scope = await plugin.acquire(identifier: root);
   try {
-    final path = scope.path!;
+    final path = '${scope.path!}/$_fixtureName';
     final marker = File('$path/fpw-fixture.txt');
     if (!marker.existsSync()) {
       final stopwatch = Stopwatch()..start();
-      File('$path/trip.json').writeAsStringSync('{}');
-      File('$path/.howitwent').writeAsStringSync('x');
-      Directory('$path/media/deep').createSync(recursive: true);
-      File('$path/media/clip.mp4').writeAsStringSync('clip');
-      final big = Directory('$path/big')..createSync();
-      for (var i = 0; i < _bigCount; i++) {
-        File('${big.path}/f$i.jpg').createSync();
+      Directory('$path/nested/deeper').createSync(recursive: true);
+      File('$path/probe.json').writeAsStringSync('{}');
+      File('$path/.fpw-probe').writeAsStringSync('x');
+      File('$path/nested/leaf.bin').writeAsStringSync('leaf');
+      final many = Directory('$path/many')..createSync();
+      for (var i = 0; i < _manyCount; i++) {
+        File('${many.path}/f$i.bin').createSync();
       }
-      Link('$path/out').createSync('..');
+      // Two levels up: out of the fixture folder AND the picked folder.
+      Link('$path/out').createSync('../..');
       marker.writeAsStringSync('file_picker_writable device-run fixture');
       log('fixture created in ${stopwatch.elapsedMilliseconds} ms');
     } else {
