@@ -266,7 +266,10 @@ Notes:
   loud. After resolving, every verb checks containment: the path
   with all symlinks resolved — the deepest existing ancestor, then
   the rest, since `resolvingSymlinksInPath` leaves a not-yet-existing
-  path alone — must stay under the resolved root, else `not-found`
+  path alone; a dangling symlink at that point is followed by hand
+  (`destinationOfSymbolicLink`, loops cut at depth 32), since a
+  create through it would land at its target — must stay under the
+  resolved root, else `not-found`
   `reason: outside-root`. On a device the sandbox refuses such an
   escape by itself (measured, iPhone XR: raw `dart:io` through a
   `out -> ..` symlink inside the held folder gets `EPERM`), so the

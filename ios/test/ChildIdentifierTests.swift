@@ -114,6 +114,23 @@ struct ChildIdentifierTests {
       try fm.createDirectory(at: rootURL.appendingPathComponent("d"), withIntermediateDirectories: true)
       try fm.createDirectory(at: outside, withIntermediateDirectories: true)
       try fm.createSymbolicLink(at: rootURL.appendingPathComponent("out"), withDestinationURL: outside)
+      // Dangling: the targets do not exist, so a create would make them.
+      try fm.createSymbolicLink(
+        atPath: rootURL.appendingPathComponent("dangling").path,
+        withDestinationPath: outside.appendingPathComponent("new").path
+      )
+      try fm.createSymbolicLink(
+        atPath: rootURL.appendingPathComponent("dangling-rel").path,
+        withDestinationPath: "../outside/new"
+      )
+      try fm.createSymbolicLink(
+        atPath: rootURL.appendingPathComponent("inside-link").path,
+        withDestinationPath: "d/new"
+      )
+      try fm.createSymbolicLink(
+        atPath: rootURL.appendingPathComponent("loop").path,
+        withDestinationPath: "loop"
+      )
     } catch {
       check(false, "containment fixture: \(error)")
       return
@@ -134,5 +151,10 @@ struct ChildIdentifierTests {
     check(resolved("d/new.txt").isContained, "a not-yet-existing child")
     check(!resolved("out").isContained, "a symlink out of the root")
     check(!resolved("out/x").isContained, "a path through a symlink out of the root")
+    check(!resolved("dangling").isContained, "a dangling absolute symlink out of the root")
+    check(!resolved("dangling-rel").isContained, "a dangling relative symlink out of the root")
+    check(!resolved("dangling/x").isContained, "a path through a dangling symlink")
+    check(resolved("inside-link").isContained, "a dangling symlink that stays inside")
+    check(!resolved("loop").isContained, "a symlink loop")
   }
 }

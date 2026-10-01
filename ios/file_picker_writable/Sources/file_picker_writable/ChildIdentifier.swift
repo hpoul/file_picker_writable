@@ -108,14 +108,30 @@ struct ResolvedIdentifier {
   /// exist yet: `resolvingSymlinksInPath` leaves such a path alone, so a
   /// new file through a symlinked directory would look contained. Resolve
   /// the deepest existing ancestor (checked without following its final
-  /// link) and append the rest.
-  static func resolvedPath(_ url: URL) -> String {
+  /// link) and append the rest. A dangling symlink exists to that check
+  /// but `resolvingSymlinksInPath` leaves it as it is, and a create
+  /// through it would land at its target, so a symlink there is followed
+  /// by hand. A loop resolves to "/", which no root contains.
+  static func resolvedPath(_ url: URL, depth: Int = 0) -> String {
+    let fm = FileManager.default
     var existing = url.standardizedFileURL
     var tail: [String] = []
-    while (try? FileManager.default.attributesOfItem(atPath: existing.path)) == nil,
+    while (try? fm.attributesOfItem(atPath: existing.path)) == nil,
           existing.pathComponents.count > 1 {
       tail.insert(existing.lastPathComponent, at: 0)
       existing = existing.deletingLastPathComponent()
+    }
+    if let destination = try? fm.destinationOfSymbolicLink(atPath: existing.path) {
+      guard depth < 32 else {
+        return "/"
+      }
+      let target = destination.hasPrefix("/")
+        ? URL(fileURLWithPath: destination)
+        : existing.deletingLastPathComponent().appendingPathComponent(destination)
+      return resolvedPath(
+        tail.reduce(target) { $0.appendingPathComponent($1) },
+        depth: depth + 1
+      )
     }
     return tail.reduce(existing.resolvingSymlinksInPath()) { $0.appendingPathComponent($1) }.path
   }
