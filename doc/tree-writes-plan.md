@@ -404,7 +404,18 @@ Notes:
   never "gone, so success". A picked root — a tree's own root, or
   a single-document pick (not a tree URI) — is `root-protected`
   (§6, the owner's decision 2026-10-01): one wrong identifier must
-  not take a whole pick with it.
+  not take a whole pick with it. "Root" is decided by shape, not by
+  string equality: ExternalStorageProvider resolves IDs through the
+  file system, so `primary:Trips/`, `primary:Trips/.` or
+  `primary:trips` (case-insensitive storage) may name the root
+  itself, and a recursive delete of one would empty the pick. An
+  entry counts as below the root only as the tree ID, its
+  separator, then leaf names (`StorageVolumes.isStrictlyBelow`;
+  verified on device: all three spellings refused). Opaque
+  providers fall back to ID equality. The other route to the root,
+  a symlink inside the tree pointing back at it, cannot arise on
+  shared storage: `ln -s` there is refused even to the adb shell
+  user, on emulated and vfat volumes alike (API 36 emulator).
 - `moveEntry`: source parent comes from the passed scope — no
   `findDocumentPath` needed on any API level. The entry must sit
   directly in it (`not-found`, `reason: not-a-child`; derived

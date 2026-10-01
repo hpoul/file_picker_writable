@@ -44,6 +44,28 @@ class LeafNameTest {
   }
 
   @Test
+  fun onlyLeafNamesAfterTheTreeIdAreStrictlyBelowIt() {
+    assertTrue(StorageVolumes.isStrictlyBelow("primary:Trips", "primary:Trips/a"))
+    assertTrue(StorageVolumes.isStrictlyBelow("primary:Trips", "primary:Trips/a/.howitwent"))
+    assertTrue(StorageVolumes.isStrictlyBelow("3C61-1EFF:", "3C61-1EFF:Trips"))
+    // Spellings that may name the root itself, or leave it.
+    for (id in listOf(
+      "primary:Trips",
+      "primary:Trips/",
+      "primary:Trips/.",
+      "primary:Trips/a/..",
+      "primary:Trips//a",
+      "primary:trips/a",
+      "primary:TripsX/a",
+      "primary:Trips/../Trips",
+      "3C61-1EFF:"
+    )) {
+      val tree = if (id.startsWith("3C61")) "3C61-1EFF:" else "primary:Trips"
+      assertFalse("$id under $tree", StorageVolumes.isStrictlyBelow(tree, id))
+    }
+  }
+
+  @Test
   fun aVolumeRootOrUntaggedIdHasNoParent() {
     assertEquals(null, StorageVolumes.parentDocumentId("primary:"))
     assertEquals(null, StorageVolumes.parentDocumentId("3C61-1EFF:"))

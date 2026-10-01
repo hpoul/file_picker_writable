@@ -595,6 +595,29 @@ Future<void> _treeChecks(
       'tree: delete the picked root (protected)',
       () => ok(plugin.deleteEntry(identifier: picked.identifier)),
     );
+    // Android: other spellings of the root's document ID, which the
+    // provider may resolve to the root itself. Not recursive, for the same
+    // reason as above.
+    const treeMarker = '/tree/';
+    final at = picked.identifier.indexOf(treeMarker);
+    if (picked.identifier.startsWith('content://') && at >= 0) {
+      final encodedTree = picked.identifier.substring(at + treeMarker.length);
+      final treeId = Uri.decodeComponent(encodedTree);
+      for (final spelling in [
+        '$treeId/',
+        '$treeId/.',
+        treeId.toLowerCase() == treeId
+            ? treeId.toUpperCase()
+            : treeId.toLowerCase(),
+      ]) {
+        final variant =
+            '${picked.identifier}/document/${Uri.encodeComponent(spelling)}';
+        await step(
+          'tree: delete the picked root spelled "$spelling" (protected)',
+          () => ok(plugin.deleteEntry(identifier: variant)),
+        );
+      }
+    }
     await step(
       'tree: delete tree, recursive',
       () =>

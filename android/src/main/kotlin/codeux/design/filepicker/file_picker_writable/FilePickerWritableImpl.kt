@@ -742,11 +742,22 @@ class FilePickerWritableImpl(
    * `root-protected` for a picker's own result: a tree's root, or a single
    * picked document (not a tree URI at all). Only entries below a picked
    * folder may be deleted or moved, so one wrong identifier cannot take a
-   * whole pick with it.
+   * whole pick with it. On ExternalStorageProvider the ID must be in the
+   * one shape [StorageVolumes.isStrictlyBelow] accepts: other spellings
+   * can resolve to the root itself.
    */
   private fun requireBelowRoot(uri: Uri) {
-    val isPickedRoot = !DocumentsContract.isTreeUri(uri) ||
-      DocumentsContract.getDocumentId(documentUriFor(uri)) == DocumentsContract.getTreeDocumentId(uri)
+    val isPickedRoot = if (!DocumentsContract.isTreeUri(uri)) {
+      true
+    } else {
+      val treeId = DocumentsContract.getTreeDocumentId(uri)
+      val documentId = DocumentsContract.getDocumentId(documentUriFor(uri))
+      if (uri.authority == StorageVolumes.AUTHORITY) {
+        !StorageVolumes.isStrictlyBelow(treeId, documentId)
+      } else {
+        documentId == treeId
+      }
+    }
     if (isPickedRoot) {
       throw TaxonomyException(
         ErrorKind.ROOT_PROTECTED,

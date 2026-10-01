@@ -34,6 +34,23 @@ object StorageVolumes {
     if (parentId.endsWith(':')) "$parentId$name" else "$parentId/$name"
 
   /**
+   * True only when [documentId] names an entry strictly inside the tree
+   * [treeId]: the tree's own ID, its separator, then one or more leaf
+   * names. The provider resolves IDs through the file system, so other
+   * spellings may still name the root itself (`primary:Trips/`,
+   * `primary:Trips/.`, `primary:trips` on case-insensitive storage), and
+   * a recursive delete of one of those would empty the whole pick. So
+   * anything not in exactly this shape is "not below the root".
+   */
+  fun isStrictlyBelow(treeId: String, documentId: String): Boolean {
+    val prefix = if (treeId.endsWith(':')) treeId else "$treeId/"
+    if (!documentId.startsWith(prefix) || documentId.length == prefix.length) {
+      return false
+    }
+    return documentId.substring(prefix.length).split('/').all(::isLeafName)
+  }
+
+  /**
    * The inverse of [childDocumentId]: the document ID of the directory
    * [documentId] sits in, or null for a volume root (`primary:`) or an ID
    * without a root tag.
