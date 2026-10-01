@@ -6,6 +6,7 @@ enum ErrorKind {
   static let notFound = "not-found"
   static let scopeClosed = "scope-closed"
   static let notADirectory = "not-a-directory"
+  static let notAFile = "not-a-file"
   static let invalidName = "invalid-name"
 }
 
@@ -40,14 +41,17 @@ final class ScopeRegistry {
   /// instances for the same file.
   private var holds: [String: Hold] = [:]
   private var tokenKeys: [String: String] = [:]
+  /// What each token was acquired for: the held file, or a child of it.
+  private var tokenTargets: [String: URL] = [:]
 
-  /// Adds a token for `url`, starting access if the file has no hold yet.
-  /// A new `session` (a fresh Dart isolate, e.g. after a hot restart)
-  /// first balances every hold of the old one, so those tokens fail loud
-  /// rather than silently rebind. Throws `StartRefused` when the system
-  /// refuses the scope. Returns the token and how many old tokens were
-  /// dropped.
-  func acquire(url: URL, session: String) throws -> (token: String, dropped: Int) {
+  /// Adds a token for `target`, held through the scope of `url` (the
+  /// target itself, or the root it lives under), starting access if that
+  /// file has no hold yet. A new `session` (a fresh Dart isolate, e.g.
+  /// after a hot restart) first balances every hold of the old one, so
+  /// those tokens fail loud rather than silently rebind. Throws
+  /// `StartRefused` when the system refuses the scope. Returns the token
+  /// and how many old tokens were dropped.
+  func acquire(url: URL, target: URL, session: String) throws -> (token: String, dropped: Int) {
     lock.lock()
     defer { lock.unlock() }
     var dropped = 0
@@ -67,7 +71,17 @@ final class ScopeRegistry {
       holds[key] = Hold(url: url, tokens: [token])
     }
     tokenKeys[token] = key
+    tokenTargets[token] = target
     return (token, dropped)
+  }
+
+  /// The target `token` was acquired for, or nil when the token is not
+  /// live (released, from an old session, or never issued): the verbs
+  /// that take a scope answer that with `scope-closed`.
+  func target(of token: String) -> URL? {
+    lock.lock()
+    defer { lock.unlock() }
+    return tokenTargets[token]
   }
 
   /// Drops `token`, stopping access with the file's last token. False if
@@ -79,6 +93,7 @@ final class ScopeRegistry {
     guard let key = tokenKeys.removeValue(forKey: token) else {
       return false
     }
+    tokenTargets[token] = nil
     guard var hold = holds[key] else {
       return true
     }
@@ -116,6 +131,7 @@ final class ScopeRegistry {
     }
     holds = [:]
     tokenKeys = [:]
+    tokenTargets = [:]
     return dropped
   }
 }

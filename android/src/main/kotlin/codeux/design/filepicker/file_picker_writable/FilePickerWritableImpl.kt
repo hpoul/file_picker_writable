@@ -15,6 +15,8 @@ import android.os.Looper
 import android.os.storage.StorageManager
 import android.provider.DocumentsContract
 import android.provider.OpenableColumns
+import android.system.Os
+import android.system.OsConstants
 import android.view.DragEvent
 import android.view.View
 import androidx.annotation.MainThread
@@ -504,6 +506,82 @@ class FilePickerWritableImpl(
       plugin.logDebug("release: unknown scope token $token, ignored.")
     }
     plugin.logDebug("release: ${scopes.size} scope token(s) live.")
+  }
+
+  /**
+   * Opens the file a live scope names and detaches its descriptor into
+   * Dart's ownership (large-file-reads-plan §5). Never reads a byte.
+   *
+   * `openFileDescriptor`, never `openAssetFileDescriptor`: an asset
+   * descriptor can be a sub-range whose start offset every positional read
+   * would have to honor. `getStatSize` answers seekability and length in
+   * one call (-1 for anything but a regular file: a pipe). `detachFd` hands
+   * the fd over for good — never wrap an fd with `fromFd` without keeping
+   * the wrapper alive, or its finalizer closes the fd mid-read.
+   *
+   * A revoked grant fails the open with `permission-lost` (fds opened
+   * before keep reading). A provider exception first runs the volume check
+   * (a pulled stick is `volume-absent`, whatever the provider threw).
+   * Below the picked root, the tree check's `IllegalArgumentException`
+   * means the file is gone, the same rule as the directory verbs.
+   *
+   * A directory is `not-a-file`, whichever way the provider answers it:
+   * ExternalStorageProvider hands out a directory's fd (caught by `fstat`,
+   * since `getStatSize` would call it a pipe), others refuse to open it
+   * (caught by re-querying the row's MIME type after the failure, so the
+   * happy path costs no extra query).
+   */
+  @WorkerThread
+  fun openRead(token: String): Map<String, Any?> {
+    val identifier = scopes.identifierOf(token)
+      ?: throw TaxonomyException(ErrorKind.SCOPE_CLOSED, "Scope $token was released")
+    val uri = Uri.parse(identifier)
+    val contentResolver = requireContext().contentResolver
+    if (!hasPersistedReadGrant(contentResolver, uri)) {
+      throw TaxonomyException(ErrorKind.PERMISSION_LOST, "No persisted grant covers $uri")
+    }
+    val documentUri = documentUriFor(uri)
+    val pfd = try {
+      onVolume(documentUri) { contentResolver.openFileDescriptor(documentUri, "r") }
+    } catch (e: TaxonomyException) {
+      throw e
+    } catch (e: Exception) {
+      val isDirectory = try {
+        queryRow(documentUri)?.isDirectory == true
+      } catch (absent: TaxonomyException) {
+        // The volume detached between the failed open and this query.
+        throw absent
+      } catch (_: Exception) {
+        false
+      }
+      if (isDirectory) {
+        throw TaxonomyException(ErrorKind.NOT_A_FILE, "$documentUri is a directory", e)
+      }
+      val isTreeRoot = DocumentsContract.isTreeUri(uri) &&
+        DocumentsContract.getDocumentId(documentUri) == DocumentsContract.getTreeDocumentId(uri)
+      if (e is IllegalArgumentException && !isTreeRoot) {
+        throw missingDocument(documentUri, e)
+      }
+      throw e
+    } ?: throw missingDocument(documentUri)
+    val mode = try {
+      Os.fstat(pfd.fileDescriptor).st_mode
+    } catch (e: Exception) {
+      pfd.close()
+      throw e
+    }
+    if (OsConstants.S_ISDIR(mode)) {
+      pfd.close()
+      throw TaxonomyException(ErrorKind.NOT_A_FILE, "$documentUri is a directory")
+    }
+    val statSize = pfd.statSize
+    val fd = pfd.detachFd()
+    plugin.logDebug("openRead: fd $fd, statSize $statSize")
+    return mapOf(
+      "fd" to fd,
+      "seekable" to (statSize >= 0),
+      "length" to statSize.takeIf { it >= 0 }
+    )
   }
 
   /**

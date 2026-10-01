@@ -4,9 +4,9 @@ import java.util.UUID
 
 /**
  * Live `acquire` tokens (doc/scope-registry-plan.md §5). Android holds no
- * native resource per scope, so this only tracks which tokens are live:
- * release bookkeeping now, and the `scope-closed` check for the verbs that
- * take a scope once they land.
+ * native resource per scope, so this only tracks which tokens are live and
+ * what they name: release bookkeeping, and the `scope-closed` check for the
+ * verbs that take a scope (openRead).
  *
  * Thread-safe: acquire and release run on the concurrent TaskQueue.
  */
@@ -36,6 +36,14 @@ class ScopeTokens {
   /** Drops [token]. False if it was unknown (released twice, or stale). */
   @Synchronized
   fun release(token: String): Boolean = tokens.remove(token) != null
+
+  /**
+   * The identifier [token] was acquired for, or null when the token is not
+   * live (released, from an old session, or never issued): the verbs that
+   * take a scope answer that with `scope-closed`.
+   */
+  @Synchronized
+  fun identifierOf(token: String): String? = tokens[token]
 
   @get:Synchronized
   val size: Int

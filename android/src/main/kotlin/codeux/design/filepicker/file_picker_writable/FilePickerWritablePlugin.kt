@@ -147,6 +147,9 @@ class FilePickerWritablePlugin : FlutterPlugin, MethodCallHandler,
           impl.lookupChild(call.requireArgument("identifier"), call.requireArgument("name"))
         )
       }
+      "openRead" -> onQueue(call, result, Result::taxonomyError) {
+        result.success(impl.openRead(call.requireArgument("scope")))
+      }
       else -> result.notImplemented()
     }
   }

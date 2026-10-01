@@ -13,7 +13,10 @@
 // - listChildren, lookupChild, readFile and writeFile on child and
 //   grandchild identifiers of that folder; the 10k listing timed; what the
 //   symlink does, through the plugin and through raw dart:io (the
-//   sandbox's own answer).
+//   sandbox's own answer);
+// - large-file reads (Gap 2b's openRead and FdReader) on a 32 MiB big.bin in
+//   the same folder: spot reads, a helper isolate reading it all, the
+//   error cases, and the open-descriptor count before and after.
 // Nothing outside the picked folder is read: the dart:io probe through
 // `out` logs only whether access was allowed and how many entries, never
 // names. FPW_CLEANUP=true removes the fixture folder again.
@@ -22,6 +25,7 @@
 
 import 'dart:convert';
 import 'dart:io';
+import 'dart:isolate';
 
 import 'package:file_picker_writable/file_picker_writable.dart';
 import 'package:flutter/foundation.dart';
@@ -41,6 +45,67 @@ const cleanUp = bool.fromEnvironment('FPW_CLEANUP');
 const _fixtureName = 'fpw-device-fixture';
 
 const _manyCount = 10000;
+
+const _bigName = 'big.bin';
+
+/// 32 MiB and an odd tail: many 1 MiB chunks, the last one short.
+const _bigLength = (32 << 20) + 1234;
+
+/// big.bin's byte at [offset]. Position-dependent, so a chunk read from the
+/// wrong offset does not match.
+int _bigByte(int offset) => (offset * 7 + (offset >> 12)) & 0xff;
+
+/// How many bytes of [view], read at [offset], differ from big.bin.
+int _mismatches(Uint8List view, int offset) {
+  var count = 0;
+  for (var i = 0; i < view.length; i++) {
+    if (view[i] != _bigByte(offset + i)) {
+      count++;
+    }
+  }
+  return count;
+}
+
+/// Reads the whole handed-off file in a helper isolate, 1 MiB per chunk:
+/// the byte count, the microseconds the reads took (timed inside the
+/// helper, so the spawn is not in it) and, with [verify], how many bytes
+/// differ from big.bin. A factory, so the closure captures the record and
+/// nothing else.
+(int, int, int) Function() _readAll(
+  ReadHandoff handoff, {
+  required bool verify,
+}) => () {
+  final stopwatch = Stopwatch()..start();
+  final reader = FdReader.fromHandoff(handoff);
+  try {
+    var position = 0;
+    var mismatches = 0;
+    while (true) {
+      final chunk = reader.readChunk(position, reader.bufferLength);
+      if (chunk.isEmpty) {
+        return (position, stopwatch.elapsedMicroseconds, mismatches);
+      }
+      if (verify) {
+        mismatches += _mismatches(chunk, position);
+      }
+      position += chunk.length;
+    }
+  } finally {
+    reader.close();
+  }
+};
+
+/// Open descriptors of this process, or null where it cannot tell.
+int? _openFds() {
+  for (final path in ['/proc/self/fd', '/dev/fd']) {
+    try {
+      return Directory(path).listSync().length;
+    } on FileSystemException {
+      continue;
+    }
+  }
+  return null;
+}
 
 Future<File> _savedIds() async => File(
   '${(await getApplicationDocumentsDirectory()).path}/fpw_saved_ids.json',
@@ -224,6 +289,14 @@ Future<void> runDeviceChecks(FileInfo directory) async {
     await step('readFile symlink out', () => read(out.identifier));
   }
 
+  // 5. Large-file reads (doc/large-file-reads-plan.md §7).
+  final big = named(listing, _bigName);
+  if (big == null) {
+    log('no $_bigName in the fixture; skipping the read checks');
+  } else {
+    await _readChecks(plugin, big, nested, step, log);
+  }
+
   // Saved for the next launch's relaunch checks.
   saved.writeAsStringSync(
     jsonEncode({
@@ -233,6 +306,96 @@ Future<void> runDeviceChecks(FileInfo directory) async {
     }),
   );
   log('=== done; saved ${saved.path}');
+}
+
+/// openRead on big.bin: spot reads on this isolate, a helper reading it all
+/// (verified, then timed), the error cases, and the process's descriptor
+/// count before and after (every path must close what it opened).
+Future<void> _readChecks(
+  FilePickerWritable plugin,
+  ChildEntry big,
+  ChildEntry? directory,
+  Future<T?> Function<T>(String label, Future<T> Function() run) step,
+  void Function(String) log,
+) async {
+  final fdsBefore = _openFds();
+  final scope = await plugin.acquire(identifier: big.identifier);
+  try {
+    await step('read spot checks', () async {
+      final session = await plugin.openRead(scope: scope);
+      final reader = FdReader.fromSession(session);
+      try {
+        const middle = 4 << 20;
+        const tail = _bigLength - 10;
+        final atMiddle = _mismatches(reader.readChunk(middle, 1024), middle);
+        final atTail = reader.readChunk(tail, 1024);
+        final tailLength = atTail.length;
+        final tailMismatches = _mismatches(atTail, tail);
+        final pastEnd = reader.readChunk(_bigLength + 5, 16).length;
+        return 'seekable ${session.seekable}, length ${session.length} '
+            '(expected $_bigLength), middle $atMiddle mismatches, tail '
+            '$tailLength bytes with $tailMismatches mismatches, past the end '
+            '$pastEnd bytes';
+      } finally {
+        reader.close();
+      }
+    });
+    for (final verify in [true, false, false]) {
+      await step(
+        'read all in a helper (${verify ? 'verified' : 'timed'})',
+        () async {
+          final session = await plugin.openRead(scope: scope);
+          // Handed off before the spawn: if handoff throws, the session is
+          // still ours to close.
+          final ReadHandoff record;
+          try {
+            record = session.handoff();
+          } on Exception {
+            await plugin.closeRead(session);
+            rethrow;
+          }
+          final (bytes, micros, mismatches) = await Isolate.run(
+            _readAll(record, verify: verify),
+          );
+          final mibs = micros == 0
+              ? 'n/a'
+              : (bytes / (1 << 20) / (micros / 1e6)).toStringAsFixed(0);
+          return '$bytes bytes in ${micros ~/ 1000} ms in the helper '
+              '($mibs MiB/s)${verify ? ', $mismatches mismatches' : ''}';
+        },
+      );
+    }
+    await step('closeRead twice', () async {
+      final session = await plugin.openRead(scope: scope);
+      await plugin.closeRead(session);
+      await plugin.closeRead(session);
+      return 'ok';
+    });
+  } finally {
+    await plugin.release(scope);
+  }
+  await step('openRead after release', () => plugin.openRead(scope: scope));
+  await step('reader close after release', () async {
+    final scope = await plugin.acquire(identifier: big.identifier);
+    final reader = FdReader.fromSession(await plugin.openRead(scope: scope));
+    reader.readChunk(0, 16);
+    await plugin.release(scope);
+    reader.close();
+    return 'closed without scope-closed';
+  });
+  if (directory != null) {
+    await step('openRead on a directory', () async {
+      final scope = await plugin.acquire(identifier: directory.identifier);
+      try {
+        final session = await plugin.openRead(scope: scope);
+        await plugin.closeRead(session);
+        return 'opened';
+      } finally {
+        await plugin.release(scope);
+      }
+    });
+  }
+  log('read checks: open descriptors $fdsBefore before, ${_openFds()} after');
 }
 
 /// Creates the throwaway test tree once, under the acquired scope, and
@@ -245,7 +408,14 @@ Future<void> _ensureFixture(
 ) async {
   final scope = await plugin.acquire(identifier: root);
   try {
-    final path = '${scope.path!}/$_fixtureName';
+    final base = scope.path;
+    if (base == null) {
+      // Android: no path to create it through. Push the same tree with adb
+      // (big.bin from the formula in _bigByte).
+      log('no path here; expecting an adb-pushed fixture');
+      return;
+    }
+    final path = '$base/$_fixtureName';
     final marker = File('$path/fpw-fixture.txt');
     if (!marker.existsSync()) {
       final stopwatch = Stopwatch()..start();
@@ -263,6 +433,26 @@ Future<void> _ensureFixture(
       log('fixture created in ${stopwatch.elapsedMilliseconds} ms');
     } else {
       log('fixture present');
+    }
+    // Its own check, so a fixture from before the read checks gets it too.
+    final big = File('$path/$_bigName');
+    if (!big.existsSync() || big.lengthSync() != _bigLength) {
+      final file = big.openSync(mode: FileMode.write);
+      try {
+        final chunk = Uint8List(1 << 20);
+        for (var offset = 0; offset < _bigLength; offset += chunk.length) {
+          final length = _bigLength - offset < chunk.length
+              ? _bigLength - offset
+              : chunk.length;
+          for (var i = 0; i < length; i++) {
+            chunk[i] = _bigByte(offset + i);
+          }
+          file.writeFromSync(chunk, 0, length);
+        }
+      } finally {
+        file.closeSync();
+      }
+      log('$_bigName created');
     }
     // The sandbox's own answer for the symlink: counts only, no names.
     try {

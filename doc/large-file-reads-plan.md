@@ -80,7 +80,9 @@ fds. The isolate rule is load-bearing, not advisory: bytes must be
 consumed in the helper isolate where they land (rows C3/C4 below).
 Bounded exemption, shared with the driving consumer: one-shot reads
 of ≤1MiB total may run on the root isolate (milliseconds of views,
-no frame risk); anything larger MUST use a helper.
+no frame risk); anything larger MUST use a helper. Enforced in
+debug mode: a reader on the root isolate (`RootIsolateToken`
+present) that reads past 1 MiB fails an assertion.
 
 ```
 S24 medians, MiB/s, 1 GiB sequential (emulator in parens):
@@ -175,7 +177,9 @@ class ReadSession {
   ReadHandoff handoff();
 }
 // Plain ints + bools + strings: crosses isolates for free, in the
-// same shape the driving consumer already sends.
+// same shape the driving consumer already sends. Private
+// constructor: only handoff() makes one, so no forged record can
+// adopt (and later close) a descriptor the VM owns.
 class ReadHandoff {
   int get fd;
   bool get seekable;
@@ -194,13 +198,19 @@ Future<ReadSession> openRead({required AcquiredScope scope});
 class FdReader {
   FdReader.fromSession(ReadSession session, {int bufferLength = 1 << 20}); // Same-isolate path.
   FdReader.fromHandoff(ReadHandoff handoff, {int bufferLength = 1 << 20}); // Helper-isolate path (also the root recovery path — see §4).
-  // Sync FFI pread into the caller-owned native buffer; returns a VIEW
-  // valid until the next call or close (call-counted, never
-  // time-bound — awaits between calls are safe). Consume in place
-  // (C1); copy only to retain (C2 cost, documented). Empty view
-  // signals EOF. A retained view past close() is use-after-free
-  // (the buffer is freed) — copy to retain. No GC finalizer on
-  // the view can fix this: it would double-free against close.
+  // Sync FFI pread into the reader's buffer; returns a VIEW valid
+  // until the next call (call-counted, never time-bound — awaits
+  // between calls are safe). Consume in place (C1); copy only to
+  // retain (C2 cost, documented). Empty view signals EOF. The
+  // buffer is Dart-owned memory (`asTypedList` with a native free
+  // as its finalizer), not part of the fd's cleanup record, so
+  // every view keeps it alive: a view retained past the next call
+  // or past close() shows later bytes, never freed memory.
+  // (Corrected in review: the first sketch freed the buffer at
+  // close and called a finalizer on the view impossible — that
+  // only holds while one record owns both fd and buffer. Splitting
+  // them removes the use-after-free on every path: close, GC of
+  // the reader, and the self-close on the first EIO.)
   // Bounds: negative position/length ⇒ sync ArgumentError;
   // length > bufferLength ⇒ sync ArgumentError (single fixed
   // buffer — no silent clamp or resize); position at/past EOF ⇒
@@ -220,9 +230,22 @@ Notes:
 - Cross-platform from day one: identical Dart verbs; Android fds
   come from ContentResolver + `detachFd`, iOS fds from `open(2)`
   under the held scope. Reads are Dart FFI plus one small shared
-  C shim (close finalizer + `-errno` wrappers — needs a build
-  step in the podspec and in the Android plugin). macOS and other
-  stub platforms throw `UnsupportedError` — loud beats silent.
+  C shim (close finalizer + `-errno` wrappers). Its build step is
+  a Dart native-assets build hook (`hook/build.dart`, `CBuilder`
+  from `native_toolchain_c`), not the podspec, the Swift package
+  or Gradle: one build for every platform, bound with `@Native`,
+  and it also runs under `flutter test`, so the VM tests exercise
+  the real shim. (Implementation correction: the plan named a
+  podspec and an Android plugin step. A gotcha found on the way:
+  an app built before the hook existed can keep its cached
+  `build_hooks` target even after `pub get`, and ship without the
+  shim until `flutter clean`.) macOS and other stub platforms
+  throw `UnsupportedError` — loud beats silent. Stubbed must also
+  mean "builds": the hook skips Windows (the shim is POSIX C;
+  `flutter test` on a Windows host runs the hook too), and every
+  FFI type sits behind a conditional import (`dart.library.ffi`),
+  since dart2js has no `dart:ffi` and one unconditional import
+  would break every consumer's web build.
 - Single-owner rule: the fd has exactly one Dart owner at a time.
   `handoff()` transfers ownership to the helper isolate; the
   sender must not close afterwards. Double-close across isolates
@@ -235,7 +258,10 @@ Notes:
   double-close); only the owning side closes. Within one isolate,
   `fromSession` links wrapper↔session close-state, so wrapper
   `close` and top-level `closeRead` cannot double-close each
-  other.
+  other. Across isolates the shim enforces it too: adopted fds sit
+  in a mutex-guarded table, so a second wrapper on a record that
+  is still owned (consumed twice) is a `StateError`, not a second
+  owner.
 - Kill/cancel story (peer-confirmed): cancel a live helper by
   message — it aborts and acks; the sender never closes. Kill is
   finalizer-closed: isolate shutdown runs attached
@@ -247,15 +273,20 @@ Notes:
   Gap 3 `closeFd: false`.) Explicit close always detaches the
   finalizer first, then closes (standard pattern), idempotent via
   a closed flag; a close whose liveness check fails still runs
-  the native cleanup (fd + buffer), then throws — the throw never
-  skips the release. Recovery: if `Isolate.spawn` throws after
-  `handoff()` (or the helper dies before constructing its
-  wrapper), the root recovers with `fromHandoff` on its own copy
-  — the root is then the consuming isolate — and closes
-  normally. A kill before the helper's wrapper exists leaks the
-  fd (nothing attached a finalizer yet). If kill is ignored (no
-  terminate capability) the helper stays owner — message-cancel,
-  never the kill path.
+  the native cleanup, then throws — the throw never skips the
+  release. Recovery: only if the spawn itself throws
+  (`IsolateSpawnException`) after `handoff()` does the root
+  recover with `fromHandoff` on its own copy — the root is then
+  the consuming isolate — and close normally. Any other failure
+  is never recovered: the root cannot tell "the helper died
+  before building its wrapper" from "it was killed after, and its
+  finalizer already closed the fd", and adopting in the second
+  case reads or closes a reused number. (Corrected in review: the
+  first draft also recovered when the helper died early.) A kill
+  before the helper's wrapper exists therefore leaks the fd —
+  the accepted cost of never double-closing. If kill is ignored
+  (no terminate capability) the helper stays owner —
+  message-cancel, never the kill path.
 - Finalizer placement: the `NativeFinalizer` MUST
   be attached by the wrapper constructed in the consuming isolate
   (finalizers run for the exiting isolate's own — verified in
@@ -265,10 +296,10 @@ Notes:
   Killable helpers use `Isolate.spawn` + `onExit` death
   confirmation (`Isolate.run` exposes no `Isolate` to kill; its
   errors are the non-kill path, finalizers already run). The
-  finalizer token owns one native cleanup record {fd, buffer} (a
-  closing fd alone would leak the `malloc` buffer on the GC/kill
-  paths); the C shim releases both, and explicit close performs
-  the same cleanup after detaching the finalizer.
+  finalizer token owns the fd's native owner record; the C shim
+  releases it (unregister, close), and explicit close performs
+  the same release after detaching the finalizer. The buffer has
+  its own finalizer (see `readChunk`), so neither path leaks it.
 - Pipes: `pread` fails on pipes (`ESPIPE`), so a non-seekable
   session reads sequentially (`read`), tracks position in Dart,
   and enforces forward-only. Backward seek on a pipe is a loud
@@ -301,7 +332,20 @@ Notes:
   `getStatSize` for seekability + length, `detachFd()` to transfer
   ownership to Dart. Never `fromFd` without retaining the PFD —
   its finalizer closes the fd mid-read (measured: `pread64
-  interrupted by close()`, then `EBADF`).
+  interrupted by close()`, then `EBADF`). Errors follow the
+  directory verbs (implementation detail, settled in code): the
+  persisted grant is checked first (revoked ⇒ `permission-lost`);
+  any exception from the open runs the volume check first (a
+  pulled stick is `volume-absent` whatever the provider threw);
+  below the tree root the provider's `IllegalArgumentException`
+  is the missing file (`not-found`). A directory is `not-a-file`
+  (§6), however the provider answers: ExternalStorageProvider
+  hands out a directory's fd, and `getStatSize` would call it a
+  pipe, so `openRead` `fstat`s it; other providers refuse to open
+  a directory, so after a failed open the row's MIME type is
+  queried (no extra query on the happy path). (Corrected in
+  review: the first implementation reported `errno-21` from the
+  `fstat` only, so the answer depended on the provider.)
 - No native handle registry: nothing is held past the call, so
   there is no session map, no native mutex, no leak surface. All
   Android complexity is fd acquisition + error mapping.
@@ -324,7 +368,15 @@ Notes:
 ### iOS (Swift, inside a Gap-1a scope)
 
 - `openRead` requires a live `AcquiredScope`, opens the path with
-  `open(2)` `O_RDONLY`, `fstat`s for length, returns the fd.
+  `open(2)` `O_RDONLY`, `fstat`s for length, returns the fd. The
+  registry keeps each token's target next to its hold (holds are
+  on the root's scope, so a child's token would otherwise not
+  know its file). Only a regular file is seekable with a length,
+  as on Android; a directory is `not-a-file`; a failed `open` is
+  `not-found` (ENOENT), `permission-lost` (EACCES/EPERM), else
+  `errno-<n>`. The target is resolved at acquire: a file renamed
+  between acquire and `openRead` is `not-found` (re-acquire after
+  a listing).
   Reads are Dart FFI afterwards — but the scope discipline
   stays uniform: `FdReader` checks token liveness in Dart at
   construction and close, not per op (same-isolate path; the
@@ -341,8 +393,9 @@ Notes:
 - Dart binds the shared C shim's entry points (non-leaf — a
   cold-storage read can block, which strains the `isLeaf`
   contract; the transition cost is ~0.1% of a 192µs read); one
-  reusable `malloc` buffer per reader; views via `asTypedList`,
-  valid until the next call or close. The bench FFI rows used
+  reusable buffer per reader, Dart-owned (`asTypedList` with the
+  shim's free as finalizer); views valid until the next call,
+  memory-safe after it. The bench FFI rows used
   leaf libc bindings — re-run them against the non-leaf shim to
   confirm the delta is noise. The shim wraps `pread` / `read` /
   `pwrite` / `fsync` as `-errno` functions (one shared C shim,
@@ -358,13 +411,28 @@ Notes:
   open fds); `EBADF` ⇒ `session-closed` (use after close / double
   close — never a live fd). The set is to-be-confirmed on device
   (FUSE transports may surface `ENOTCONN`). Everything else stays
-  loud under its own code per the exhaustiveness rule.
+  loud under its own code per the exhaustiveness rule, as
+  `errno-<n>` with `{domain: errno, code: n}` in details — n is
+  the platform's own number, not portable (ENOTCONN is 107 on
+  Linux/Android, 57 on Darwin). The first `permission-lost`
+  closes the reader's fd at once, before throwing: a pulled
+  volume can get the processes still holding descriptors on it
+  killed (vold's unmount kills holders), so a dead read must not
+  keep its fd for the caller's eventual `close`. Reads are
+  synchronous and a reader never crosses isolates, so this cannot
+  race. Every later call is `session-closed`, never an empty view
+  that would read as a complete file: the consumer treats the
+  first `permission-lost` as final for that reader. Other readers
+  on the same volume keep their fds until their own next read.
 - Helper channel access: the `FilePickerWritable()` singleton
   installs a Dart-side handler, which
-  `BackgroundIsolateBinaryMessenger` refuses — so helpers use a
-  dedicated handler-free channel client
+  `BackgroundIsolateBinaryMessenger` refuses — so helpers that
+  need control calls use a dedicated handler-free channel client
   (`ensureInitialized(rootToken)` + raw `MethodChannel` invoke, no
-  listen) shipped by the plugin. Token liveness is a Dart-side
+  listen) shipped by the plugin. Reads need none (implementation
+  finding): `handoff()` checks the scope root-side and the helper
+  only makes FFI calls, so the client moves to Gap 3, whose
+  helper does make control calls. Token liveness is a Dart-side
   live-set of unreleased scope ids. Same-isolate `fromSession`
   checks membership at construction and close, not per op (a
   per-op round trip would add 20–80% per read); a mid-session
@@ -372,15 +440,22 @@ Notes:
   the scope root-side and carries the opaque token in the record
   (catches already-released); the helper performs no live check
   — its copy is a handoff-time snapshot, blind to a root-side
-  mid-session release. The scope MUST stay acquired until close
-  (caller obligation on the helper path).
+  mid-session release. The scope should stay acquired until
+  close. (Softened in review from MUST: an open fd survives a
+  release on both platforms, since neither kernel re-checks
+  access on one, so an early release breaks no read. What it ends
+  is the plugin's own bookkeeping, e.g. the iOS security scope
+  behind any other access to those files.)
 
 ## 6. Error taxonomy
 
 `permission-lost` (media detached incl. mapped `errno`; revoked
-grants fail new opens while open fds keep reading), `not-found`, `seek-unsupported` (carrying
+grants fail new opens while open fds keep reading), `not-found`,
+`not-a-file` (`openRead` on a directory: the mirror of Gap 1's
+`not-a-directory`, added in review), `seek-unsupported` (carrying
 the native message), `session-closed` (use after close),
-`scope-closed` (use after Gap-1a release; checked in Dart). Dart
+`scope-closed` (use after Gap-1a release; checked in Dart), and
+`errno-<n>` for an unmapped errno (the platform's own n). Dart
 carrier (pinned, all gaps): `PlatformException` with the taxonomy
 kind as `code` and a details map carrying the native domain + code
 where available, so callers can tell "detached" from "broken".
@@ -414,6 +489,55 @@ into a taxonomy kind.
   run, internal storage via ExternalStorageProvider plus a USB-3
   OTG SSD. Emulator + warm-cache numbers are a strong prior, not
   the answer.
+- Results of the first implementation (2026-10-01):
+  - VM tests (`test/fd_reading_test.dart`, real fds from libc,
+    the real shim via the build hook): lifecycle, views, EOF,
+    bounds, single owner, `fromSession` ↔ `closeRead` linkage, a
+    helper reading through `Isolate.run`, the kill path
+    (`Isolate.spawn` + kill, then the fd is closed — probed with
+    `fcntl(F_GETFD)`, which never closes a reused number), and
+    pipes (forward skip, backward `seek-unsupported`). After
+    review also: a view read after close (Dart-owned buffer), a
+    record consumed twice (`StateError`), short reads looped
+    mid-stream (a pipe written in three timed parts), `errno-29`
+    from a pipe reported seekable, the root-isolate budget
+    assertion, and close detaching the finalizer (a closed reader
+    collected by GC must not close the number a second reader got;
+    verified to fail with the detach removed). The `EINTR` retry is
+    not stubbed: it sits inside the C shim, below what Dart can
+    inject.
+  - The example's device run (`example/lib/device_checks.dart`,
+    `FPW_AUTOCHECK`) on a 32 MiB fixture, iOS simulator and an API
+    36 emulator (fixture pushed with adb): spot reads and a full
+    helper read verified byte for byte, `closeRead` twice,
+    `scope-closed` for an open and for a reader close after
+    release, `not-a-file` for a directory, and on Android
+    `/proc/self/fd` the same before and after (159/159), re-run on
+    the review fixes. The same run on a physical iPhone XR (iOS
+    18.7, debug build of the example, signed, so `fpw_fd.framework`
+    embedding and signing hold on a device), at 086a6db: all of the
+    above passed. Its timed reads (~10 GiB/s) are the page cache of
+    a file written seconds before, not storage. The fixture was
+    removed afterwards (`FPW_CLEANUP`).
+  - The emulator caught what host and simulator could not: the
+    first fix encoded the owner record's address as an int64, and
+    Android heap pointers carry a tag in the top byte (negative as
+    an int64), so every adopt read as a failure. Pointers now only
+    ever cross FFI as pointers.
+  - Throughput, warm cache, 1 MiB chunks through the non-leaf
+    shim, emulator: 1.7–2.5 GiB/s on a quiet host (spawn
+    included), in line with the C1 emulator row (2.2 GiB/s at 1M).
+    A re-run under host load (load average ~8) gave 0.7–1.7 GiB/s
+    timed inside the helper, with the pure-Dart verify loop slowed
+    by the same factor: noise, not the shim. Emulator numbers are
+    a prior only; the S24 re-run §3a asks for is still open, and
+    so is the cold-cache gate.
+  - Not run yet: media detach mid-read, revoked grant with an
+    open fd, a pipe-backed provider, a Windows build. The last
+    means the review's M3 fix (the hook returns early for
+    Windows) is reasoned, not verified: it has never been compiled
+    on Windows (skipped for now by the owner's decision), unlike
+    M2's web fix, which a probe app built.
 
 ## 8. Graduation (experimental → stable)
 
