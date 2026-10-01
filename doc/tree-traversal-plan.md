@@ -267,8 +267,11 @@ Notes:
   with all symlinks resolved — the deepest existing ancestor, then
   the rest, since `resolvingSymlinksInPath` leaves a not-yet-existing
   path alone — must stay under the resolved root, else `not-found`
-  `reason: outside-root`. The sandbox would refuse an escape on a
-  device; the simulator does not, so the plugin does. Pinned by
+  `reason: outside-root`. On a device the sandbox refuses such an
+  escape by itself (measured, iPhone XR: raw `dart:io` through a
+  `out -> ..` symlink inside the held folder gets `EPERM`), so the
+  check is defense in depth there; the simulator does not enforce
+  the sandbox, so there it is the only guard. Pinned by
   host tests (`ios/test/ChildIdentifierTests.swift`, run by
   `tool/swift_unit_tests.sh`; red-checked by mutating the
   component check, the scalar split and the ancestor resolution).
@@ -285,10 +288,14 @@ Notes:
   registry refcounts the root) and returns the child's path and
   name, so a caller holds one child without listing again.
   Simulator runs: acquire, `readFile` and a two-levels-down
-  `listChildren` all work on child identifiers. Security scope on
-  a real device is still owed one run (the simulator does not
-  enforce the sandbox), but it is now the root's scope, not a
-  child bookmark's.
+  `listChildren` all work on child identifiers. On hardware too
+  (iPhone XR, iOS 18.7.10, debug build, folder picked in On My
+  iPhone, 2026-10-01): in a fresh launch after the pick,
+  `readFile` and `writeFile` on a child and a grandchild
+  identifier, `lookupChild` and listings all work under the root's
+  scope; after a kill and relaunch, the saved child and grandchild
+  identifiers acquire through the root's persisted bookmark
+  (`repaired: false`) and read back what the previous launch wrote.
 
 ## 6. Error taxonomy
 
@@ -346,6 +353,25 @@ taxonomy review before graduation (see §8).
     subfolder ⇒ `not-found` (Android M1), and a removed disk with a
     subfolder identifier ⇒ `volume-absent` via the throwing
     variant (Android S2).
+  - iPhone XR, iOS 18.7.10, debug build (2026-10-01), via the
+    example's `--dart-define=FPW_AUTOCHECK=true` run
+    (`example/lib/device_checks.dart`) over a folder picked in On
+    My iPhone, with a throwaway tree created inside it and removed
+    afterwards:
+    - fresh launch after the pick: child and grandchild `readFile`
+      / `writeFile` / `lookupChild` work under the root's scope;
+      root listing 12 ms, a 2-entry child listing 10 ms;
+    - kill + relaunch: saved child and grandchild identifiers
+      acquire (`repaired: false`) and read back the last launch's
+      writes;
+    - 10k children: 329 / 281 / 280 ms end to end in Dart over
+      three runs; identifiers 2,575 bytes each, 25.8 MB in total
+      (§8);
+    - symlink `out -> ..` inside the folder: listed as an entry
+      (`isDirectory: false`); `listChildren`, `lookupChild` and
+      `readFile` through it ⇒ `not-found` `reason: outside-root`
+      (`readFile` keeps its legacy `UnknownError` carrier); raw
+      `dart:io` through it ⇒ `EPERM` from the sandbox.
 - No new benchmark suite beyond the 10k-child latency check: listing
   throughput is provider-bound by the same argument as 2b §3's
   overhead note.
@@ -360,7 +386,9 @@ Same bar as Gap 2b, evaluated independently:
    (suggested: p95 under 5s on local storage, provider-bound
    otherwise). On iOS also weigh the wire size: every child
    identifier repeats the root bookmark (1–3 KB), so a 10k listing
-   carries 10–30 MB across the codec and keeps it resident in
+   carries 10–30 MB across the codec (measured on the iPhone XR:
+   2,575 bytes per identifier, 25.8 MB for 10k children, listed
+   in 280–329 ms end to end in Dart) and keeps it resident in
    Dart. If that hurts on device, send the root once per listing
    and the path per entry, composing identifiers in Dart (#69
    re-review N5).

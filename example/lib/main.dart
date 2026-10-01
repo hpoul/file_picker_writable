@@ -8,6 +8,7 @@ import 'dart:math';
 
 import 'package:convert/convert.dart';
 import 'package:file_picker_writable/file_picker_writable.dart';
+import 'package:file_picker_writable_example/device_checks.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:logging/logging.dart';
@@ -96,6 +97,9 @@ class MainScreenState extends State<MainScreen> {
     super.initState();
     final state = FilePickerWritable().init();
     _pickerState = state;
+    if (autoCheck) {
+      unawaited(_runDeviceChecks());
+    }
     state.registerFileOpenHandler((fileInfo, file) async {
       _logger.fine('got file info. we are mounted:$mounted');
       if (!mounted) {
@@ -210,6 +214,19 @@ class MainScreenState extends State<MainScreen> {
     });
     if (fileInfo == null) {
       _logger.fine('User cancelled.');
+    }
+  }
+
+  /// The device run of device_checks.dart, over every picked directory.
+  Future<void> _runDeviceChecks() async {
+    final data = await _appDataBloc.store.load();
+    if (data.directories.isEmpty) {
+      _logger.info('DEVICE no directory picked yet; pick one, then relaunch');
+    }
+    for (final directory in data.directories) {
+      await (cleanUp
+          ? removeDeviceFixture(directory)
+          : runDeviceChecks(directory));
     }
   }
 
