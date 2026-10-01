@@ -46,8 +46,10 @@ Future<File> _savedIds() async => File(
   '${(await getApplicationDocumentsDirectory()).path}/fpw_saved_ids.json',
 );
 
-/// Deletes the fixture folder (a recursive delete removes the `out` link
-/// itself, never its target) and the saved identifiers.
+/// Deletes the fixture folder and the saved identifiers. The folder holds
+/// `out -> ../..`, so this relies, deliberately, on dart:io's recursive
+/// delete removing a symlink itself and never following it: a delete that
+/// followed links would remove the user's folders above the pick.
 Future<void> removeDeviceFixture(FileInfo directory) async {
   final plugin = FilePickerWritable();
   final scope = await plugin.acquire(identifier: directory.identifier);

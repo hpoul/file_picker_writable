@@ -125,6 +125,10 @@ struct ResolvedIdentifier {
       // never contained.
       return false
     }
+    // Strictly below the root: a child path that resolves to the root
+    // itself (e.g. `selfrel -> ../root`) is refused, although the kernel
+    // would reach the root. Deliberately conservative; a caller wanting
+    // the root uses the root's own identifier.
     return child.hasPrefix(root + "/")
   }
 
@@ -140,6 +144,13 @@ struct ResolvedIdentifier {
   /// alone, and `standardizedFileURL` collapses `..` against components
   /// that may themselves be symlinks (#69 review F1). Components that do
   /// not exist are taken literally, as a create would name them.
+  ///
+  /// The symlink-free invariant assumes `destinationOfSymbolicLink` fails
+  /// only for "not a symlink". If it fails otherwise (EACCES — reachable
+  /// only once the walk has already left the root), the link is appended
+  /// literally and a later `..` pops it as text; every such case resolves
+  /// to a path the root does not contain, so the error is a false refusal,
+  /// never a false "contained".
   static func resolvedPath(_ url: URL) -> String? {
     let fm = FileManager.default
     var resolved: [String] = []

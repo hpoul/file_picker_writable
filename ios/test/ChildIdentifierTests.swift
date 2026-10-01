@@ -176,6 +176,7 @@ struct ChildIdentifierTests {
       try fm.createSymbolicLink(atPath: rootURL.appendingPathComponent("mid").path, withDestinationPath: "d2")
       try fm.createSymbolicLink(atPath: rootURL.appendingPathComponent("mid2").path, withDestinationPath: "../outside")
       try fm.createSymbolicLink(atPath: rootURL.appendingPathComponent("d/back").path, withDestinationPath: "../d2")
+      try fm.createSymbolicLink(atPath: rootURL.appendingPathComponent("selfrel").path, withDestinationPath: "../root")
       // Roots that are themselves symlinks.
       try fm.createSymbolicLink(atPath: base.appendingPathComponent("rootlink").path, withDestinationPath: "root")
       try fm.createSymbolicLink(atPath: base.appendingPathComponent("looproot").path, withDestinationPath: "looproot")
@@ -200,6 +201,8 @@ struct ChildIdentifierTests {
     check(resolved("mid/sub/file.txt").isContained, "a link in the middle, staying inside")
     check(!resolved("mid2/existing.txt").isContained, "a link in the middle, leading outside")
     check(resolved("d/back/sub/file.txt").isContained, "`..` in a link target that stays inside")
+    check(!resolved("selfrel").isContained, "a child resolving to the root itself is refused (conservative)")
+    check(resolved("selfrel/d").isContained, "below the root through a link to the root is inside")
     let rootLink = base.appendingPathComponent("rootlink")
     check(resolved("d", scope: rootLink).isContained, "a root that is itself a symlink")
     check(!resolved("out", scope: rootLink).isContained, "escape from a symlinked root")
