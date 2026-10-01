@@ -9,6 +9,7 @@ object ErrorKind {
   const val NOT_FOUND = "not-found"
   const val SCOPE_CLOSED = "scope-closed"
   const val NOT_A_DIRECTORY = "not-a-directory"
+  const val NOT_A_FILE = "not-a-file"
   const val INVALID_NAME = "invalid-name"
 }
 

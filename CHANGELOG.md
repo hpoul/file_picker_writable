@@ -46,22 +46,28 @@
   * Large-file reads without a temp copy (`doc/large-file-reads-plan.md`):
     `openRead(scope:)` opens the file an `AcquiredScope` names and hands
     back a `ReadSession` that owns a native file descriptor (`seekable`,
-    `length`). `FdReader` reads it over FFI into one reused native buffer
-    and returns views valid until the next call; an empty view is end of
-    file. Read where the bytes are consumed: `FdReader.fromSession` on the
-    same isolate, or `ReadSession.handoff()` and `FdReader.fromHandoff` in
-    a helper isolate (anything over 1 MiB belongs in a helper). Close with
-    `FdReader.close()`, or `closeRead` for a session never wrapped; a
-    `NativeFinalizer` closes what a collected reader or a killed helper
-    left open. Pipes read forward only (`seek-unsupported` otherwise).
-    New error kinds: `session-closed`, `seek-unsupported`, and `errno-<n>`
-    for anything unmapped (a directory is `errno-21`); EIO, ENXIO and
+    `length`). `FdReader` reads it over FFI into one reused buffer and
+    returns views valid until the next call (a view kept longer shows
+    later bytes, but never freed memory); an empty view is end of file.
+    Read where the bytes are consumed: `FdReader.fromSession` on the same
+    isolate, or `ReadSession.handoff()` and `FdReader.fromHandoff` in a
+    helper isolate. More than 1 MiB per reader on the root isolate fails a
+    debug assertion. Close with `FdReader.close()`, or `closeRead` for a
+    session never wrapped; a `NativeFinalizer` closes what a collected
+    reader or a killed helper left open. A handoff record is consumed
+    once: a second reader on it is a `StateError`. Pipes read forward only
+    (`seek-unsupported` otherwise).
+  * New error kinds: `not-a-file` (`openRead` on a directory),
+    `session-closed`, `seek-unsupported`, and `errno-<n>` for anything
+    unmapped, n being the platform's own errno number. EIO, ENXIO and
     ENODEV are `permission-lost`, and close the reader at once.
   * The reader is a small C shim built by a native-assets build hook
     (`hook/build.dart`), so building needs a C toolchain (Xcode, or the
-    Android NDK that Flutter already uses). An app built before upgrading
-    may keep a cached hook step and ship without the shim (the reader then
-    fails to resolve its native functions): run `flutter clean` once.
+    Android NDK that Flutter already uses). Windows builds skip it (reads
+    are unsupported there), and web builds never import `dart:ffi`. An app
+    built before upgrading may keep a cached hook step and ship without
+    the shim (the reader then fails to resolve its native functions): run
+    `flutter clean` once.
 * Android: every method-channel call now runs on a shared background
   TaskQueue instead of the main thread, so slow providers no longer block
   frames. The pickers and `init` still hop to the main thread. Launch URLs

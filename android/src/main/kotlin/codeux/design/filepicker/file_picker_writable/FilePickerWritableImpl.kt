@@ -523,9 +523,13 @@ class FilePickerWritableImpl(
    * before keep reading). A provider exception first runs the volume check
    * (a pulled stick is `volume-absent`, whatever the provider threw).
    * Below the picked root, the tree check's `IllegalArgumentException`
-   * means the file is gone, the same rule as the directory verbs. A
-   * directory opens fine as an fd, so it is refused here as `errno-21`
-   * (EISDIR), the code a read on it would have failed with.
+   * means the file is gone, the same rule as the directory verbs.
+   *
+   * A directory is `not-a-file`, whichever way the provider answers it:
+   * ExternalStorageProvider hands out a directory's fd (caught by `fstat`,
+   * since `getStatSize` would call it a pipe), others refuse to open it
+   * (caught by re-querying the row's MIME type after the failure, so the
+   * happy path costs no extra query).
    */
   @WorkerThread
   fun openRead(token: String): Map<String, Any?> {
@@ -539,13 +543,23 @@ class FilePickerWritableImpl(
     val documentUri = documentUriFor(uri)
     val pfd = try {
       onVolume(documentUri) { contentResolver.openFileDescriptor(documentUri, "r") }
-    } catch (e: IllegalArgumentException) {
+    } catch (e: TaxonomyException) {
+      throw e
+    } catch (e: Exception) {
+      val isDirectory = try {
+        queryRow(documentUri)?.isDirectory == true
+      } catch (_: Exception) {
+        false
+      }
+      if (isDirectory) {
+        throw TaxonomyException(ErrorKind.NOT_A_FILE, "$documentUri is a directory", e)
+      }
       val isTreeRoot = DocumentsContract.isTreeUri(uri) &&
         DocumentsContract.getDocumentId(documentUri) == DocumentsContract.getTreeDocumentId(uri)
-      if (isTreeRoot) {
-        throw e
+      if (e is IllegalArgumentException && !isTreeRoot) {
+        throw missingDocument(documentUri, e)
       }
-      throw missingDocument(documentUri, e)
+      throw e
     } ?: throw missingDocument(documentUri)
     val mode = try {
       Os.fstat(pfd.fileDescriptor).st_mode
@@ -555,11 +569,7 @@ class FilePickerWritableImpl(
     }
     if (OsConstants.S_ISDIR(mode)) {
       pfd.close()
-      throw TaxonomyException(
-        "errno-${OsConstants.EISDIR}",
-        "$documentUri is a directory",
-        details = mapOf("domain" to "errno", "code" to OsConstants.EISDIR)
-      )
+      throw TaxonomyException(ErrorKind.NOT_A_FILE, "$documentUri is a directory")
     }
     val statSize = pfd.statSize
     val fd = pfd.detachFd()

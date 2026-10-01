@@ -73,9 +73,15 @@ int pipeWith(List<int> content) {
   }
 }
 
-/// True when [fd] is no longer open. Closing an open one is the probe, so
-/// only ask about descriptors that should be closed.
-bool isClosed(int fd) => fpw_close(fd) == -9 /* EBADF */;
+final _fcntl = _libc
+    .lookupFunction<
+      Int32 Function(Int32, Int32, VarArgs<(Int32,)>),
+      int Function(int, int, int)
+    >('fcntl');
+
+/// True when [fd] is not open. F_GETFD only asks, so a number the VM has
+/// reused meanwhile is never closed by the probe.
+bool isClosed(int fd) => _fcntl(fd, 1 /* F_GETFD */, 0) == -1;
 
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
@@ -169,10 +175,12 @@ void main() {
       () async {
         final (scope, session) = await open();
         final reader = FdReader.fromSession(session);
-        expect(reader.readChunk(0, 1 << 20), content.sublist(0, 1 << 20));
+        // Under 1 MiB in all: the root isolate's budget (a helper reads
+        // the whole file in the handoff tests).
+        expect(reader.readChunk(0, 1 << 16), content.sublist(0, 1 << 16));
         expect(
-          reader.readChunk(2 * 1024 * 1024, 1 << 20),
-          content.sublist(2 * 1024 * 1024, 3 * 1024 * 1024),
+          reader.readChunk(2 * 1024 * 1024, 1 << 16),
+          content.sublist(2 * 1024 * 1024, 2 * 1024 * 1024 + (1 << 16)),
         );
         // The last, short chunk loops to end of file.
         expect(
@@ -296,6 +304,60 @@ void main() {
       await plugin.closeRead(session);
     });
 
+    test('a view kept past close stays readable memory', () async {
+      final (scope, session) = await open();
+      final reader = FdReader.fromSession(session, bufferLength: 16);
+      final view = reader.readChunk(0, 8);
+      reader.close();
+      // The buffer belongs to Dart and the view keeps it alive: stale
+      // bytes at worst, never freed memory.
+      expect(view, content.sublist(0, 8));
+      await plugin.release(scope);
+    });
+
+    test('close detaches the finalizer: a GC never closes again', () async {
+      final (scope, session) = await open();
+      final weak = _closeAndForget(session);
+      // The lowest free number: most likely the one just closed, now a
+      // fresh descriptor that a stale finalizer would close.
+      final (secondScope, second) = await open();
+      final reader = FdReader.fromSession(second);
+      final garbage = <Object>[];
+      for (var i = 0; weak.target != null && i < 50000; i++) {
+        garbage.add(Uint8List(1 << 16));
+        if (garbage.length > 64) {
+          garbage.clear();
+        }
+      }
+      expect(weak.target, isNull, reason: 'the first reader was collected');
+      expect(isClosed(second.fd), isFalse);
+      expect(reader.readChunk(0, 4), content.sublist(0, 4));
+      reader.close();
+      await plugin.release(secondScope);
+      await plugin.release(scope);
+    });
+
+    test('an errno outside the taxonomy stays loud as errno-<n>', () async {
+      // A pipe reported as seekable: pread fails with ESPIPE (29).
+      nextOpen = () => {
+        'fd': pipeWith([1, 2, 3]),
+        'seekable': true,
+        'length': 3,
+      };
+      final (scope, session) = await open();
+      final reader = FdReader.fromSession(session);
+      expect(
+        () => reader.readChunk(0, 3),
+        throwsA(
+          isA<PlatformException>()
+              .having((e) => e.code, 'code', 'errno-29')
+              .having((e) => (e.details as Map)['domain'], 'domain', 'errno'),
+        ),
+      );
+      reader.close();
+      await plugin.release(scope);
+    });
+
     test('EBADF is session-closed, never a live read', () async {
       final (scope, session) = await open();
       expect(
@@ -354,10 +416,25 @@ void main() {
       await plugin.closeRead(session);
     });
 
+    test(
+      'a record consumed twice is a StateError, not a double close',
+      () async {
+        final (scope, session) = await open();
+        final record = session.handoff();
+        final first = FdReader.fromHandoff(record);
+        expect(() => FdReader.fromHandoff(record), throwsStateError);
+        expect(first.readChunk(0, 4), content.sublist(0, 4));
+        first.close();
+        expect(isClosed(record.fd), isTrue);
+        await plugin.release(scope);
+      },
+    );
+
     test('recovery: the root builds the reader from its own record', () async {
       final (scope, session) = await open();
       final record = session.handoff();
-      // The spawn failed: nobody took it, so the root is the consumer.
+      // The spawn itself failed (IsolateSpawnException): nobody took it, so
+      // the root is the consumer. The only case recovery is allowed.
       final reader = FdReader.fromHandoff(record);
       expect(reader.readChunk(10, 4), content.sublist(10, 14));
       reader.close();
@@ -421,7 +498,75 @@ void main() {
         await plugin.release(scope);
       },
     );
+
+    test('short reads loop until the length is there', () async {
+      final fds = _malloc(8).cast<Int32>();
+      expect(_pipe(fds), 0);
+      final (readEnd, writeEnd) = (fds[0], fds[1]);
+      _free(fds.cast());
+      nextOpen = () => {'fd': readEnd, 'seekable': false, 'length': null};
+      final (scope, session) = await open();
+      final reader = FdReader.fromSession(session, bufferLength: 64);
+      // Three writes with pauses: each read(2) returns only what is there,
+      // so one 30-byte chunk takes several reads inside the shim. Read only
+      // once the writer is running, or this isolate would block in read(2)
+      // before the writer exists.
+      final firstPart = ReceivePort();
+      final exited = ReceivePort();
+      await Isolate.spawn(_writeInParts, (
+        writeEnd,
+        firstPart.sendPort,
+      ), onExit: exited.sendPort);
+      await firstPart.first;
+      expect(reader.readChunk(0, 30), List.generate(30, (i) => i));
+      await exited.first;
+      expect(reader.readChunk(30, 64), isEmpty);
+      reader.close();
+      await plugin.release(scope);
+    });
   });
+
+  group('root isolate budget', () {
+    test('more than 1 MiB on the root isolate asserts', () async {
+      expect(RootIsolateToken.instance, isNotNull);
+      final (scope, session) = await open();
+      final reader = FdReader.fromSession(session);
+      reader.readChunk(0, 1 << 20);
+      expect(
+        () => reader.readChunk(1 << 20, 1),
+        throwsA(isA<AssertionError>()),
+      );
+      reader.close();
+      await plugin.release(scope);
+    });
+  });
+}
+
+/// Builds a reader on [session]'s handoff record (so no session links to
+/// it), closes it, and drops it: only the weak reference is left, to watch
+/// for its collection.
+WeakReference<FdReader> _closeAndForget(ReadSession session) {
+  final reader = FdReader.fromHandoff(session.handoff())..close();
+  return WeakReference(reader);
+}
+
+/// Writes 0..29 to the pipe's write end in three parts with pauses, then
+/// closes it, and reports the first part written on the port.
+void _writeInParts((int, SendPort) message) {
+  final (fd, firstPart) = message;
+  final buffer = _malloc(10);
+  for (var part = 0; part < 3; part++) {
+    buffer.asTypedList(10).setAll(0, List.generate(10, (i) => part * 10 + i));
+    if (_write(fd, buffer, 10) != 10) {
+      throw StateError('write failed');
+    }
+    if (part == 0) {
+      firstPart.send(true);
+    }
+    sleep(const Duration(milliseconds: 50));
+  }
+  _free(buffer);
+  fpw_close(fd);
 }
 
 /// The helper's work, built at top level so the closure captures only the

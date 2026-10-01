@@ -4,58 +4,114 @@
 // makes on a detached file descriptor, wrapped so each returns -errno from
 // the call itself (an errno read through a second FFI call can be stale:
 // the VM may make syscalls of its own in between) and retries EINTR
-// inside. Plus one cleanup record {fd, buffer} that explicit close and the
-// NativeFinalizer backstop release the same way, so the GC/kill path never
-// leaks the buffer.
+// inside.
+//
+// Two kinds of native memory, each with one owner:
+// - Read buffers belong to Dart: it wraps them with asTypedList and
+//   fpw_buffer_free as the finalizer, so every view of a buffer keeps it
+//   alive. A view kept past the next read or past close reads stale bytes,
+//   never freed memory.
+// - An owner record per adopted descriptor, released by explicit close or
+//   by the NativeFinalizer backstop. The records are registered in a
+//   process-wide table, so a descriptor already owned (a handoff record
+//   consumed twice) is refused instead of closed twice.
+//
+// POSIX only: hook/build.dart skips Windows, where openRead is unsupported.
 
 // One pread signature on every platform: 64-bit offsets on 32-bit Android
 // too (pread64 there), plain pread on Darwin and 64-bit Linux.
 #define _FILE_OFFSET_BITS 64
 
 #include <errno.h>
+#include <pthread.h>
 #include <stdint.h>
 #include <stdlib.h>
 #include <unistd.h>
 
-#if defined(_WIN32)
-#define FPW_EXPORT __declspec(dllexport)
-#else
 #define FPW_EXPORT __attribute__((visibility("default"))) __attribute__((used))
-#endif
+
+FPW_EXPORT uint8_t* fpw_buffer_new(int64_t length) {
+  return malloc(length > 0 ? (size_t)length : 1);
+}
+
+// The buffer finalizer (void f(void*)).
+FPW_EXPORT void fpw_buffer_free(void* buffer) {
+  free(buffer);
+}
 
 typedef struct {
   int32_t fd;
-  uint8_t* buffer;
-} fpw_reader;
+} fpw_owner;
 
-// A cleanup record owning `fd` and a fresh buffer of `buffer_length`
-// bytes, or NULL when out of memory (the fd is then still the caller's).
-FPW_EXPORT fpw_reader* fpw_reader_new(int32_t fd, int64_t buffer_length) {
-  fpw_reader* reader = malloc(sizeof(fpw_reader));
-  if (reader == NULL) {
-    return NULL;
+static pthread_mutex_t owned_lock = PTHREAD_MUTEX_INITIALIZER;
+static int32_t* owned_fds = NULL;
+static size_t owned_count = 0;
+static size_t owned_capacity = 0;
+
+// Registers fd as owned. EBUSY when it already is, ENOMEM, or 0.
+static int owned_add(int32_t fd) {
+  int result = 0;
+  pthread_mutex_lock(&owned_lock);
+  for (size_t i = 0; i < owned_count; i++) {
+    if (owned_fds[i] == fd) {
+      result = EBUSY;
+      goto done;
+    }
   }
-  reader->buffer = malloc(buffer_length > 0 ? (size_t)buffer_length : 1);
-  if (reader->buffer == NULL) {
-    free(reader);
-    return NULL;
+  if (owned_count == owned_capacity) {
+    size_t capacity = owned_capacity == 0 ? 16 : owned_capacity * 2;
+    int32_t* grown = realloc(owned_fds, capacity * sizeof(int32_t));
+    if (grown == NULL) {
+      result = ENOMEM;
+      goto done;
+    }
+    owned_fds = grown;
+    owned_capacity = capacity;
   }
-  reader->fd = fd;
-  return reader;
+  owned_fds[owned_count++] = fd;
+done:
+  pthread_mutex_unlock(&owned_lock);
+  return result;
 }
 
-FPW_EXPORT uint8_t* fpw_reader_buffer(fpw_reader* reader) {
-  return reader->buffer;
+static void owned_remove(int32_t fd) {
+  pthread_mutex_lock(&owned_lock);
+  for (size_t i = 0; i < owned_count; i++) {
+    if (owned_fds[i] == fd) {
+      owned_fds[i] = owned_fds[--owned_count];
+      break;
+    }
+  }
+  pthread_mutex_unlock(&owned_lock);
 }
 
-// Reads up to `length` bytes at `offset` into the record's buffer, looping
-// over short reads until `length` or end of file. Returns the byte count
-// (0 at end of file) or -errno.
-FPW_EXPORT int64_t fpw_pread_full(fpw_reader* reader, int64_t offset, int64_t length) {
+// A fresh, empty owner record, or NULL when out of memory. Its pointer is
+// passed around as a pointer, never as a number: Android heap pointers
+// carry a tag in the top byte, so they are negative as an int64.
+FPW_EXPORT fpw_owner* fpw_owner_new(void) {
+  return malloc(sizeof(fpw_owner));
+}
+
+// Makes `owner` the owner of fd: 0, or -EBUSY when another record owns fd
+// already, or -ENOMEM. On failure `owner` is freed and fd stays the
+// caller's.
+FPW_EXPORT int32_t fpw_adopt(fpw_owner* owner, int32_t fd) {
+  int error = owned_add(fd);
+  if (error != 0) {
+    free(owner);
+    return -error;
+  }
+  owner->fd = fd;
+  return 0;
+}
+
+// Reads up to `length` bytes at `offset` into `buffer`, looping over short
+// reads until `length` or end of file. Returns the byte count (0 at end of
+// file) or -errno.
+FPW_EXPORT int64_t fpw_pread_full(int32_t fd, uint8_t* buffer, int64_t offset, int64_t length) {
   int64_t total = 0;
   while (total < length) {
-    ssize_t n = pread(reader->fd, reader->buffer + total, (size_t)(length - total),
-                      (off_t)(offset + total));
+    ssize_t n = pread(fd, buffer + total, (size_t)(length - total), (off_t)(offset + total));
     if (n < 0) {
       if (errno == EINTR) {
         continue;
@@ -71,10 +127,10 @@ FPW_EXPORT int64_t fpw_pread_full(fpw_reader* reader, int64_t offset, int64_t le
 }
 
 // The same for a non-seekable descriptor (a pipe): sequential read.
-FPW_EXPORT int64_t fpw_read_full(fpw_reader* reader, int64_t length) {
+FPW_EXPORT int64_t fpw_read_full(int32_t fd, uint8_t* buffer, int64_t length) {
   int64_t total = 0;
   while (total < length) {
-    ssize_t n = read(reader->fd, reader->buffer + total, (size_t)(length - total));
+    ssize_t n = read(fd, buffer + total, (size_t)(length - total));
     if (n < 0) {
       if (errno == EINTR) {
         continue;
@@ -96,20 +152,20 @@ FPW_EXPORT int32_t fpw_close(int32_t fd) {
   return close(fd) == 0 ? 0 : -errno;
 }
 
-// Explicit close of a record: closes its fd, frees its buffer and the
-// record. Returns 0 or -errno from close; the memory is freed regardless.
-FPW_EXPORT int32_t fpw_reader_close(fpw_reader* reader) {
-  int32_t result = 0;
-  if (reader->fd >= 0 && close(reader->fd) != 0) {
-    result = -errno;
-  }
-  free(reader->buffer);
-  free(reader);
-  return result;
+// Explicit close of an owner record: unregisters and closes its fd, frees
+// the record. Returns 0 or -errno from close; the record is freed
+// regardless. Unregistered before the close, so a number the kernel hands
+// out again is never refused as busy; the cost is that a second adopt of a
+// double-consumed record racing this very window is not caught.
+FPW_EXPORT int32_t fpw_release(fpw_owner* owner) {
+  int32_t fd = owner->fd;
+  free(owner);
+  owned_remove(fd);
+  return close(fd) == 0 ? 0 : -errno;
 }
 
-// The NativeFinalizer callback (void f(void*)): the same cleanup, for a
+// The NativeFinalizer callback (void f(void*)): the same release, for a
 // record whose Dart owner was collected or whose isolate died.
-FPW_EXPORT void fpw_reader_finalize(void* reader) {
-  fpw_reader_close((fpw_reader*)reader);
+FPW_EXPORT void fpw_release_finalize(void* owner) {
+  fpw_release((fpw_owner*)owner);
 }

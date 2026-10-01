@@ -67,28 +67,33 @@ int _mismatches(Uint8List view, int offset) {
 }
 
 /// Reads the whole handed-off file in a helper isolate, 1 MiB per chunk:
-/// the byte count and, with [verify], how many bytes differ from big.bin.
-/// A factory, so the closure captures the record and nothing else.
-(int, int) Function() _readAll(ReadHandoff handoff, {required bool verify}) =>
-    () {
-      final reader = FdReader.fromHandoff(handoff);
-      try {
-        var position = 0;
-        var mismatches = 0;
-        while (true) {
-          final chunk = reader.readChunk(position, reader.bufferLength);
-          if (chunk.isEmpty) {
-            return (position, mismatches);
-          }
-          if (verify) {
-            mismatches += _mismatches(chunk, position);
-          }
-          position += chunk.length;
-        }
-      } finally {
-        reader.close();
+/// the byte count, the microseconds the reads took (timed inside the
+/// helper, so the spawn is not in it) and, with [verify], how many bytes
+/// differ from big.bin. A factory, so the closure captures the record and
+/// nothing else.
+(int, int, int) Function() _readAll(
+  ReadHandoff handoff, {
+  required bool verify,
+}) => () {
+  final stopwatch = Stopwatch()..start();
+  final reader = FdReader.fromHandoff(handoff);
+  try {
+    var position = 0;
+    var mismatches = 0;
+    while (true) {
+      final chunk = reader.readChunk(position, reader.bufferLength);
+      if (chunk.isEmpty) {
+        return (position, stopwatch.elapsedMicroseconds, mismatches);
       }
-    };
+      if (verify) {
+        mismatches += _mismatches(chunk, position);
+      }
+      position += chunk.length;
+    }
+  } finally {
+    reader.close();
+  }
+};
 
 /// Open descriptors of this process, or null where it cannot tell.
 int? _openFds() {
@@ -340,16 +345,23 @@ Future<void> _readChecks(
         'read all in a helper (${verify ? 'verified' : 'timed'})',
         () async {
           final session = await plugin.openRead(scope: scope);
-          final stopwatch = Stopwatch()..start();
-          final (bytes, mismatches) = await Isolate.run(
-            _readAll(session.handoff(), verify: verify),
+          // Handed off before the spawn: if handoff throws, the session is
+          // still ours to close.
+          final ReadHandoff record;
+          try {
+            record = session.handoff();
+          } on Exception {
+            await plugin.closeRead(session);
+            rethrow;
+          }
+          final (bytes, micros, mismatches) = await Isolate.run(
+            _readAll(record, verify: verify),
           );
-          final ms = stopwatch.elapsedMilliseconds;
-          final mibs = ms == 0
+          final mibs = micros == 0
               ? 'n/a'
-              : (bytes / (1 << 20) / (ms / 1000)).toStringAsFixed(0);
-          return '$bytes bytes in $ms ms ($mibs MiB/s)'
-              '${verify ? ', $mismatches mismatches' : ''}';
+              : (bytes / (1 << 20) / (micros / 1e6)).toStringAsFixed(0);
+          return '$bytes bytes in ${micros ~/ 1000} ms in the helper '
+              '($mibs MiB/s)${verify ? ', $mismatches mismatches' : ''}';
         },
       );
     }

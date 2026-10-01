@@ -6,6 +6,7 @@ enum ErrorKind {
   static let notFound = "not-found"
   static let scopeClosed = "scope-closed"
   static let notADirectory = "not-a-directory"
+  static let notAFile = "not-a-file"
   static let invalidName = "invalid-name"
 }
 

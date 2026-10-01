@@ -469,8 +469,9 @@ public class FilePickerWritablePlugin: NSObject, FlutterPlugin {
 
   /// Opens the file a live scope token names with `open(2)` under the
   /// held scope and hands the fd to Dart (large-file-reads-plan §5).
-  /// Never reads a byte. A directory opens fine as an fd, so it is refused
-  /// here as `errno-21` (EISDIR), the code a read on it would fail with.
+  /// Never reads a byte. A directory opens fine as an fd, so `fstat` refuses
+  /// it here as `not-a-file`. The file is the token's target as resolved at
+  /// acquire: renamed since, it reads as `not-found`.
   private func _openRead(token: String) throws -> [String: Any] {
     guard let url = _scopes.target(of: token) else {
       throw TaxonomyError(kind: ErrorKind.scopeClosed, message: "Scope \(token) was released")
@@ -489,7 +490,7 @@ public class FilePickerWritablePlugin: NSObject, FlutterPlugin {
     let type = info.st_mode & S_IFMT
     if type == S_IFDIR {
       close(fd)
-      throw Self._errnoError(EISDIR, "\(url.lastPathComponent) is a directory")
+      throw TaxonomyError(kind: ErrorKind.notAFile, message: "\(url.lastPathComponent) is a directory")
     }
     // As on Android: only a regular file is seekable with a length.
     let isRegular = type == S_IFREG

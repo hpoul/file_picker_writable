@@ -1,11 +1,12 @@
 import 'dart:async';
 import 'dart:convert';
-import 'dart:ffi';
 import 'dart:io';
 import 'dart:math';
 
 import 'package:file_picker_writable/src/event_handling.dart';
-import 'package:file_picker_writable/src/fd_native.dart';
+// dart:ffi only where it exists: a web build must never import it.
+import 'package:file_picker_writable/src/fd_native_stub.dart'
+    if (dart.library.ffi) 'package:file_picker_writable/src/fd_native.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 import 'package:logging/logging.dart';
@@ -689,10 +690,20 @@ class FilePickerWritable {
   /// [ReadSession]); a session that is never wrapped is closed with
   /// [closeRead].
   ///
-  /// [scope] must still be acquired (`scope-closed` otherwise) and stay
-  /// acquired until the reader closes. Failures are [PlatformException]s
-  /// with the kinds listed on [AcquiredScope], or `errno-<n>` for a failed
-  /// system call outside them (a directory is `errno-21`).
+  /// [scope] must still be acquired (`scope-closed` otherwise), and should
+  /// stay acquired until the reader closes (see [ReadHandoff.scopeToken]).
+  /// The file is the one [scope] named when it was acquired: on iOS a file
+  /// renamed since reads as `not-found`, so re-acquire after a listing.
+  /// On Android the scope's identifier needs a persisted grant
+  /// (`permission-lost` otherwise), so a file picked without one cannot be
+  /// opened here.
+  ///
+  /// Failures are [PlatformException]s with the kinds listed on
+  /// [AcquiredScope], `not-a-file` for a directory, or `errno-<n>` (the
+  /// platform's own errno number) for a failed system call outside them.
+  ///
+  /// The descriptor is Dart's from the moment native replies: if the reply
+  /// is lost (the engine shuts down mid-call), that descriptor leaks, once.
   ///
   /// Root isolate only, like [acquire]. Android and iOS only; throws
   /// [UnsupportedError] elsewhere.
@@ -730,7 +741,7 @@ class FilePickerWritable {
       return;
     }
     session._closed = true;
-    final result = fpw_close(session.fd);
+    final result = closeFd(session.fd);
     if (result < 0) {
       throw _errnoException(-result, 'close');
     }

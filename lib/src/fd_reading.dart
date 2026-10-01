@@ -2,7 +2,12 @@ part of 'file_picker_writable.dart';
 
 // Gap 2b, doc/large-file-reads-plan.md: control on the channel (openRead),
 // bytes over FFI on a detached file descriptor (FdReader), one Dart owner
-// per descriptor.
+// per descriptor. The FFI half lives in fd_native.dart, imported only where
+// dart:ffi exists.
+
+/// How many bytes a reader may read on the root isolate before the debug
+/// assertion asks for a helper (doc/large-file-reads-plan.md §3a).
+const _rootIsolateReadBudget = 1 << 20;
 
 /// An open, Dart-owned file descriptor from [FilePickerWritable.openRead].
 ///
@@ -10,7 +15,8 @@ part of 'file_picker_writable.dart';
 /// [FdReader.fromSession] here, or [handoff] it to a helper isolate and
 /// wrap the record there with [FdReader.fromHandoff]. Exactly one of the
 /// two, and at most one reader per session. A session that is never
-/// wrapped is closed with [FilePickerWritable.closeRead].
+/// wrapped is closed with [FilePickerWritable.closeRead]: a session has no
+/// finalizer, so one that is dropped unwrapped leaks its descriptor.
 @experimental
 class ReadSession {
   ReadSession._(
@@ -41,13 +47,22 @@ class ReadSession {
   /// again), returns the sendable record, and kills this copy: any later fd
   /// use of this session is a [StateError]. Send the record, not [fd].
   ///
+  /// Call it before spawning, not inside the spawn expression: when it
+  /// throws, the session is still yours, and only [FilePickerWritable.closeRead]
+  /// releases it.
+  ///
   /// Throws [StateError] once a reader was built on this session (bytes
   /// already flow here: hand off before wrapping, never after).
   ///
-  /// If the helper cannot take it (the spawn throws, or the helper dies
-  /// before building its reader), recover by building
-  /// [FdReader.fromHandoff] on this same record here and closing it. A
-  /// kill before the helper's reader exists leaks the descriptor.
+  /// Recovery: only when the spawn itself fails (`Isolate.spawn` or
+  /// `Isolate.run` throws an `IsolateSpawnException`) has nobody taken the
+  /// record, and only then may this isolate build [FdReader.fromHandoff] on
+  /// it and close it. After any other failure, a helper may already have
+  /// built its reader and closed the descriptor (a killed helper's
+  /// finalizer closes it too), and adopting the record again would read or
+  /// close a number the process has since reused: leave it. A helper killed
+  /// before it built its reader leaks the descriptor; that is the accepted
+  /// cost of never double-closing.
   ReadHandoff handoff() {
     _requireOwned('handoff');
     if (_reader != null) {
@@ -58,7 +73,7 @@ class ReadSession {
     }
     FilePickerWritable()._requireScopeLive(_scopeToken);
     _handedOff = true;
-    return ReadHandoff(
+    return ReadHandoff._(
       fd: fd,
       seekable: seekable,
       length: length,
@@ -75,11 +90,13 @@ class ReadSession {
   }
 }
 
-/// The sendable form of a [ReadSession]: plain values, so it crosses
-/// isolates as is. Build the helper's reader with [FdReader.fromHandoff].
+/// The sendable form of a [ReadSession], made only by
+/// [ReadSession.handoff]: plain values, so it crosses isolates as is.
+/// Build the helper's reader with [FdReader.fromHandoff], once: a second
+/// reader on the same record, while the first is open, is a [StateError].
 @experimental
 class ReadHandoff {
-  const ReadHandoff({
+  const ReadHandoff._({
     required this.fd,
     required this.seekable,
     required this.length,
@@ -91,17 +108,24 @@ class ReadHandoff {
   final int? length;
 
   /// The [AcquiredScope.id] the session was opened under, for provenance.
-  /// Checked at [ReadSession.handoff]; the helper does not check it again,
-  /// so the scope MUST stay acquired until the helper closes.
+  /// Checked at [ReadSession.handoff]; the helper does not check it again.
+  /// Keep the scope acquired until the helper closes: releasing it early
+  /// does not break the open descriptor (neither platform re-checks access
+  /// on one), but it ends the plugin's own guarantees, e.g. on iOS the
+  /// security scope behind any other access to the same files.
   final String scopeToken;
 }
 
 /// Reads a session's descriptor with FFI, in the isolate that consumes the
-/// bytes. Owns the descriptor and one native buffer of [bufferLength]
-/// bytes; [close] releases both, and a NativeFinalizer releases them if the
+/// bytes. Owns the descriptor and one read buffer of [bufferLength] bytes;
+/// [close] releases the descriptor, and a NativeFinalizer releases it if the
 /// reader is collected or its isolate dies first.
+///
+/// Read on the root isolate only for small one-shot reads: past 1 MiB per
+/// reader, a debug-mode assertion asks for a helper isolate instead (see
+/// [ReadSession.handoff]).
 @experimental
-class FdReader implements Finalizable {
+class FdReader {
   /// Same-isolate path. Checks the scope is acquired now and at [close].
   FdReader.fromSession(ReadSession session, {int bufferLength = 1 << 20})
     : this._(
@@ -113,7 +137,9 @@ class FdReader implements Finalizable {
       );
 
   /// Helper-isolate path (also the root's recovery path after a failed
-  /// hand-off). No scope check here: [ReadSession.handoff] made it.
+  /// spawn, see [ReadSession.handoff]). No scope check here: the handoff
+  /// made it. A [StateError] when another reader holds the same descriptor
+  /// (the record was consumed twice).
   FdReader.fromHandoff(ReadHandoff handoff, {int bufferLength = 1 << 20})
     : this._(
         handoff.fd,
@@ -148,42 +174,32 @@ class FdReader implements Finalizable {
       }
       FilePickerWritable()._requireScopeLive(scopeToken!);
     }
-    final record = fpw_reader_new(fd, bufferLength);
-    if (record == nullptr) {
-      throw StateError('Out of memory for a $bufferLength-byte read buffer');
-    }
-    _record = record;
-    _view = fpw_reader_buffer(record).asTypedList(bufferLength);
-    _finalizer.attach(
-      this,
-      record.cast(),
-      detach: this,
-      externalSize: bufferLength,
-    );
+    _handle = FdHandle(fd, bufferLength);
     session?._reader = this;
   }
-
-  static final _finalizer = NativeFinalizer(
-    Native.addressOf<NativeFunction<Void Function(Pointer<Void>)>>(
-      fpw_reader_finalize,
-    ).cast(),
-  );
 
   final bool seekable;
   final int bufferLength;
   final ReadSession? _session;
   final String? _scopeToken;
-  late final Pointer<FpwReader> _record;
-  late final Uint8List _view;
+  late final FdHandle _handle;
   bool _closed = false;
 
   /// Where the next sequential read starts (pipes only).
   int _position = 0;
 
+  /// Bytes read so far, for the root-isolate budget (debug mode only).
+  int _bytesRead = 0;
+
+  /// Whether this reader lives on the root isolate, asked once.
+  late final bool _onRootIsolate = RootIsolateToken.instance != null;
+
   /// Reads up to [length] bytes at [position] and returns a VIEW of the
-  /// native buffer, valid until the next call or [close]: consume it in
-  /// place, copy it to keep it. An empty view is end of file. Short reads
-  /// are looped to [length] or end of file.
+  /// read buffer, valid until the next call: consume it in place, copy it
+  /// to keep it. (A view kept longer stays memory-safe, since it keeps the
+  /// buffer alive, but shows whatever a later read put there.) An empty
+  /// view is end of file. Short reads are looped to [length] or end of
+  /// file.
   ///
   /// [position] and [length] must not be negative, and [length] must not
   /// exceed [bufferLength] ([ArgumentError]). On a pipe ([seekable] false)
@@ -191,10 +207,16 @@ class FdReader implements Finalizable {
   /// one is `seek-unsupported`.
   ///
   /// Errors are [PlatformException]s: `permission-lost` for EIO, ENXIO or
-  /// ENODEV (media detached; the reader closes itself at once, since a
-  /// pulled volume may get processes holding descriptors on it killed),
-  /// `session-closed` after [close] or for EBADF, `seek-unsupported`, and
-  /// any other errno loud as `errno-<n>`.
+  /// ENODEV, `session-closed` after [close] or for EBADF,
+  /// `seek-unsupported`, and any other errno loud as `errno-<n>`, where n
+  /// is the platform's own number (ENOTCONN is 107 on Linux and Android,
+  /// 57 on Darwin).
+  ///
+  /// `permission-lost` is final: the media is gone, and the reader closes
+  /// itself at once (a pulled volume may get the processes still holding
+  /// descriptors on it killed), so every later call is `session-closed`,
+  /// never an empty view that would read as a complete file. Other readers
+  /// on the same volume keep their descriptors until their own next read.
   Uint8List readChunk(int position, int length) {
     if (_closed) {
       throw PlatformException(
@@ -208,9 +230,17 @@ class FdReader implements Finalizable {
     if (length < 0 || length > bufferLength) {
       throw ArgumentError.value(length, 'length', 'must be 0..$bufferLength');
     }
+    final Uint8List view;
     if (seekable) {
-      return _result(fpw_pread_full(_record, position, length));
+      view = _result(_handle.pread(position, length));
+    } else {
+      view = _readSequential(position, length);
     }
+    assert(_withinRootBudget(view.length));
+    return view;
+  }
+
+  Uint8List _readSequential(int position, int length) {
     if (position < _position) {
       throw PlatformException(
         code: 'seek-unsupported',
@@ -222,19 +252,31 @@ class FdReader implements Finalizable {
       final skip = position - _position < bufferLength
           ? position - _position
           : bufferLength;
-      final skipped = _check(fpw_read_full(_record, skip));
+      final skipped = _check(_handle.read(skip));
       if (skipped == 0) {
-        return Uint8List.sublistView(_view, 0, 0);
+        return Uint8List.sublistView(_handle.buffer, 0, 0);
       }
       _position += skipped;
     }
-    final read = _result(fpw_read_full(_record, length));
+    final read = _result(_handle.read(length));
     _position += read.length;
     return read;
   }
 
+  bool _withinRootBudget(int count) {
+    _bytesRead += count;
+    if (_bytesRead > _rootIsolateReadBudget && _onRootIsolate) {
+      throw AssertionError(
+        'FdReader read more than 1 MiB on the root isolate, which costs '
+        'frames: hand the session off to a helper isolate '
+        '(ReadSession.handoff) and read there',
+      );
+    }
+    return true;
+  }
+
   Uint8List _result(int count) =>
-      Uint8List.sublistView(_view, 0, _check(count));
+      Uint8List.sublistView(_handle.buffer, 0, _check(count));
 
   int _check(int count) {
     if (count >= 0) {
@@ -248,9 +290,9 @@ class FdReader implements Finalizable {
     throw error;
   }
 
-  /// Closes the descriptor and frees the buffer. Idempotent. Built from a
-  /// session, it also checks the scope is still acquired, and throws
-  /// `scope-closed` after the cleanup if it was released mid-read.
+  /// Closes the descriptor. Idempotent. Built from a session, it also
+  /// checks the scope is still acquired, and throws `scope-closed` after
+  /// the cleanup if it was released mid-read.
   void close() {
     if (_closed) {
       return;
@@ -267,16 +309,18 @@ class FdReader implements Finalizable {
 
   int _release() {
     _closed = true;
-    _finalizer.detach(this);
     _session?._closed = true;
-    return fpw_reader_close(_record);
+    return _handle.close();
   }
 }
 
+/// The taxonomy for a failed descriptor call. n in `errno-<n>` is the
+/// platform's own errno number, not a portable code.
 PlatformException _errnoException(int errno, String operation) {
   final kind = switch (errno) {
     // EIO, ENXIO, ENODEV after the descriptor was detached: the media is
-    // gone. A revoked grant does not fail an open descriptor.
+    // gone. A revoked grant does not fail an open descriptor. (The same
+    // numbers on Linux, Android and Darwin.)
     5 || 6 || 19 => 'permission-lost',
     // EBADF: closed already, a bug on the caller's side, never a live fd.
     9 => 'session-closed',
