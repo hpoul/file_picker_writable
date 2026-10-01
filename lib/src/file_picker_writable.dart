@@ -175,7 +175,11 @@ class ChildEntry {
 
   /// Opaque identifier for the child, usable wherever an identifier is
   /// taken (including [FilePickerWritable.listChildren] for a
-  /// subdirectory). Never parse it.
+  /// subdirectory). Never parse it, and never compare it: the same child
+  /// can come back under a different identifier (a repaired root rewrites
+  /// every child's, and a lookup echoes the requested spelling). It is a
+  /// locator for this session; persist the picked folder's identifier and
+  /// re-derive children by name.
   final String identifier;
 
   final bool isDirectory;

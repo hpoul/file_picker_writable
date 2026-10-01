@@ -554,7 +554,19 @@ class FilePickerWritableImpl(
         // So never decide on the exception: re-query the parent. Only a
         // parent that is still a live directory makes this the absent child.
         plugin.logDebug("lookupChild: child query threw ${e.message}; re-checking the parent")
-        directoryRow(directory.documentUri, directory.isTreeRoot)
+        val parent = directoryRow(directory.documentUri, directory.isTreeRoot)
+        if (!parent.isDirectory) {
+          // Replaced by a file mid-call.
+          throw TaxonomyException(ErrorKind.NOT_A_DIRECTORY, "${parent.name} is not a directory")
+        }
+        // Usually the absent child ("Missing file for …", logged above).
+        // The residual case is a live parent whose child could not be
+        // canonicalized (a failing stick): the answer is still absent, but
+        // it is kept visible. The message picks the log level only, never
+        // the answer.
+        if (e.message?.contains("Missing file for") != true) {
+          plugin.logWarning("lookupChild: answering absent for a live parent after: ${e.message}")
+        }
         null
       } ?: run {
         // A volume detached since requireDirectory reads as a null row.
@@ -633,16 +645,19 @@ class FilePickerWritableImpl(
    */
   @WorkerThread
   private fun directoryRow(documentUri: Uri, isTreeRoot: Boolean): DocumentRow {
-    val row = try {
-      queryRow(documentUri)
+    // The provider's message ("Missing file for", "Failed to
+    // canonicalize", "No root for") travels on as the cause, so details
+    // can tell them apart.
+    val (row, cause) = try {
+      queryRow(documentUri) to null
     } catch (e: IllegalArgumentException) {
       if (isTreeRoot) {
         throw e
       }
       plugin.logDebug("Directory query threw ${e.message}; treating it as gone")
-      null
+      null to e
     }
-    return row ?: throw missingDocument(documentUri)
+    return row ?: throw missingDocument(documentUri, cause)
   }
 
   /**
@@ -652,16 +667,16 @@ class FilePickerWritableImpl(
    */
   @WorkerThread
   private fun requireChildren(directory: Directory): List<DocumentRow> {
-    val children = try {
-      queryChildren(directory)
+    val (children, cause) = try {
+      queryChildren(directory) to null
     } catch (e: IllegalArgumentException) {
       if (directory.isTreeRoot) {
         throw e
       }
       plugin.logDebug("Children query threw ${e.message}; treating the directory as gone")
-      null
+      null to e
     }
-    return children ?: throw missingDocument(directory.documentUri)
+    return children ?: throw missingDocument(directory.documentUri, cause)
   }
 
   /** The one row for [documentUri], or null when the provider has none. */
@@ -742,9 +757,9 @@ class FilePickerWritableImpl(
    * opaque, so a detached volume there still reads as `not-found`.
    */
   @WorkerThread
-  private fun missingDocument(documentUri: Uri): TaxonomyException =
-    absentVolume(documentUri)
-      ?: TaxonomyException(ErrorKind.NOT_FOUND, "No document at $documentUri")
+  private fun missingDocument(documentUri: Uri, cause: Throwable? = null): TaxonomyException =
+    absentVolume(documentUri, cause)
+      ?: TaxonomyException(ErrorKind.NOT_FOUND, "No document at $documentUri", cause)
 
   /**
    * `permission-lost` (`volume-absent`) when [documentUri] lives on an

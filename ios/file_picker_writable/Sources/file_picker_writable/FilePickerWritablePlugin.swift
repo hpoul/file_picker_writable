@@ -237,6 +237,7 @@ public class FilePickerWritablePlugin: NSObject, FlutterPlugin {
         logDebug("Warning: startAccessingSecurityScopedResource is false for \(resolved.scopeURL).")
       }
       do {
+        try _requireContained(resolved)
         let copiedFile = try _copyToTempDirectory(url: url)
         DispatchQueue.main.async { [self] in
           result(_fileInfoResult(tempFile: copiedFile, originalURL: url, identifier: identifier))
@@ -266,6 +267,7 @@ public class FilePickerWritablePlugin: NSObject, FlutterPlugin {
         }
       }
       do {
+        try _requireContained(resolved)
         try _writeFile(path: path, destination: url)
         let sourceFile = URL(fileURLWithPath: path)
         DispatchQueue.main.async { [self] in
@@ -371,6 +373,7 @@ public class FilePickerWritablePlugin: NSObject, FlutterPlugin {
       throw TaxonomyError(kind: ErrorKind.permissionLost, message: "startAccessingSecurityScopedResource refused for \(url)")
     }
     do {
+      try _requireContained(resolved)
       try _requireLive(url)
       let fresh = try resolved.currentIdentifier()
       logDebug("acquire: isStale=\(resolved.isStale), \(_scopes.counts) held.")
@@ -425,7 +428,7 @@ public class FilePickerWritablePlugin: NSObject, FlutterPlugin {
 
   /// The child `name` of the directory `identifier`, or nil when absent.
   private func _lookupChild(identifier: String, name: String) throws -> [String: Any]? {
-    guard Self._isLeafName(name) else {
+    guard ChildIdentifier.isLeafName(name) else {
       throw TaxonomyError(kind: ErrorKind.invalidName, message: "Not a single leaf name: \"\(name)\"")
     }
     return try _withDirectory(identifier) { resolved in
@@ -446,11 +449,6 @@ public class FilePickerWritablePlugin: NSObject, FlutterPlugin {
   private static let _childKeys: [URLResourceKey] = [
     .nameKey, .isDirectoryKey, .fileSizeKey, .contentModificationDateKey,
   ]
-
-  /// The leaf-name rule (tree-writes-plan §4).
-  private static func _isLeafName(_ name: String) -> Bool {
-    !name.isEmpty && name != "." && name != ".." && !name.contains("/") && !name.contains("\u{0}")
-  }
 
   private func _childEntry(_ url: URL, identifier: String) throws -> [String: Any] {
     let values = try url.resourceValues(forKeys: Set(Self._childKeys))
@@ -478,6 +476,7 @@ public class FilePickerWritablePlugin: NSObject, FlutterPlugin {
     defer {
       resolved.scopeURL.stopAccessingSecurityScopedResource()
     }
+    try _requireContained(resolved)
     try _requireLive(url)
     guard (try url.resourceValues(forKeys: [.isDirectoryKey])).isDirectory == true else {
       throw TaxonomyError(kind: ErrorKind.notADirectory, message: "\(url.lastPathComponent) is not a directory")
@@ -490,7 +489,9 @@ public class FilePickerWritablePlugin: NSObject, FlutterPlugin {
   private func _resolve(_ identifier: String) throws -> ResolvedIdentifier {
     let (rootBookmark, path) = try ChildIdentifier.parse(identifier) ?? (identifier, "")
     let (root, isStale) = try _resolveBookmark(rootBookmark)
-    let url = path.split(separator: "/").reduce(root) { $0.appendingPathComponent(String($1)) }
+    let url = path.isEmpty
+      ? root
+      : ChildIdentifier.components(of: path).reduce(root) { $0.appendingPathComponent($1) }
     return ResolvedIdentifier(
       url: url,
       scopeURL: root,
@@ -511,6 +512,18 @@ public class FilePickerWritablePlugin: NSObject, FlutterPlugin {
     } catch {
       // Stale but unresolvable: from the caller's view the grant is gone.
       throw TaxonomyError(kind: ErrorKind.permissionLost, message: "Bookmark no longer resolves: \(error)", underlying: error)
+    }
+  }
+
+  /// `not-found` when a child identifier's path, followed through
+  /// symlinks, leaves its root. Call with the root's scope held.
+  private func _requireContained(_ resolved: ResolvedIdentifier) throws {
+    guard resolved.isContained else {
+      throw TaxonomyError(
+        kind: ErrorKind.notFound,
+        message: "\(resolved.relativePath) leaves its root",
+        details: ["reason": "outside-root"]
+      )
     }
   }
 

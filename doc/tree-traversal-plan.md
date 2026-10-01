@@ -213,7 +213,14 @@ Notes:
   vanished mid-call, so the plugin never decides on it: it
   re-queries the parent, and only a parent that is still a live
   directory makes the answer null (one extra row query, on a miss
-  only); a gone parent is the missing-document rule. Every other
+  only); a gone parent is the missing-document rule, and a parent
+  replaced by a file is `not-a-directory`. A null that follows any
+  message other than "Missing file for" (e.g. a canonicalize
+  failure on a failing stick) is logged at warning; the message
+  picks the log level, never the answer. The converted `not-found`
+  carries the provider's exception as its cause, so details tell
+  "Missing file for", "Failed to canonicalize" and "No root for"
+  apart. Every other
   provider is opaque and falls back to list-and-scan internally
   (same result, listing cost — the caller can't tell), with an
   exact name match there.
@@ -245,8 +252,26 @@ Notes:
   follows a rename only through its root; persist root
   identifiers, re-derive children by listing. `readFile`,
   `writeFile`, `acquire`, `listChildren` and `lookupChild` all take
-  either form. Opaque to Dart — never parsed there. macOS is
-  stubbed (`UnsupportedError`) per the Gap-1a boundary decision.
+  either form. Opaque to Dart — never parsed, never compared (the
+  same child can come back under another identifier after a root
+  repair or a spelling echo). macOS is stubbed (`UnsupportedError`)
+  per the Gap-1a boundary decision.
+- The traversal boundary (#69 re-review N1–N3, N7, N9): decoding
+  rejects an empty or non-base64 root, an empty path, and any path
+  component that breaks the leaf-name rule (empty, `.`, `..`, `/`,
+  NUL), checked and split on Unicode scalars so a combining mark
+  cannot hide a `/`. `%2F` decodes to a separator and `%252F` to a
+  literal. An unknown prefix (`fpwchild2:`) is not parsed as a
+  child, and the bookmark decoder then refuses it, so it stays
+  loud. After resolving, every verb checks containment: the path
+  with all symlinks resolved — the deepest existing ancestor, then
+  the rest, since `resolvingSymlinksInPath` leaves a not-yet-existing
+  path alone — must stay under the resolved root, else `not-found`
+  `reason: outside-root`. The sandbox would refuse an escape on a
+  device; the simulator does not, so the plugin does. Pinned by
+  host tests (`ios/test/ChildIdentifierTests.swift`, run by
+  `tool/swift_unit_tests.sh`; red-checked by mutating the
+  component check, the scalar split and the ancestor resolution).
 - `lookupChild`: resolve parent URL (same stale-refresh),
   `startAccessing…`, `FileManager` attributes query on
   parentURL + name → `ChildEntry` or null when absent,
@@ -333,7 +358,12 @@ Same bar as Gap 2b, evaluated independently:
    changes.
 2. 10k-child listing latency acceptable on a mid-range device
    (suggested: p95 under 5s on local storage, provider-bound
-   otherwise).
+   otherwise). On iOS also weigh the wire size: every child
+   identifier repeats the root bookmark (1–3 KB), so a 10k listing
+   carries 10–30 MB across the codec and keeps it resident in
+   Dart. If that hurts on device, send the root once per listing
+   and the path per entry, composing identifiers in Dart (#69
+   re-review N5).
 3. Observed failures all map into the taxonomy — no new error kinds
    needed in the wild.
 
