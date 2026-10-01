@@ -1122,11 +1122,16 @@ class FilePickerWritableImpl(
     }
   }
 
-  private fun movePartial(actual: Uri, cause: Throwable) = TaxonomyException(
+  /**
+   * `move-partial`: the entry is at [actual], or, when the last step may
+   * have landed unseen, at [alsoAt] (both then in `candidates`).
+   */
+  private fun movePartial(actual: Uri, cause: Throwable, alsoAt: Uri? = null) = TaxonomyException(
     ErrorKind.MOVE_PARTIAL,
-    "The entry was left at $actual",
+    if (alsoAt == null) "The entry was left at $actual" else "The entry was left at $actual or $alsoAt",
     cause,
-    details = mapOf("identifier" to actual.toString())
+    details = mapOf("identifier" to actual.toString()) +
+      (alsoAt?.let { mapOf("candidates" to listOf(actual.toString(), it.toString())) } ?: emptyMap())
   )
 
   /**
@@ -1145,11 +1150,27 @@ class FilePickerWritableImpl(
     if (row.name == name) {
       return renamed
     }
-    val taken = lookupChildRow(parent, name) != null
+    // From here the entry's place is known (renamed, as row.name): every
+    // failure says so instead of letting a caller guess.
+    val taken = try {
+      lookupChildRow(parent, name) != null
+    } catch (e: Exception) {
+      throw movePartial(renamed, e)
+    }
     val restored = try {
       rename(parent, renamed, original)
     } catch (e: Exception) {
-      throw movePartial(renamed, e)
+      // A rename back that failed with the volume may have landed too.
+      val alsoAt = if (e is TaxonomyException && e.details["reason"] == "volume-absent" &&
+        parent.treeUri.authority == StorageVolumes.AUTHORITY
+      ) {
+        DocumentsContract.buildDocumentUriUsingTree(
+          parent.treeUri, StorageVolumes.childDocumentId(parent.documentId, original)
+        )
+      } else {
+        null
+      }
+      throw movePartial(renamed, e, alsoAt)
     }
     val restoredRow = try {
       rowBelowRoot(restored)

@@ -805,6 +805,12 @@ class FilePickerWritable {
   /// and on Android's system storage provider; other Android providers are
   /// opaque, and there only the root's own identifier is recognized.
   ///
+  /// A recursive delete is not atomic: when it fails partway (a provider
+  /// error, or on Android a tree deeper than 256 levels), what it already
+  /// deleted stays deleted, and the error is loud. On a failing Android
+  /// stick that still lists the parent but cannot read the entry, the entry
+  /// reads as gone: the platform reports both as a missing file.
+  ///
   /// Other failures: `permission-lost` (on Android also for a read-only
   /// grant, `reason: read-only`).
   ///

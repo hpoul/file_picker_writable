@@ -416,7 +416,17 @@ Notes:
   at 256 levels, against an opaque provider whose graph loops
   (review S5; links cannot exist on ExternalStorageProvider's
   volumes, see below, and one pointing out of the pick would fail
-  the provider's own canonicalizing tree check, loudly). A picked root — a tree's own root, or
+  the provider's own canonicalizing tree check, loudly). What the
+  proof cannot see (re-review lows, accepted): "Missing file for"
+  is `File.exists()` false, which a stat error (EIO on a dying
+  stick) also gives, so an entry whose parent still lists but
+  whose own stat fails reads as gone; SAF cannot tell the two
+  apart. Third-party providers built on FileSystemProvider throw
+  the same exception, but the rule keys on ExternalStorageProvider's
+  authority (the ancestor walk needs its path-shaped IDs), so a
+  gone-delete there is falsely loud — nothing is lost. A walk
+  that fails partway (an error, or the 256-level cap) leaves the
+  part already deleted; the Dart doc says so. A picked root — a tree's own root, or
   a single-document pick (not a tree URI) — is `root-protected`
   (§6, the owner's decision 2026-10-01): one wrong identifier must
   not take a whole pick with it. "Root" is decided by shape, not by
@@ -518,7 +528,17 @@ Notes:
   lie strictly below the root's (#71 review M2): containment is
   otherwise textual plus symlinks, and this closes any alias the
   file system resolves. A path component FAT would strip to
-  nothing is refused as on Android. `FileManager` file-exists errors
+  nothing is refused as on Android. The scope directories (a
+  create's parent, both ends of a move) are asked again by real
+  path at the call, not only at acquire: one replaced by a
+  symlink pointing out of the root since is `not-found`
+  (`outside-root`) (#71 re-review S-B). Accepted windows: a
+  directory swapped for a link between the real-path check and
+  the walk (only fd-relative `openat`/`unlinkat` with
+  `O_NOFOLLOW` would close it), and a new name FAT would strip
+  (`a.`) landing under the stripped name on a volume that strips
+  — inside the parent, though the returned entry names the
+  request. `FileManager` file-exists errors
   map to loud `already-exists` (nothing is created, so no residue
   cleanup); the target name is pre-checked before `moveItem`.
   Implementation correction: a move and a rename are ONE

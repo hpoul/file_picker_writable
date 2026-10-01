@@ -112,6 +112,33 @@ void main() {
         await plugin.release(scope);
       });
     }
+
+    test('a kept residue is named in the details', () async {
+      final scope = await plugin.acquire(identifier: 'dir');
+      backend = (call) async => throw PlatformException(
+        code: 'invalid-name',
+        details: {
+          'requested': '12:30 ride',
+          'actual': '12_30 ride',
+          'residue': 'kept',
+          'identifier': 'id:12_30 ride',
+        },
+      );
+      await expectLater(
+        plugin.createDirectory(scope: scope, name: '12:30 ride'),
+        throwsA(
+          isA<PlatformException>()
+              .having((e) => e.code, 'code', 'invalid-name')
+              .having((e) => (e.details as Map)['residue'], 'residue', 'kept')
+              .having(
+                (e) => (e.details as Map)['identifier'],
+                'identifier',
+                'id:12_30 ride',
+              ),
+        ),
+      );
+      await plugin.release(scope);
+    });
   });
 
   group('deleteEntry', () {
@@ -246,6 +273,36 @@ void main() {
         await plugin.release(scope);
       });
     }
+
+    test('a move whose outcome is unknown passes its candidates', () async {
+      final scope = await plugin.acquire(identifier: 'dir');
+      backend = (call) async => throw PlatformException(
+        code: 'permission-lost',
+        details: {
+          'reason': 'volume-absent',
+          'state': 'unknown',
+          'candidates': ['id:target/a', 'id:target/b'],
+        },
+      );
+      await expectLater(
+        plugin.moveEntry(
+          identifier: 'id:a',
+          sourceParent: scope,
+          newParent: scope,
+          newName: 'b',
+        ),
+        throwsA(
+          isA<PlatformException>()
+              .having((e) => e.code, 'code', 'permission-lost')
+              .having((e) => (e.details as Map)['state'], 'state', 'unknown')
+              .having((e) => (e.details as Map)['candidates'], 'candidates', [
+                'id:target/a',
+                'id:target/b',
+              ]),
+        ),
+      );
+      await plugin.release(scope);
+    });
   });
 
   test(

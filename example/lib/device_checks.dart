@@ -584,6 +584,19 @@ Future<void> _treeChecks(
         'tree: delete a again (gone is success)',
         () => ok(plugin.deleteEntry(identifier: a.identifier, recursive: true)),
       );
+      // A child of the deleted a: its parent is gone too, so on Android the
+      // proof walks up two missing levels to the live tree/.
+      final innerId = a.identifier.startsWith('content://')
+          ? '${a.identifier}%2Finner'
+          : a.identifier.startsWith('fpwchild1:')
+          ? '${a.identifier}/inner'
+          : null;
+      if (innerId != null) {
+        await step(
+          'tree: delete a/inner after a (parent gone too, still success)',
+          () => ok(plugin.deleteEntry(identifier: innerId)),
+        );
+      }
       await step('tree: final listing', () => names(tree.identifier));
     } finally {
       await plugin.release(treeScope);

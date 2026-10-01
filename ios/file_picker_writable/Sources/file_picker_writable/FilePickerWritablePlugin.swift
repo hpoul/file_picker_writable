@@ -597,7 +597,18 @@ public class FilePickerWritablePlugin: NSObject, FlutterPlugin {
     else {
       return
     }
-    try _requireRealPathBelowRoot(resolved)
+    do {
+      try _requireRealPathBelowRoot(resolved)
+    } catch let error as TaxonomyError where error.kind == ErrorKind.notFound {
+      // Gone between the check above and this one: still deleted.
+      if (try? url.checkResourceIsReachable()) != true && !TreeWalk.isSymlink(url) {
+        return
+      }
+      throw error
+    }
+    // Accepted window (TOCTOU): a directory swapped for a link between
+    // this check and the walk below. Only fd-relative calls (openat and
+    // unlinkat with O_NOFOLLOW) would close it.
     if try TreeWalk.isRealDirectory(url) {
       let children = try FileManager.default.contentsOfDirectory(at: url, includingPropertiesForKeys: nil, options: [])
       if !children.isEmpty {
@@ -667,7 +678,11 @@ public class FilePickerWritablePlugin: NSObject, FlutterPlugin {
   }
 
   /// The live directory a scope token names (`scope-closed`, `not-found`,
-  /// `not-a-directory`). Its scope is the token's hold.
+  /// `not-a-directory`). Its scope is the token's hold. Its containment was
+  /// checked at acquire, but the directory may have been replaced by a
+  /// symlink pointing elsewhere since (in Files, or by another app), so the
+  /// kernel is asked again now: its real path must be the root's or lie
+  /// below it (the root itself is a legal parent).
   private func _requireDirectoryScope(_ token: String) throws -> ResolvedIdentifier {
     guard let resolved = _scopes.target(of: token) else {
       throw TaxonomyError(kind: ErrorKind.scopeClosed, message: "Scope \(token) was released")
@@ -675,6 +690,17 @@ public class FilePickerWritablePlugin: NSObject, FlutterPlugin {
     try _requireLive(resolved.url)
     guard (try resolved.url.resourceValues(forKeys: [.isDirectoryKey])).isDirectory == true else {
       throw TaxonomyError(kind: ErrorKind.notADirectory, message: "\(resolved.url.lastPathComponent) is not a directory")
+    }
+    guard
+      let root = TreeWalk.realPath(resolved.scopeURL),
+      let directory = TreeWalk.realPath(resolved.url),
+      directory == root || (root != "/" && directory.hasPrefix(root + "/"))
+    else {
+      throw TaxonomyError(
+        kind: ErrorKind.notFound,
+        message: "\(resolved.url.lastPathComponent) no longer resolves inside its root",
+        details: ["reason": "outside-root"]
+      )
     }
     return resolved
   }
