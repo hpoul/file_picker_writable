@@ -310,17 +310,34 @@ void main() {
       final view = reader.readChunk(0, 8);
       reader.close();
       // The buffer belongs to Dart and the view keeps it alive: stale
-      // bytes at worst, never freed memory.
+      // bytes at worst, never freed memory. That guarantee is structural
+      // (Dart-owned typed data), and this test does not prove it: a freed
+      // 16-byte malloc chunk often still holds its bytes, so the old code
+      // could pass too. It pins the behavior, nothing more.
       expect(view, content.sublist(0, 8));
       await plugin.release(scope);
     });
 
     test('close detaches the finalizer: a GC never closes again', () async {
       final (scope, session) = await open();
+      final closedFd = session.fd;
       final weak = _closeAndForget(session);
-      // The lowest free number: most likely the one just closed, now a
-      // fresh descriptor that a stale finalizer would close.
-      final (secondScope, second) = await open();
+      // The regression needs the closed number reused by a live reader,
+      // which a stale finalizer would then close. open(2) hands out the
+      // lowest free number, so it is usually the next open; if the VM took
+      // it meanwhile, try a few more opens, then insist: without the
+      // reuse this test would pass without testing anything.
+      final extras = <(AcquiredScope, ReadSession)>[];
+      var (secondScope, second) = await open();
+      while (second.fd != closedFd && extras.length < 8) {
+        extras.add((secondScope, second));
+        (secondScope, second) = await open();
+      }
+      for (final (extraScope, extra) in extras) {
+        await plugin.closeRead(extra);
+        await plugin.release(extraScope);
+      }
+      expect(second.fd, closedFd, reason: 'the closed number was reused');
       final reader = FdReader.fromSession(second);
       final garbage = <Object>[];
       for (var i = 0; weak.target != null && i < 50000; i++) {

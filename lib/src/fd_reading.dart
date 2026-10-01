@@ -189,6 +189,8 @@ class FdReader {
   int _position = 0;
 
   /// Bytes read so far, for the root-isolate budget (debug mode only).
+  /// Bytes a pipe skips to reach a later position are not counted: a
+  /// known gap, since pipes are the rare path.
   int _bytesRead = 0;
 
   /// Whether this reader lives on the root isolate, asked once.

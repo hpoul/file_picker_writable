@@ -548,6 +548,9 @@ class FilePickerWritableImpl(
     } catch (e: Exception) {
       val isDirectory = try {
         queryRow(documentUri)?.isDirectory == true
+      } catch (absent: TaxonomyException) {
+        // The volume detached between the failed open and this query.
+        throw absent
       } catch (_: Exception) {
         false
       }

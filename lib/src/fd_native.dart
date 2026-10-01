@@ -76,8 +76,9 @@ final class FdHandle implements Finalizable {
     final result = fpw_adopt(owner, fd);
     if (result == -16 /* EBUSY */ ) {
       throw StateError(
-        'Descriptor $fd is already owned by a reader: a ReadHandoff is '
-        'consumed once',
+        'Descriptor $fd is already owned by a reader: either a ReadHandoff '
+        'was consumed twice, or the descriptor was closed behind a live '
+        "reader's back and its number reused",
       );
     }
     if (result < 0) {
