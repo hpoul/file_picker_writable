@@ -95,13 +95,16 @@ Future<void> runDeviceChecks(FileInfo directory) async {
       final stopwatch = Stopwatch()..start();
       final listing = await plugin.listChildren(identifier: identifier);
       final ms = stopwatch.elapsedMilliseconds;
+      // The composed length, as if every identifier were held at once.
+      // What crosses the channel is the native log's "identifier bytes"
+      // (the shared prefix once, plus the suffixes).
       final bytes = listing.entries.fold<int>(
         0,
         (sum, entry) => sum + entry.identifier.length,
       );
       log(
         'list $label: ${listing.entries.length} entries in $ms ms (Dart, end '
-        'to end), ids $bytes bytes total, '
+        'to end), composed ids $bytes bytes if all held, '
         '${listing.entries.isEmpty ? 0 : bytes ~/ listing.entries.length} each',
       );
       return listing;

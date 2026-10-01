@@ -402,25 +402,32 @@ public class FilePickerWritablePlugin: NSObject, FlutterPlugin {
         options: []
       )
       let listed = Date()
-      let root = try resolved.currentRoot()
+      // The root bookmark goes once per listing, as the shared identifier
+      // prefix; each entry carries only its encoded name, and Dart
+      // composes prefix + suffix (25.8 MB → ~0.13 MB of identifiers for
+      // 10k children).
+      let identifierPrefix = ChildIdentifier.listingPrefix(
+        root: try resolved.currentRoot(),
+        parentPath: resolved.relativePath
+      )
+      var suffixBytes = 0
       let entries = try children.map { child in
-        try _childEntry(
-          child,
-          identifier: ChildIdentifier.make(
-            root: root,
-            path: ChildIdentifier.join(resolved.relativePath, child.lastPathComponent)
-          )
-        )
+        let suffix = ChildIdentifier.encode(child.lastPathComponent)
+        suffixBytes += suffix.utf8.count
+        return try _childEntry(child, identifierKey: "identifierSuffix", identifierValue: suffix)
       }
       logDebug(String(
-        format: "listChildren: %d rows, directory read %.0f ms, entries %.0f ms",
+        format: "listChildren: %d rows, directory read %.0f ms, entries %.0f ms, identifier bytes %d (prefix) + %d (suffixes)",
         children.count,
         listed.timeIntervalSince(started) * 1000,
-        Date().timeIntervalSince(listed) * 1000
+        Date().timeIntervalSince(listed) * 1000,
+        identifierPrefix.utf8.count,
+        suffixBytes
       ))
       return [
         "identifier": try resolved.currentIdentifier(),
         "repaired": resolved.isStale,
+        "identifierPrefix": identifierPrefix,
         "entries": entries,
       ]
     }
@@ -436,9 +443,11 @@ public class FilePickerWritablePlugin: NSObject, FlutterPlugin {
       guard (try? child.checkResourceIsReachable()) == true else {
         return nil
       }
+      // One entry: the full identifier, nothing to share.
       return try _childEntry(
         child,
-        identifier: ChildIdentifier.make(
+        identifierKey: "identifier",
+        identifierValue: ChildIdentifier.make(
           root: try resolved.currentRoot(),
           path: ChildIdentifier.join(resolved.relativePath, name)
         )
@@ -450,7 +459,10 @@ public class FilePickerWritablePlugin: NSObject, FlutterPlugin {
     .nameKey, .isDirectoryKey, .fileSizeKey, .contentModificationDateKey,
   ]
 
-  private func _childEntry(_ url: URL, identifier: String) throws -> [String: Any] {
+  /// An entry map with the identifier under `identifierKey`: the full
+  /// `identifier`, or, in a listing, the `identifierSuffix` that Dart
+  /// appends to the listing's shared `identifierPrefix`.
+  private func _childEntry(_ url: URL, identifierKey: String, identifierValue: String) throws -> [String: Any] {
     let values = try url.resourceValues(forKeys: Set(Self._childKeys))
     let isDirectory = values.isDirectory ?? false
     let size: Any = isDirectory ? NSNull() : (values.fileSize.map { $0 as Any } ?? NSNull())
@@ -458,7 +470,7 @@ public class FilePickerWritablePlugin: NSObject, FlutterPlugin {
       .map { Int64($0.timeIntervalSince1970 * 1000) as Any } ?? NSNull()
     return [
       "name": values.name ?? url.lastPathComponent,
-      "identifier": identifier,
+      identifierKey: identifierValue,
       "isDirectory": isDirectory,
       "size": size,
       "lastModified": modified,

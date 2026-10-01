@@ -136,6 +136,93 @@ void main() {
       },
     );
 
+    test(
+      'iOS shape: the shared prefix is sent once and composed per entry',
+      () async {
+        const prefix = 'fpwchild1:QUJD:Trips/';
+        backend = (call) async => <String, Object?>{
+          'identifier': 'dir',
+          'repaired': false,
+          'identifierPrefix': prefix,
+          'entries': [
+            {
+              'name': 'trip.json',
+              'identifierSuffix': 'trip.json',
+              'isDirectory': false,
+              'size': 3,
+              'lastModified': 1790000000000,
+            },
+            {
+              'name': 'ü 日本',
+              'identifierSuffix': '%C3%BC%20%E6%97%A5%E6%9C%AC',
+              'isDirectory': true,
+              'size': null,
+              'lastModified': null,
+            },
+          ],
+        };
+        final entries = (await FilePickerWritable().listChildren(
+          identifier: 'dir',
+        )).entries;
+        expect(entries.map((e) => e.identifier), [
+          '${prefix}trip.json',
+          '$prefix%C3%BC%20%E6%97%A5%E6%9C%AC',
+        ]);
+      },
+    );
+
+    test('a composed identifier goes back to native whole', () async {
+      backend = (call) async => switch ((call.arguments as Map)['identifier']) {
+        'dir' => <String, Object?>{
+          'identifier': 'dir',
+          'repaired': false,
+          'identifierPrefix': 'P:',
+          'entries': [
+            {
+              'name': 'media',
+              'identifierSuffix': 'media',
+              'isDirectory': true,
+              'size': null,
+              'lastModified': null,
+            },
+          ],
+        },
+        _ => <String, Object?>{
+          'identifier': (call.arguments as Map)['identifier'],
+          'repaired': false,
+          'entries': <Object?>[],
+        },
+      };
+      final media = (await FilePickerWritable().listChildren(
+        identifier: 'dir',
+      )).entries.single;
+      await FilePickerWritable().listChildren(identifier: media.identifier);
+      expect((calls.last.arguments as Map)['identifier'], 'P:media');
+    });
+
+    test(
+      'a suffix without a prefix is loud, not a truncated identifier',
+      () async {
+        backend = (call) async => <String, Object?>{
+          'identifier': 'dir',
+          'repaired': false,
+          'entries': [
+            {
+              'name': 'x',
+              'identifierSuffix': 'x',
+              'isDirectory': false,
+              'size': 1,
+              'lastModified': 1,
+            },
+          ],
+        };
+        await expectLater(
+          FilePickerWritable().listChildren(identifier: 'dir'),
+          throwsStateError,
+        );
+      },
+    );
+
     test('a subdirectory identifier round-trips back in', () async {
       backend = (call) async {
         final id = (call.arguments as Map)['identifier'];

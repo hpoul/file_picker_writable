@@ -148,17 +148,39 @@ class AcquiredScope {
 class ChildEntry {
   ChildEntry({
     required this.name,
-    required this.identifier,
+    required String identifier,
+    required this.isDirectory,
+    required this.size,
+    required this.lastModified,
+  }) : _identifierPrefix = '',
+       _identifierSuffix = identifier;
+
+  ChildEntry._composed(
+    this._identifierPrefix,
+    this._identifierSuffix, {
+    required this.name,
     required this.isDirectory,
     required this.size,
     required this.lastModified,
   });
 
-  static ChildEntry _fromResult(Map<Object?, Object?> result) {
+  /// [result] carries either a full `identifier` (a lookup; Android) or an
+  /// `identifierSuffix` to append to the listing's shared
+  /// [identifierPrefix] (an iOS listing, where the prefix is the ~2.5 KB
+  /// root bookmark: sent and kept once, not once per child).
+  static ChildEntry _fromResult(
+    Map<Object?, Object?> result, {
+    String? identifierPrefix,
+  }) {
     final lastModified = result['lastModified'] as int?;
-    return ChildEntry(
+    final suffix = result['identifierSuffix'] as String?;
+    if (suffix != null && identifierPrefix == null) {
+      throw StateError('Got an identifierSuffix without an identifierPrefix');
+    }
+    return ChildEntry._composed(
+      suffix == null ? '' : identifierPrefix!,
+      suffix ?? result['identifier']! as String,
       name: result['name']! as String,
-      identifier: result['identifier']! as String,
       isDirectory: result['isDirectory']! as bool,
       size: result['size'] as int?,
       // 0 (or less) is a provider that doesn't track it: "won't say".
@@ -180,7 +202,14 @@ class ChildEntry {
   /// every child's, and a lookup echoes the requested spelling). It is a
   /// locator for this session; persist the picked folder's identifier and
   /// re-derive children by name.
-  final String identifier;
+  ///
+  /// Composed on each read from a prefix shared by the whole listing, so a
+  /// large listing holds the prefix once; keep the string only as long as
+  /// you need it.
+  String get identifier => _identifierPrefix + _identifierSuffix;
+
+  final String _identifierPrefix;
+  final String _identifierSuffix;
 
   final bool isDirectory;
 
@@ -207,16 +236,21 @@ class DirectoryListing {
     required this.repaired,
   });
 
-  static DirectoryListing _fromResult(Map<String, Object?> result) =>
-      DirectoryListing(
-        entries: [
-          for (final entry in result['entries']! as List<Object?>) ...[
-            ChildEntry._fromResult(entry! as Map<Object?, Object?>),
-          ],
+  static DirectoryListing _fromResult(Map<String, Object?> result) {
+    final identifierPrefix = result['identifierPrefix'] as String?;
+    return DirectoryListing(
+      entries: [
+        for (final entry in result['entries']! as List<Object?>) ...[
+          ChildEntry._fromResult(
+            entry! as Map<Object?, Object?>,
+            identifierPrefix: identifierPrefix,
+          ),
         ],
-        identifier: result['identifier']! as String,
-        repaired: result['repaired']! as bool,
-      );
+      ],
+      identifier: result['identifier']! as String,
+      repaired: result['repaired']! as bool,
+    );
+  }
 
   /// The direct children, in the provider's order, which is unspecified.
   final List<ChildEntry> entries;

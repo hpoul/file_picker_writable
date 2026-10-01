@@ -49,6 +49,19 @@ struct ChildIdentifierTests {
       check(try! ChildIdentifier.parse(id)!.root == root, "root survives \(path)")
     }
 
+    // A listing's shared prefix plus an entry's encoded name is exactly the
+    // full identifier, for any parent and name.
+    for (parent, name) in [
+      ("", "trip.json"), ("", ".howitwent"), ("media", "clip.mp4"),
+      ("Trips/2026", "ü 日本"), ("a%2Fb", "50% off"), ("x:y", "e\u{301}:z"),
+    ] {
+      let composed = ChildIdentifier.listingPrefix(root: root, parentPath: parent)
+        + ChildIdentifier.encode(name)
+      let full = ChildIdentifier.make(root: root, path: ChildIdentifier.join(parent, name))
+      check(composed == full, "prefix + suffix == make for \(parent)/\(name)")
+      check(parsedPath(composed) == ChildIdentifier.join(parent, name), "composed parses for \(parent)/\(name)")
+    }
+
     // %2F decodes to a separator, never a literal.
     let raw = ChildIdentifier.prefix + root + ":a%2Fb"
     check(parsedPath(raw) == "a/b", "%2F is a separator")

@@ -238,7 +238,12 @@ Notes:
   per the plugin's existing convention.
 - Identifier encoding (REVISED 2026-10-01, #69 review S4/S5): a
   child identifier is the picked root's bookmark plus a relative
-  path (`fpwchild1:<root bookmark>:<percent-encoded path>`), NOT a
+  path (`fpwchild1:<root bookmark>:<percent-encoded path>`; a
+  listing sends everything up to the child's encoded name once, as
+  `identifierPrefix`, and each entry only its `identifierSuffix`,
+  which Dart appends — per-character percent-encoding makes the
+  concatenation exactly the full identifier, pinned in the host
+  tests; `lookupChild` returns its one entry whole), NOT a
   bookmark per child as first pinned. Measured on the iOS 26.5
   simulator, 10k children: a bookmark per child cost 47.3 s of a
   47.8 s listing (~4.7 ms each); root + path costs 52 ms for all
@@ -387,14 +392,16 @@ Same bar as Gap 2b, evaluated independently:
    changes.
 2. 10k-child listing latency acceptable on a mid-range device
    (suggested: p95 under 5s on local storage, provider-bound
-   otherwise). On iOS also weigh the wire size: every child
-   identifier repeats the root bookmark (1–3 KB), so a 10k listing
-   carries 10–30 MB across the codec (measured on the iPhone XR:
-   2,575 bytes per identifier, 25.8 MB for 10k children, listed
-   in 280–329 ms end to end in Dart) and keeps it resident in
-   Dart. If that hurts on device, send the root once per listing
-   and the path per entry, composing identifiers in Dart (#69
-   re-review N5).
+   otherwise). The iOS wire size is settled (#69 re-review N5,
+   done in #69): with an identifier per entry repeating the root
+   bookmark (1–3 KB), a 10k listing carried 25.8 MB on the iPhone
+   XR (2,575 bytes each, 280–329 ms end to end). `listChildren`
+   now sends the shared identifier prefix once per listing and an
+   encoded-name suffix per entry; Dart keeps the prefix once and
+   composes `identifier` on read. Simulator, 10k children:
+   1.6 KB prefix + 89 KB suffixes ≈ 91 KB instead of 16.5 MB
+   (~180×); 91–195 ms end to end over six runs (the simulator
+   is too noisy to show a time gain; the device decides).
 3. Observed failures all map into the taxonomy — no new error kinds
    needed in the wild.
 

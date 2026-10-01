@@ -23,7 +23,22 @@ enum ChildIdentifier {
   private static let pathAllowed = CharacterSet.urlPathAllowed.subtracting(CharacterSet(charactersIn: "%"))
 
   static func make(root: String, path: String) -> String {
-    prefix + root + ":" + (path.addingPercentEncoding(withAllowedCharacters: pathAllowed) ?? path)
+    prefix + root + ":" + encode(path)
+  }
+
+  /// The part every child of one listing shares: everything up to the
+  /// child's own (encoded) name. `listChildren` sends it once per listing
+  /// instead of once per entry (the root bookmark is ~2.5 KB; 10k
+  /// children would repeat it 25.8 MB), and Dart appends each entry's
+  /// `encode(name)`. Percent-encoding is per character, so
+  /// `listingPrefix(root, parent) + encode(name)` is exactly
+  /// `make(root, join(parent, name))`.
+  static func listingPrefix(root: String, parentPath: String) -> String {
+    prefix + root + ":" + (parentPath.isEmpty ? "" : encode(parentPath) + "/")
+  }
+
+  static func encode(_ path: String) -> String {
+    path.addingPercentEncoding(withAllowedCharacters: pathAllowed) ?? path
   }
 
   /// The root bookmark and relative path of a child identifier, nil for an
