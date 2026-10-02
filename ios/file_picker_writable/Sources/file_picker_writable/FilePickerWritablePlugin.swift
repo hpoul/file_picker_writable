@@ -815,7 +815,7 @@ public class FilePickerWritablePlugin: NSObject, FlutterPlugin {
   /// sandbox a pulled volume and a removed root look alike, and a pulled
   /// drive most likely fails the bookmark first: unmeasured); the entry
   /// is gone when it leaves its root, sits in the Trash or is provably
-  /// missing. The open reads one byte. Single-shot scope. A failed system
+  /// missing. The open reads up to one byte. Single-shot scope. A failed system
   /// call outside those answers stays loud as `errno-<n>`.
   ///
   /// An iCloud file that is not downloaded is loud before any open: the
@@ -848,7 +848,7 @@ public class FilePickerWritablePlugin: NSObject, FlutterPlugin {
       },
       entry: {
         let url = resolved.url
-        guard resolved.isContained, !url.standardizedFileURL.pathComponents.contains(".Trash") else {
+        guard resolved.isContained, !Self._isTrashed(url) else {
           return .gone
         }
         return try EntryStateDecision.reach(url)
@@ -910,7 +910,7 @@ public class FilePickerWritablePlugin: NSObject, FlutterPlugin {
     let url = resolved.url
     // Gone, or gone into the Trash with its root: either way deleted.
     guard (try? url.checkResourceIsReachable()) == true || TreeWalk.isSymlink(url),
-      !url.standardizedFileURL.pathComponents.contains(".Trash")
+      !Self._isTrashed(url)
     else {
       return
     }
@@ -1158,17 +1158,21 @@ public class FilePickerWritablePlugin: NSObject, FlutterPlugin {
     guard (try? url.checkResourceIsReachable()) == true else {
       throw TaxonomyError(kind: ErrorKind.notFound, message: "Nothing at \(url.path)")
     }
-    // A Files delete is a move into the provider's `.Trash`, and the
-    // bookmark follows it there. Deleted must read as gone, never as a
-    // live folder the app would list and write into. No public resource
-    // key reports "in the trash", so this matches a whole path component.
-    if url.standardizedFileURL.pathComponents.contains(".Trash") {
+    if Self._isTrashed(url) {
       throw TaxonomyError(
         kind: ErrorKind.notFound,
         message: "\(url.lastPathComponent) is in the Trash",
         details: ["reason": "trashed"]
       )
     }
+  }
+
+  /// A Files delete is a move into the provider's `.Trash`, and the
+  /// bookmark follows it there. Deleted must read as gone, never as a live
+  /// folder the app would list and write into. No public resource key
+  /// reports "in the trash", so this matches a whole path component.
+  private static func _isTrashed(_ url: URL) -> Bool {
+    url.standardizedFileURL.pathComponents.contains(".Trash")
   }
 
   /// Runs `work` off main and replies on main, with taxonomy errors.

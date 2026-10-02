@@ -21,9 +21,9 @@ enum EntryStateDecision {
     case gone
   }
 
-  enum Opened {
-    /// A regular file, opened and one byte read.
-    case regular
+  enum Opened: Equatable {
+    /// A regular file, opened and up to one byte read (0 at end of file).
+    case regular(bytesRead: Int)
     /// Anything else: a directory (through a symlink, too), a FIFO, a device.
     case notRegular
     /// ENOENT or ENOTDIR from the open.
@@ -77,18 +77,18 @@ enum EntryStateDecision {
     }
   }
 
+  /// A POSIX error anywhere in the chain decides (a no-such-file code
+  /// wrapping EIO is never missing); without one, Cocoa's own code.
   static func isMissing(_ error: NSError) -> Bool {
-    if error.domain == NSCocoaErrorDomain &&
-      (error.code == NSFileNoSuchFileError || error.code == NSFileReadNoSuchFileError) {
-      return true
+    var next: NSError? = error
+    while let current = next {
+      if current.domain == NSPOSIXErrorDomain {
+        return current.code == Int(ENOENT) || current.code == Int(ENOTDIR)
+      }
+      next = current.userInfo[NSUnderlyingErrorKey] as? NSError
     }
-    if error.domain == NSPOSIXErrorDomain {
-      return error.code == Int(ENOENT) || error.code == Int(ENOTDIR)
-    }
-    if let underlying = error.userInfo[NSUnderlyingErrorKey] as? NSError {
-      return isMissing(underlying)
-    }
-    return false
+    return error.domain == NSCocoaErrorDomain &&
+      (error.code == NSFileNoSuchFileError || error.code == NSFileReadNoSuchFileError)
   }
 
   /// A system call that failed outside the answers [Opened] gives.
@@ -97,7 +97,7 @@ enum EntryStateDecision {
     let code: Int32
   }
 
-  /// Opens `path`, checks it is a regular file, reads one byte and closes
+  /// Opens `path`, checks it is a regular file, reads up to one byte and closes
   /// it. `O_NONBLOCK` so a FIFO cannot hold the open until a writer comes;
   /// a regular file ignores it.
   static func probeOpen(_ path: String) throws -> Opened {
@@ -124,9 +124,10 @@ enum EntryStateDecision {
       return .notRegular
     }
     var byte: UInt8 = 0
-    guard read(fd, &byte, 1) >= 0 else {
+    let bytesRead = read(fd, &byte, 1)
+    guard bytesRead >= 0 else {
       throw SyscallFailure(call: "read", code: errno)
     }
-    return .regular
+    return .regular(bytesRead: bytesRead)
   }
 }

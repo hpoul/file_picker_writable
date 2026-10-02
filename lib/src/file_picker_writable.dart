@@ -281,7 +281,7 @@ class DirectoryListing {
 /// [FilePickerWritable.entryState].
 @experimental
 enum EntryState {
-  /// The plugin opened it and read its first byte just now. That says how
+  /// The plugin opened it and read up to one byte just now. That says how
   /// the open stands now, not why an earlier one failed: storage that
   /// came back in between, a later block that fails to read, or (on iOS)
   /// a file provider that fetched it all answer this too. After a
@@ -739,7 +739,7 @@ class FilePickerWritable {
   /// ([EntryState.volumeAbsent], before the entry because a detached volume
   /// keeps its grant and its files look missing), the entry itself
   /// ([EntryState.notFound], [EntryState.notAFile]), and finally a real
-  /// open that reads one byte ([EntryState.readable]; see there for what
+  /// open that reads up to one byte ([EntryState.readable]; see there for what
   /// it does not prove). It costs an open and a read: call it once per
   /// failure, not ahead of every open.
   ///

@@ -754,13 +754,14 @@ class FilePickerWritableImpl(
 
         override fun isDirectory() = entryRow(uri, documentUri)?.isDirectory
 
-        override fun openAndRead(): Boolean = onVolume(documentUri) {
+        override fun openAndRead(): Int? = onVolume(documentUri) {
           val afd = contentResolver.openAssetFileDescriptor(documentUri, "r")
-            ?: return@onVolume false
+            ?: return@onVolume null
           // The stream starts at a sub-range's offset, and closes the
           // descriptor with it.
-          afd.use { it.createInputStream().use { stream -> stream.read() } }
-          true
+          val read = afd.use { it.createInputStream().use { stream -> stream.read() } }
+          plugin.logDebug("entryState: read ${if (read < 0) "end of file" else "1 byte"}")
+          read
         }
       }
     )

@@ -26,7 +26,7 @@ struct EntryStateDecisionTests {
     var grant = true
     var roots: [EntryStateDecision.Reach] = [.reachable]
     var entry: EntryStateDecision.Reach = .reachable
-    var opened: EntryStateDecision.Opened = .regular
+    var opened: EntryStateDecision.Opened = .regular(bytesRead: 1)
     var openThrows = false
 
     var probes: EntryStateDecision.Probes {
@@ -129,6 +129,16 @@ struct EntryStateDecisionTests {
       userInfo: [NSUnderlyingErrorKey: NSError(domain: NSPOSIXErrorDomain, code: Int(ENOENT))]
     )
     check(EntryStateDecision.isMissing(enoent), "ENOENT beneath a Cocoa error is gone")
+    let wrappedEIO = NSError(
+      domain: NSCocoaErrorDomain,
+      code: NSFileReadNoSuchFileError,
+      userInfo: [NSUnderlyingErrorKey: NSError(domain: NSPOSIXErrorDomain, code: Int(EIO))]
+    )
+    check(!EntryStateDecision.isMissing(wrappedEIO), "a no-such-file code wrapping EIO is never gone")
+    check(
+      EntryStateDecision.isMissing(NSError(domain: NSCocoaErrorDomain, code: NSFileReadNoSuchFileError)),
+      "a bare no-such-file code is gone"
+    )
     check(
       !EntryStateDecision.isMissing(NSError(domain: NSPOSIXErrorDomain, code: Int(ENOTCONN))),
       "ENOTCONN is never gone"
@@ -142,10 +152,11 @@ struct EntryStateDecisionTests {
     }
 
     let file = base.appendingPathComponent("clip.mp4").path
-    check(opened(file) == .regular, "a regular file reads")
+    // The byte read is what makes a failing first block loud: pinned here.
+    check(opened(file) == .regular(bytesRead: 1), "a regular file reads one byte")
     let empty = base.appendingPathComponent("empty.mp4").path
     fm.createFile(atPath: empty, contents: Data())
-    check(opened(empty) == .regular, "an empty regular file reads (end of file)")
+    check(opened(empty) == .regular(bytesRead: 0), "an empty regular file reads to end of file")
 
     let directory = base.appendingPathComponent("folder")
     try? fm.createDirectory(at: directory, withIntermediateDirectories: true)
@@ -162,14 +173,19 @@ struct EntryStateDecisionTests {
     check(opened(base.appendingPathComponent("missing.mp4").path) == .gone, "ENOENT is gone")
     check(opened(file + "/below") == .gone, "ENOTDIR is gone")
 
-    let locked = base.appendingPathComponent("locked.mp4").path
-    fm.createFile(atPath: locked, contents: Data([1]))
-    chmod(locked, 0)
-    check(opened(locked) == .refused, "EACCES is refused")
-    chmod(locked, 0o644)
+    // Root opens a mode-0 file anyway.
+    if geteuid() != 0 {
+      let locked = base.appendingPathComponent("locked.mp4").path
+      fm.createFile(atPath: locked, contents: Data([1]))
+      chmod(locked, 0)
+      check(opened(locked) == .refused, "EACCES is refused")
+      chmod(locked, 0o644)
+    }
   }
 
   static func main() {
+    // A FIFO open that lost O_NONBLOCK hangs: fail the run instead.
+    alarm(10)
     let fm = FileManager.default
     let base = fm.temporaryDirectory.appendingPathComponent("fpw-entry-state-\(UUID().uuidString)")
     defer {

@@ -32,10 +32,11 @@ object EntryStateDecision {
     fun isDirectory(): Boolean?
 
     /**
-     * Opens the entry, reads up to one byte and closes it again: false
-     * when the provider opened nothing.
+     * Opens the entry, reads up to one byte and closes it again: what
+     * `read()` returned (-1 at end of file), or null when the provider
+     * opened nothing.
      */
-    fun openAndRead(): Boolean
+    fun openAndRead(): Int?
   }
 
   /** The answer for the entry [what] names (for loud messages only). */
@@ -64,7 +65,7 @@ object EntryStateDecision {
       return EntryState.NOT_A_FILE
     }
     val failure: Exception = try {
-      if (probes.openAndRead()) {
+      if (probes.openAndRead() != null) {
         return EntryState.READABLE
       }
       IllegalStateException("The provider opened no descriptor for $what, which exists")

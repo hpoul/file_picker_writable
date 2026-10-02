@@ -18,7 +18,7 @@ class EntryStateDecisionTest {
     val grant: Boolean = true,
     val absent: Boolean = false,
     val rows: List<() -> Boolean?> = listOf({ false }),
-    val open: () -> Boolean = { true }
+    val open: () -> Int? = { 0x42 }
   ) : EntryStateDecision.Probes {
     val asked = mutableListOf<String>()
     private var row = 0
@@ -38,7 +38,7 @@ class EntryStateDecisionTest {
       return rows[minOf(row++, rows.size - 1)]()
     }
 
-    override fun openAndRead(): Boolean {
+    override fun openAndRead(): Int? {
       asked += "open"
       return open()
     }
@@ -69,6 +69,11 @@ class EntryStateDecisionTest {
     val fake = Fake()
     assertEquals(EntryState.READABLE, decide(fake))
     assertEquals(listOf("grant", "volume", "row", "open"), fake.asked)
+  }
+
+  @Test
+  fun anEmptyFileReadsToEndOfFileAndIsReadable() {
+    assertEquals(EntryState.READABLE, decide(Fake(open = { -1 })))
   }
 
   @Test
@@ -122,7 +127,7 @@ class EntryStateDecisionTest {
     val fake = Fake(rows = listOf({ false }, { null }), open = { throw IOException("EIO") })
     assertEquals(EntryState.NOT_FOUND, decide(fake))
     assertEquals(listOf("grant", "volume", "row", "open", "row"), fake.asked)
-    val nothing = Fake(rows = listOf({ false }, { null }), open = { false })
+    val nothing = Fake(rows = listOf({ false }, { null }), open = { null })
     assertEquals(EntryState.NOT_FOUND, decide(nothing))
   }
 
@@ -142,7 +147,7 @@ class EntryStateDecisionTest {
 
   @Test
   fun noDescriptorForALiveRowIsLoud() {
-    val e = loud<IllegalStateException>(Fake(open = { false }))
+    val e = loud<IllegalStateException>(Fake(open = { null }))
     assertTrue(e.message!!.contains("doc"))
   }
 

@@ -354,8 +354,8 @@ Same bar as Gaps 1 and 2b, evaluated independently:
   and a detached volume both arrive as `IllegalArgumentException`
   from `isChildDocument`, before the provider opens anything, while a
   never-granted tree and a granted file's plain document URI are
-  `SecurityException`s. `readable` is a real open that reads one byte
-  (`openAssetFileDescriptor` on Android, the decoder's call; `open(2)`
+  `SecurityException`s. `readable` is a real open that reads up to one
+  byte (`openAssetFileDescriptor` on Android, the decoder's call; `open(2)`
   and `read(2)` on iOS), so a stick whose cached entry opens but
   whose first block fails is loud, not readable. Even so it says how
   the open stands now, never why an earlier one failed (#75 review
@@ -379,10 +379,15 @@ Same bar as Gaps 1 and 2b, evaluated independently:
   iOS `volume-absent` for a pulled drive is NOT exercised: the
   bookmark most likely fails to resolve first, which reads as
   `permission-lost` ("pick again" where "plug the drive in" is the
-  fix). Classifying a failed resolution by the bookmark's volume
+  fix). No resolution error code is known to tell "volume not
+  mounted" from "file deleted" (both appear as Cocoa 4/260), so
+  classifying a failed resolution by the bookmark's volume
   (`volumeUUIDStringKey` from the bookmark data against the mounted
   volumes) waits for a device run with a drive; iOS is not in the
-  consumer's use case. Verified 2026-10-02 on a
+  consumer's use case. The run: insert the drive and pick a folder on
+  it; log `mountedVolumeURLs` with their volume UUIDs; pull the drive;
+  call `entryState`; log the resolution error's domain, code and
+  userInfo and `mountedVolumeURLs` again. Verified 2026-10-02 on a
   throwaway API 34 emulator (a vfat virtual disk, tree grant):
   file `readable`, folder and picked root `not-a-file`, a file
   deleted a moment ago `not-found`, a tree never granted

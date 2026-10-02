@@ -46,10 +46,12 @@
   * `entryState(identifier:)` says why an entry cannot be read, for an
     app whose own open of it failed (a media decoder handed a content
     URI): an `EntryState` of `permissionLost`, `volumeAbsent`,
-    `notFound`, `notAFile` or `readable`, checked in that order (a
-    detached volume alone never reads as lost), with `readable` meaning
-    the plugin opened it and read a byte just now: how the open stands
-    now, not why an earlier one failed. Gone is proven, never guessed:
+    `notFound`, `notAFile` or `readable`, checked in that order (on
+    Android a detached volume alone never reads as lost; on iOS a pulled
+    drive is unmeasured and may read as `permissionLost`), with
+    `readable` meaning the plugin opened it and read up to one byte just
+    now: how the open stands now, not why an earlier one failed. Gone is
+    proven, never guessed:
     what the platform cannot tell apart stays loud, with the native
     error's class and message in the details.
   * Large-file reads without a temp copy (`doc/large-file-reads-plan.md`):
