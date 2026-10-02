@@ -20,3 +20,9 @@ swiftc -parse-as-library \
   ios/test/TreeWalkTests.swift \
   -o "$out/tree_walk_tests"
 "$out/tree_walk_tests"
+
+swiftc -parse-as-library \
+  ios/file_picker_writable/Sources/file_picker_writable/FileIdentity.swift \
+  ios/test/FileIdentityTests.swift \
+  -o "$out/file_identity_tests"
+"$out/file_identity_tests"

@@ -37,6 +37,20 @@ external int fpw_pread_full(
 @Native<Int64 Function(Int32, Pointer<Uint8>, Int64)>()
 external int fpw_read_full(int fd, Pointer<Uint8> buffer, int length);
 
+@Native<Int64 Function(Int32, Pointer<Uint8>, Int64, Int64)>()
+external int fpw_pwrite_full(
+  int fd,
+  Pointer<Uint8> buffer,
+  int offset,
+  int length,
+);
+
+@Native<Int64 Function(Int32, Pointer<Uint8>, Int64)>()
+external int fpw_write_full(int fd, Pointer<Uint8> buffer, int length);
+
+@Native<Int32 Function(Int32)>()
+external int fpw_fsync(int fd);
+
 @Native<Int32 Function(Int32)>()
 external int fpw_close(int fd);
 
@@ -46,7 +60,8 @@ external int fpw_release(Pointer<FpwOwner> owner);
 @Native<Void Function(Pointer<Void>)>()
 external void fpw_release_finalize(Pointer<Void> owner);
 
-/// One adopted descriptor and its read buffer: what an FdReader holds.
+/// One adopted descriptor and its buffer: what an FdReader or FdWriter
+/// holds.
 ///
 /// The descriptor is released by [close] or, if this is collected or its
 /// isolate dies first, by a NativeFinalizer. The buffer belongs to Dart:
@@ -76,9 +91,9 @@ final class FdHandle implements Finalizable {
     final result = fpw_adopt(owner, fd);
     if (result == -16 /* EBUSY */ ) {
       throw StateError(
-        'Descriptor $fd is already owned by a reader: either a ReadHandoff '
-        'was consumed twice, or the descriptor was closed behind a live '
-        "reader's back and its number reused",
+        'Descriptor $fd is already owned by a reader or writer: either a '
+        'handoff record was consumed twice, or the descriptor was closed '
+        "behind a live reader's or writer's back and its number reused",
       );
     }
     if (result < 0) {
@@ -103,7 +118,7 @@ final class FdHandle implements Finalizable {
   late final Pointer<Uint8> _buffer;
   late final Pointer<FpwOwner> _owner;
 
-  /// The read buffer, owned by Dart.
+  /// The read buffer (a writer's staging buffer), owned by Dart.
   late final Uint8List buffer;
 
   /// Positional read into [buffer]: the count, or -errno.
@@ -112,6 +127,20 @@ final class FdHandle implements Finalizable {
 
   /// Sequential read into [buffer]: the count, or -errno.
   int read(int length) => fpw_read_full(fd, _buffer, length);
+
+  /// Positional write of [length] bytes of [buffer], starting at [from]:
+  /// the count (short when the volume wrote 0, or when an error followed
+  /// some bytes), or -errno when nothing was written.
+  int pwrite(int position, int length, {int from = 0}) =>
+      fpw_pwrite_full(fd, _buffer + from, position, length);
+
+  /// Sequential write of [buffer]'s bytes, as [pwrite].
+  int write(int length, {int from = 0}) =>
+      fpw_write_full(fd, _buffer + from, length);
+
+  /// Makes the bytes durable: 1 for a full flush through the drive's cache
+  /// (Apple's F_FULLFSYNC), 0 for plain fsync, or -errno.
+  int fsync() => fpw_fsync(fd);
 
   /// Releases the descriptor: 0, or -errno from close. Call at most once.
   int close() {
@@ -122,3 +151,6 @@ final class FdHandle implements Finalizable {
 
 /// Closes a bare descriptor: 0, or -errno.
 int closeFd(int fd) => fpw_close(fd);
+
+/// fsyncs a bare descriptor: 0, or -errno.
+int fsyncFd(int fd) => fpw_fsync(fd);

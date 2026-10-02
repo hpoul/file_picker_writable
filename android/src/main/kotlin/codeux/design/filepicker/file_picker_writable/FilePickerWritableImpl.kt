@@ -591,6 +591,141 @@ class FilePickerWritableImpl(
   }
 
   /**
+   * Creates the file [name] under the directory a live scope token names
+   * and detaches a write descriptor into Dart's ownership
+   * (tree-writes-plan §5). Never writes a byte. Fail-if-exists by
+   * lookup-first (no exclusive create exists here); a stored name that
+   * differs is undone by [requireCreatedName]. A file that cannot be
+   * opened once created is deleted again: it is ours, and empty.
+   * `getStatSize` says whether the descriptor is a file (`canFsync`, and
+   * positional writes) or a pipe.
+   */
+  @WorkerThread
+  fun openWrite(token: String, name: String, mimeType: String): Map<String, Any?> {
+    requireLeaf(name)
+    val parent = requireWritableScope(token)
+    if (lookupChildRow(parent, name) != null) {
+      throw alreadyExists(name)
+    }
+    val contentResolver = requireContext().contentResolver
+    val created = onVolume(parent.documentUri) {
+      DocumentsContract.createDocument(contentResolver, parent.documentUri, mimeType, name)
+    } ?: throw missingDocument(parent.documentUri)
+    val row = rowBelowRoot(created) ?: throw missingDocument(created)
+    requireCreatedName(parent, created, row, name)
+    val pfd = try {
+      onVolume(created) { contentResolver.openFileDescriptor(created, "w") }
+        ?: throw IllegalStateException("The provider opened no descriptor for $created")
+    } catch (e: Exception) {
+      // Ours only while still empty: someone may have taken the name since.
+      val stillEmpty = try {
+        rowBelowRoot(created)?.size == 0L
+      } catch (check: Exception) {
+        false
+      }
+      if (stillEmpty) {
+        deleteResidue(created)
+      }
+      throw e
+    }
+    val statSize = pfd.statSize
+    if (statSize > 0) {
+      // "w" does not truncate on current AOSP, so content here means the
+      // name holds someone else's file by now: leave it alone.
+      pfd.close()
+      throw TaxonomyException(
+        ErrorKind.ALREADY_EXISTS,
+        "\"$name\" was replaced while it was being opened",
+        details = mapOf("name" to name, "reason" to "replaced")
+      )
+    }
+    // The file's inode, which an abort compares (PartialIdentity); a pipe
+    // has none worth keeping.
+    val inode = if (statSize >= 0) {
+      try {
+        Os.fstat(pfd.fileDescriptor).st_ino
+      } catch (e: Exception) {
+        null
+      }
+    } else {
+      null
+    }
+    val fd = pfd.detachFd()
+    plugin.logDebug("openWrite: fd $fd, statSize $statSize, inode $inode")
+    return mapOf(
+      "fd" to fd,
+      "identifier" to row.toResult(parent.treeUri)["identifier"],
+      "canFsync" to (statSize >= 0),
+      "fileId" to inode?.toString()
+    )
+  }
+
+  /**
+   * Deletes an aborted write session's partial [identifier], only while
+   * the file there is still the session's ([PartialIdentity]: the inode
+   * recorded at create, against a read descriptor on the name now, plus
+   * size and modification time). The user may have renamed the partial
+   * away and another file taken its name: `not-found` with `reason:
+   * replaced`, nothing deleted. A session without an inode (a pipe) is
+   * `reason: unverifiable`, also kept. Gone is success.
+   */
+  @WorkerThread
+  fun abortPartial(identifier: String, fileId: String?, bytesWritten: Long, openedAt: Long) {
+    val uri = Uri.parse(identifier)
+    requireBelowRoot(uri)
+    requireWriteGrant(uri)
+    val documentUri = documentUriFor(uri)
+    val row = rowBelowRoot(documentUri) ?: return
+    val recorded = fileId?.toLongOrNull()
+      ?: throw TaxonomyException(
+        ErrorKind.NOT_FOUND,
+        "${row.name} cannot be proven this session's file: not deleted",
+        details = mapOf("reason" to "unverifiable", "residue" to "kept")
+      )
+    val inodeNow = if (row.isDirectory) {
+      null
+    } else {
+      try {
+        requireContext().contentResolver.openFileDescriptor(documentUri, "r")
+          ?.use { Os.fstat(it.fileDescriptor).st_ino }
+      } catch (e: Exception) {
+        plugin.logDebug("abortPartial: cannot stat ${row.name}: $e")
+        null
+      }
+    }
+    val sameFile = inodeNow != null && PartialIdentity.matches(
+      recorded, inodeNow, row.size, bytesWritten, row.lastModified, openedAt
+    )
+    if (!sameFile) {
+      throw TaxonomyException(
+        ErrorKind.NOT_FOUND,
+        "${row.name} is no longer this session's file: not deleted",
+        details = mapOf(
+          "reason" to "replaced",
+          "residue" to "kept",
+          "size" to row.size,
+          "written" to bytesWritten
+        )
+      )
+    }
+    deleteDocument(documentUri)
+  }
+
+  /**
+   * The entry [identifier] names, or null when it is provably gone: the
+   * stat a write session's commit returns.
+   */
+  @WorkerThread
+  fun statEntry(identifier: String): Map<String, Any?>? {
+    val uri = Uri.parse(identifier)
+    if (!hasPersistedReadGrant(requireContext().contentResolver, uri)) {
+      throw TaxonomyException(ErrorKind.PERMISSION_LOST, "No persisted grant covers $uri")
+    }
+    val row = rowBelowRoot(documentUriFor(uri)) ?: return null
+    return row.toResult(treeUriOf(uri))
+  }
+
+  /**
    * Creates the directory [name] under the directory a live scope token
    * names (tree-writes-plan §5). The name is looked up first, so a taken
    * one is `already-exists` without trying; a stored name that differs
@@ -1004,10 +1139,11 @@ class FilePickerWritableImpl(
    * throws `already-exists` when [name] is taken by now (a concurrent
    * create, and the provider auto-renamed ours), else `invalid-name` (the
    * provider cleaned the name). Only a residue that is provably fresh, an
-   * empty directory, is deleted: a provider may hand back an EXISTING
-   * folder for the cleaned name (ExternalStorageProvider never does; it
-   * always makes a new one), and deleting that would delete the user's
-   * files. Anything else is left alone, its identifier in the details.
+   * empty directory or a file of size 0, is deleted: a provider may hand
+   * back an EXISTING entry for the cleaned name (ExternalStorageProvider
+   * never does; it always makes a new one), and deleting that would delete
+   * the user's data. Anything else is left alone, its identifier in the
+   * details.
    */
   @WorkerThread
   private fun requireCreatedName(parent: Directory, created: Uri, row: DocumentRow, name: String) {
@@ -1016,16 +1152,24 @@ class FilePickerWritableImpl(
     }
     val taken = lookupChildRow(parent, name) != null
     val residue = Directory(parent.treeUri, DocumentsContract.getDocumentId(created), created, isTreeRoot = false)
-    val isFresh = row.isDirectory && try {
-      childrenBelowRoot(residue)?.isEmpty() == true
-    } catch (e: Exception) {
-      false
+    // Fresh: an empty directory, or a file of size 0 (openWrite's create),
+    // the latter only on ExternalStorageProvider, which always creates a
+    // new file: elsewhere an empty file handed back for a cleaned name may
+    // be the user's own (an empty marker file).
+    val isFresh = if (row.isDirectory) {
+      try {
+        childrenBelowRoot(residue)?.isEmpty() == true
+      } catch (e: Exception) {
+        false
+      }
+    } else {
+      row.size == 0L && created.authority == StorageVolumes.AUTHORITY
     }
     val extra = if (isFresh) {
       deleteResidue(created)
       emptyMap()
     } else {
-      plugin.logWarning("Not deleting $created: not an empty, fresh directory")
+      plugin.logWarning("Not deleting $created: not provably fresh (empty)")
       mapOf("identifier" to row.toResult(parent.treeUri)["identifier"], "residue" to "kept")
     }
     if (taken) {

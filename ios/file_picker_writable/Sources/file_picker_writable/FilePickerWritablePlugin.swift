@@ -216,6 +216,40 @@ public class FilePickerWritablePlugin: NSObject, FlutterPlugin {
         _offMain(result) { [self] in
           try _openRead(token: token)
         }
+      case "openWrite":
+        guard
+          let args = call.arguments as? [String: Any],
+          let token = args["scope"] as? String,
+          let name = args["name"] as? String
+        else {
+          throw FilePickerError.invalidArguments(message: "Expected 'scope' and 'name'")
+        }
+        _offMain(result) { [self] in
+          try _openWrite(token: token, name: name)
+        }
+      case "abortPartial":
+        guard
+          let args = call.arguments as? [String: Any],
+          let identifier = args["identifier"] as? String
+        else {
+          throw FilePickerError.invalidArguments(message: "Expected 'identifier'")
+        }
+        let fileId = args["fileId"] as? String
+        let bytesWritten = (args["bytesWritten"] as? NSNumber)?.int64Value
+        _offMain(result) { [self] in
+          try _abortPartial(identifier: identifier, fileId: fileId, bytesWritten: bytesWritten)
+          return nil
+        }
+      case "statEntry":
+        guard
+          let args = call.arguments as? [String: Any],
+          let identifier = args["identifier"] as? String
+        else {
+          throw FilePickerError.invalidArguments(message: "Expected 'identifier'")
+        }
+        _offMain(result) { [self] in
+          try _statEntry(identifier: identifier)
+        }
       case "createDirectory":
         guard
           let args = call.arguments as? [String: Any],
@@ -558,6 +592,212 @@ public class FilePickerWritablePlugin: NSObject, FlutterPlugin {
     )
   }
 
+  /// Creates the file `name` under the directory a live scope token names
+  /// and hands a write descriptor to Dart (tree-writes-plan §5), under the
+  /// token's held scope. Never writes a byte.
+  ///
+  /// The create is relative to a descriptor on the parent directory whose
+  /// kernel path (`F_GETPATH`) is checked to lie in the root, so a parent
+  /// component swapped for a symlink after the scope check cannot redirect
+  /// it; `openat` with `O_CREAT | O_EXCL | O_NOFOLLOW` then fails on any
+  /// taken name, a symlink included. The stored name is verified by
+  /// identity, not by path (the name cache would echo the request): the
+  /// requested name must hold the descriptor's file ([FileIdentity],
+  /// strict). Otherwise the volume stored it elsewhere (exFAT may strip or
+  /// refuse characters): the file is removed where a scan of the directory
+  /// finds exactly it, and the result is `invalid-name`. The result
+  /// carries the file's identity, so an abort deletes only this file.
+  private func _openWrite(token: String, name: String) throws -> [String: Any] {
+    try _requireLeaf(name)
+    let parent = try _requireDirectoryScope(token)
+    let child = parent.child(name)
+    let directory = open(parent.url.path, O_RDONLY | O_DIRECTORY | O_CLOEXEC)
+    guard directory >= 0 else {
+      throw Self._errnoError(errno, "open \(parent.url.lastPathComponent)")
+    }
+    defer {
+      close(directory)
+    }
+    guard
+      let root = TreeWalk.realPath(parent.scopeURL),
+      let directoryPath = Self._kernelPath(directory),
+      directoryPath == root || (root != "/" && directoryPath.hasPrefix(root + "/"))
+    else {
+      throw TaxonomyError(
+        kind: ErrorKind.notFound,
+        message: "\(parent.url.lastPathComponent) no longer resolves inside its root",
+        details: ["reason": "outside-root"]
+      )
+    }
+    let fd = openat(directory, name, O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW, 0o644)
+    guard fd >= 0 else {
+      let code = errno
+      if code == EEXIST {
+        throw TaxonomyError(kind: ErrorKind.alreadyExists, message: "\"\(name)\" is taken", details: ["name": name])
+      }
+      throw Self._errnoError(code, "open \(name)")
+    }
+    var info = stat()
+    guard fstat(fd, &info) == 0 else {
+      // Without its identity the file cannot be proven ours: leave it.
+      let error = Self._errnoError(errno, "fstat \(name)")
+      close(fd)
+      throw error
+    }
+    var named = stat()
+    guard fstatat(directory, name, &named, AT_SYMLINK_NOFOLLOW) == 0, FileIdentity.sameFile(info, named) else {
+      let actual = Self._removeStoredAs(info, in: directory)
+      close(fd)
+      throw TaxonomyError(
+        kind: ErrorKind.invalidName,
+        message: actual == nil
+          ? "The volume did not store \"\(name)\" under that name; the file was left in place"
+          : "The volume stored \"\(name)\" as \"\(actual!)\"",
+        details: ["requested": name, "actual": actual ?? NSNull()]
+      )
+    }
+    // Nil without a birth time: the abort then keeps the partial.
+    let identity = FileIdentity(info, inodesStable: FileIdentity.inodesStable(fd: fd))
+    let isRegular = (info.st_mode & S_IFMT) == S_IFREG
+    logDebug("openWrite: fd \(fd), regular \(isRegular), identity \(identity?.encoded ?? "none")")
+    return [
+      "fd": Int(fd),
+      "identifier": child.identifier(withRoot: try child.currentRoot()),
+      "canFsync": isRegular,
+      "fileId": identity?.encoded ?? NSNull(),
+    ]
+  }
+
+  /// Finds the file `created` describes in `directory` by scanning it, and
+  /// removes it when exactly one entry is that regular file
+  /// ([FileIdentity.sameFile]: device, inode, exact birth time). Returns
+  /// the name it was stored as, or nil when none or several matched (the
+  /// file is left in place then). The window between the scan and the
+  /// unlink is accepted, as #71's between a check and its delete.
+  private static func _removeStoredAs(_ created: stat, in directory: Int32) -> String? {
+    let scan = dup(directory)
+    guard scan >= 0 else {
+      return nil
+    }
+    guard let stream = fdopendir(scan) else {
+      close(scan)
+      return nil
+    }
+    defer {
+      closedir(stream)
+    }
+    var matches: [String] = []
+    while let entry = readdir(stream) {
+      let name = withUnsafeBytes(of: entry.pointee.d_name) { raw in
+        String(cString: raw.bindMemory(to: CChar.self).baseAddress!)
+      }
+      if name == "." || name == ".." {
+        continue
+      }
+      var info = stat()
+      if fstatat(directory, name, &info, AT_SYMLINK_NOFOLLOW) == 0, FileIdentity.sameFile(created, info) {
+        matches.append(name)
+      }
+    }
+    guard matches.count == 1 else {
+      return nil
+    }
+    unlinkat(directory, matches[0], 0)
+    return matches[0]
+  }
+
+  /// The kernel's path for an open descriptor (`F_GETPATH`), nil when it
+  /// cannot tell.
+  private static func _kernelPath(_ fd: Int32) -> String? {
+    var buffer = [CChar](repeating: 0, count: Int(MAXPATHLEN))
+    guard fcntl(fd, F_GETPATH, &buffer) != -1 else {
+      return nil
+    }
+    return String(cString: buffer)
+  }
+
+  /// Deletes an aborted write session's partial, only while the file there
+  /// is still the one the session created: a regular file matching the
+  /// session's [FileIdentity] (device, birth time, and the inode where the
+  /// volume keeps it stable) and holding the bytes the session wrote.
+  /// Anything else (renamed away, and another file took the name) is
+  /// `not-found` with `reason: replaced`; a session without an identity is
+  /// `reason: unverifiable`; nothing is deleted either way. Gone is
+  /// success, but only while the root is reachable: a pulled volume is
+  /// `permission-lost`, never "gone". Single-shot scope.
+  private func _abortPartial(identifier: String, fileId: String?, bytesWritten: Int64?) throws {
+    let resolved = try _resolve(identifier)
+    try _requireBelowRoot(resolved)
+    guard resolved.scopeURL.startAccessingSecurityScopedResource() else {
+      throw TaxonomyError(kind: ErrorKind.permissionLost, message: "startAccessingSecurityScopedResource refused for \(resolved.scopeURL)")
+    }
+    defer {
+      resolved.scopeURL.stopAccessingSecurityScopedResource()
+    }
+    try _requireContained(resolved)
+    try _requireRootReachable(resolved)
+    var there = stat()
+    guard lstat(resolved.url.path, &there) == 0 else {
+      let code = errno
+      if code == ENOENT {
+        return
+      }
+      throw Self._errnoError(code, "lstat \(resolved.url.lastPathComponent)")
+    }
+    guard let identity = fileId.flatMap({ FileIdentity(encoded: $0) }) else {
+      throw TaxonomyError(
+        kind: ErrorKind.notFound,
+        message: "\(resolved.url.lastPathComponent) cannot be proven this session's file: not deleted",
+        details: ["reason": "unverifiable", "residue": "kept"]
+      )
+    }
+    let isRegular = (there.st_mode & S_IFMT) == S_IFREG
+    let sizeMatches = bytesWritten.map { Int64(there.st_size) == $0 } ?? true
+    guard isRegular, identity.matches(there), sizeMatches else {
+      throw TaxonomyError(
+        kind: ErrorKind.notFound,
+        message: "\(resolved.url.lastPathComponent) is no longer this session's file: not deleted",
+        details: ["reason": "replaced", "residue": "kept"]
+      )
+    }
+    guard unlink(resolved.url.path) == 0 else {
+      let code = errno
+      if code == ENOENT {
+        return
+      }
+      throw Self._errnoError(code, "unlink \(resolved.url.lastPathComponent)")
+    }
+  }
+
+  /// `permission-lost` (`volume-absent`) when the picked root itself cannot
+  /// be reached: an entry that is missing there is not proven gone.
+  private func _requireRootReachable(_ resolved: ResolvedIdentifier) throws {
+    guard (try? resolved.scopeURL.checkResourceIsReachable()) == true else {
+      throw TaxonomyError(
+        kind: ErrorKind.permissionLost,
+        message: "\(resolved.scopeURL.lastPathComponent) cannot be reached",
+        details: ["reason": "volume-absent"]
+      )
+    }
+  }
+
+  /// The entry `identifier` names, or nil when it is gone: the stat a
+  /// write session's commit returns. Single-shot scope.
+  private func _statEntry(identifier: String) throws -> [String: Any]? {
+    let resolved = try _resolve(identifier)
+    guard resolved.scopeURL.startAccessingSecurityScopedResource() else {
+      throw TaxonomyError(kind: ErrorKind.permissionLost, message: "startAccessingSecurityScopedResource refused for \(resolved.scopeURL)")
+    }
+    defer {
+      resolved.scopeURL.stopAccessingSecurityScopedResource()
+    }
+    try _requireContained(resolved)
+    guard (try? resolved.url.checkResourceIsReachable()) == true else {
+      return nil
+    }
+    return try _childEntry(resolved.url, identifierKey: "identifier", identifierValue: resolved.identifier(withRoot: resolved.currentRoot()))
+  }
+
   /// Creates the directory `name` under the directory a live scope token
   /// names (tree-writes-plan §5), under that token's held scope. Nothing
   /// is created on a taken name, so there is no residue to clean.
@@ -590,6 +830,8 @@ public class FilePickerWritablePlugin: NSObject, FlutterPlugin {
       resolved.scopeURL.stopAccessingSecurityScopedResource()
     }
     try _requireContained(resolved)
+    // "Gone" below needs a reachable root: a pulled volume is not deleted.
+    try _requireRootReachable(resolved)
     let url = resolved.url
     // Gone, or gone into the Trash with its root: either way deleted.
     guard (try? url.checkResourceIsReachable()) == true || TreeWalk.isSymlink(url),

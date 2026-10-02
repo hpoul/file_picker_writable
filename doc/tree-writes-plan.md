@@ -2,8 +2,8 @@
 
 Status: proposal, for review. No commitments. In implementation:
 R1 (`openDirectory`) shipped with Gap 1a (#68); the single-shot
-tree verbs (`createDirectory`, `deleteEntry`, `moveEntry`) are
-PR 4; write sessions (`openWrite`, `FdWriter`) follow in PR 5.
+tree verbs (`createDirectory`, `deleteEntry`, `moveEntry`) with
+#71; write sessions (`openWrite`, `FdWriter`) are PR 5.
 Date: 2026-09-30.
 Transport decision revised 2026-09-30 after measurement (`bench/`, 2b §3).
 Context: same consumer as the Gap-1/1a/2b plans — phone-side trip
@@ -216,8 +216,16 @@ Notes:
   unreleased scope ids; same-isolate `fromSession` checks at
   construction and close. `handoff()` validates root-side and
   carries the opaque token; the helper performs no live check
-  (handoff-time snapshot). The scope MUST stay acquired until
-  close (caller obligation on the helper path).
+  (handoff-time snapshot). The scope should stay acquired until
+  close (softened as in 2b §5: an open fd survives a release).
+  A helper's own commit or abort needs the channel: the handoff
+  carries the root isolate's `RootIsolateToken`, and
+  `FdWriter.fromHandoff` sets up the
+  `BackgroundIsolateBinaryMessenger` from it. The plugin's channel
+  is a static constant, so the helper calls it without touching
+  the `FilePickerWritable()` singleton (whose constructor installs
+  a handler, which background isolates refuse); no separate
+  channel client was needed (implementation finding, PR 5).
 - Leaf-name rule (peer-confirmed): `name`/`newName` reject empty,
   `.`/`..`, and any `/` or NUL — one rule, both platforms (Android
   display names and iOS path components alike). Names starting
@@ -262,7 +270,18 @@ Notes:
   front. `fsync` defaults true — a forgotten flag costs slowness,
   not durability; bulk copies may pass `false` where
   verify-after-copy is the guarantee (exFAT flush cost is real) —
-  the driving consumer keeps the default even for bulk.
+  the driving consumer keeps the default even for bulk. On Apple
+  plain `fsync` only hands the bytes to the drive, which may keep
+  them in its cache (man fsync): the shim uses `F_FULLFSYNC` and
+  falls back to `fsync` only where the volume refuses it (ENOTSUP,
+  EINVAL, ENOTTY — man fcntl lists F_FULLFSYNC for HFS, FAT, UDF
+  and APFS only, so exFAT, smbfs and webdav fall back), as SQLite
+  does (#72 review M2). `FdWriter.lastSyncWasFull` (public) says
+  which one a commit got, so a consumer can record a weaker sync.
+  Measured: APFS (simulator) answers `F_FULLFSYNC`; Android has
+  plain fsync only; the iPhone and an exFAT stick are still to be
+  recorded. Callers for whom durability matters check `canFsync`
+  first: a pipe has none, and its commit skips the step.
 - Kill story (same as 2b §4, write half): after kill, the dead
   helper's finalizer closed the fd — the root calls `abortWrite`
   on its fd-dead copy with `closeFd: false`, which stays legal
@@ -271,11 +290,13 @@ Notes:
   after kill is meaningless: abort, don't commit. The `closeFd` /
   `fsync` escape hatches live on the session-level verbs only;
   `FdWriter` methods run in the owning isolate and always take
-  the full path. Recovery: if `Isolate.spawn` throws after
-  `handoff()` (or the helper dies before its wrapper exists),
-  the root recovers with `fromHandoff` on its own copy and
-  closes/aborts normally (fd still open — nothing attached a
-  finalizer yet). A kill in that window leaks the fd.
+  the full path. Recovery: only if the spawn itself throws
+  (`IsolateSpawnException`) after `handoff()` does the root
+  recover with `fromHandoff` on its own copy and close/abort
+  normally — the same correction as 2b (#70 review S2): a helper
+  that died later may already have closed the fd. A kill before
+  the helper's wrapper exists leaks the fd; the partial is still
+  aborted by identifier.
 - Fail-if-exists is the documented `openWrite` rule (peer
   re-confirmed, superseding truncate): an existing name is loud
   `already-exists`, so abort can never destroy an overwrite
@@ -370,15 +391,82 @@ Notes:
   resumes. Maps into the §6 taxonomy.
 - `closeWrite`: FFI `fsync` (iff requested and `canFsync`) +
   `close`, then a channel control call stats the child into a
-  `ChildEntry`. `abortWrite`: FFI `close` (skipped with
-  `closeFd: false` on the kill path — the finalizer closed it),
-  then a channel control call `deleteDocument`s the partial. Both
-  idempotent; use-after-either is loud `session-closed`. A close
-  whose liveness check fails still runs the native cleanup (fd +
-  buffer), then throws — same rule as 2b.
-  Explicit close/abort and the finalizer backstop all release the
-  fd + `malloc` buffer as one native cleanup record (same rule as
-  2b — a closing fd alone would leak the buffer on the kill path).
+  `ChildEntry` (an internal `statEntry` verb: identifier in,
+  entry out, single-shot scope); a stored size that differs from
+  the bytes written (someone else wrote to the file) is loud
+  `size-mismatch`, the file kept (#72 review S2; pipes cannot
+  tell). A scope released meanwhile does not fail a commit: the
+  bytes are down, and a throw would invite an abort of a good
+  file (review L3). `abortWrite`: FFI `close` (skipped with
+  `closeFd: false` on the kill path — the finalizer closed it,
+  and only a handed-off or closed session may pass it), then an
+  internal `abortPartial` that deletes the partial BY NAME only
+  while it is still the session's file (#72 review M1: the user
+  can rename a partial away and another file take its name),
+  proved by identity recorded at create, plus size == bytes
+  written. iOS (`FileIdentity`): device and birth time (±2 s for
+  FAT's coarse create times), plus the inode only where the
+  volume keeps it stable (APFS, HFS): msdosfs derives file IDs
+  from the first cluster, every empty file sharing one (#72
+  re-review M1b). The tolerance is 50 ms (third review S-A): FAT
+  and exFAT store create times to 10 ms and the in-memory value
+  is already the rounded one; it is also the window in which a
+  newcomer created right after ours under the same name passes on
+  a volume without stable inodes (a host test writes the window
+  down). A file without a birth time has no identity (third review
+  M-A): the session's `fileId` is null and its abort keeps the
+  partial (`unverifiable`), never "same device" alone. What
+  userfsd reports for an exFAT stick's birth time, after create
+  and after a remount, is still to be recorded. On FAT12/16/32
+  msdosfs converts DOS times with the local offset, so a time-zone
+  change between create and abort shifts the birth time by hours:
+  a false refuse (exFAT stores a UTC offset and is immune).
+  Android (`PartialIdentity`): the inode only —
+  the create's write fd is on the lower file system and the
+  abort's read fd goes through FUSE, which reports the lower inode
+  but its own device — plus mtime ≥ create − 2 s (no birth time:
+  `Os.statx` is not public API). The abort's "r" open of the name
+  triggers MediaStore's scan of whatever is there, which is
+  harmless. Residuals, both
+  failing safe except the first: an inode reused after our
+  partial was deleted AND a same-size newcomer created under its
+  name (ext4/f2fs); vfat/exfat reassigning a number on reload (a
+  false refuse: the partial kept). Anything that fails the check
+  is `not-found`, `reason: replaced`, `residue: kept`; a session
+  without an identity (a pipe, or no birth time on iOS) is
+  `reason: unverifiable`. Verified
+  on device by renaming a partial away and creating a newcomer
+  under its name. The KILL PATH deletes nothing (decision, #72
+  re-review M1a): the root's copy cannot know what the helper
+  wrote, and a newcomer passes any age check by construction, so
+  `abortWrite(closeFd: false)` only marks the session aborted; the
+  partial stays for a deliberate delete by name once no writer can
+  run (the consumer's repair does exactly that). After a commit
+  found `size-mismatch`, abort is a `StateError`: someone else's
+  bytes are in the file (re-review S2').
+  Gone is success, but on iOS only while the root is reachable (a
+  pulled volume is `permission-lost`, review S5; Android already
+  proves gone). Both idempotent: a second commit returns the same
+  entry, a second abort is a no-op; commit after abort is
+  `session-closed`, and abort after a commit is a `StateError`
+  (it would delete the committed file; `deleteEntry` is the
+  deliberate way; and never abort a session whose commit may
+  have landed unacknowledged). The fd's owner record and the
+  Dart-owned staging buffer are separate, as in 2b after its
+  review: explicit close/abort and the finalizer release the fd;
+  the buffer frees itself. A file whose open fails after its
+  create is deleted again only while still empty; a descriptor
+  that is not empty on open (mode "w" does not truncate on current
+  AOSP) means the name was replaced: closed, kept, `already-exists`
+  (`reason: replaced`). A mismatched-name residue is deleted only
+  when fresh — a file only on ExternalStorageProvider, which
+  always creates a new one (review S3; elsewhere an empty file
+  handed back may be the user's marker). The shim's write loops
+  return the count once some bytes are down (an error then ends
+  the loop; Dart re-issues the rest and sees the real errno), and
+  wait out EAGAIN with `poll` (review S1). On Android the media
+  scan runs at create, on an empty file: a media file may need a
+  rescan before galleries show it.
 - `createDirectory`: `lookupChild` first (taken name ⇒ loud
   `already-exists`, not attempted); `createDocument` with
   `MIME_TYPE_DIR`, then verify the returned display name matches
@@ -504,9 +592,25 @@ Notes:
   atomically with exclusive semantics (`O_CREAT|O_EXCL` — taken
   name ⇒ loud `already-exists`, no TOCTOU); the fd IS the session
   payload (no `FileHandle` wrapper), `canFsync` always true
-  (regular files). `writeChunk`/`closeWrite`/
+  (regular files). The create is `openat` on a descriptor of the
+  parent directory whose kernel path (`F_GETPATH`) is checked to
+  lie in the root, with `O_EXCL | O_NOFOLLOW`: a parent component
+  swapped for a link after the scope check cannot redirect it,
+  and a link at the name is refused (#72 review S6; the draft's
+  "nothing is ever followed" held for the last component only).
+  The stored name is verified by identity (exFAT may strip or
+  refuse characters): `fstatat(dirfd, name, AT_SYMLINK_NOFOLLOW)`
+  must be the descriptor's own file, strictly (device, inode,
+  exact birth time). Otherwise it is `invalid-name`, and the file
+  is removed only where a scan of the directory finds exactly it
+  (review S4; corrected in re-review S4': an `F_GETPATH` name check
+  sees the name cache, built from the requested name, and so never
+  fires in the case it targets). The parent's `F_GETPATH` (S6) can
+  lag a concurrent move by microseconds: an accepted window.
+  `writeChunk`/`closeWrite`/
   `abortWrite` are the same Dart FFI as Android (`pwrite`,
-  `fsync`, `close`; abort removes the partial via `FileManager`).
+  `fsync`, `close`; abort removes the partial through the shared
+  `deleteEntry`, under its guards).
   Off main; results hop to main per convention.
 - `createDirectory`: `FileManager.createDirectory` under the
   passed-in parent scope (not per-call — §4). `deleteEntry`:
@@ -566,9 +670,12 @@ sessions), `scope-closed`. New in this gap: `directory-not-empty`
 `invalid-name` (leaf-name rule violation, or provider-cleaned
 name — `requested` and `actual` in details), `move-partial`
 (Android combined move+rename with failed rollback; actual
-identifier in details), and `root-protected` (added in PR 4 by
+identifier in details), `root-protected` (added in PR 4 by
 the owner's decision: `deleteEntry`/`moveEntry` on a picked
-root). Write verbs on a read-only Android tree grant
+root), and `size-mismatch` (added in PR 5, #72 review S2: a
+commit whose stored size differs from the bytes written).
+`not-found` gains `reason: replaced` (an abort that finds another
+file under the partial's name). Write verbs on a read-only Android tree grant
 (`openDirectory` accepts one) are `permission-lost` with
 `reason: read-only`. Dart carrier
 (pinned, all gaps): `PlatformException` with the taxonomy kind as
@@ -661,6 +768,57 @@ before graduation.
     proven-gone path ("Missing file for" plus a live ancestor), and
     a move between two picks on one volume (two tree URIs,
     `FpwTree` → `FpwTree2` and back) on Android too.
+- Results for the write sessions (PR 5, 2026-10-02):
+  - VM tests (`test/fd_writing_test.dart`, real descriptors and
+    the real shim, control calls faked): what `openWrite` sends;
+    totals and staging past the buffer; commit, its idempotency
+    (same entry, no second stat); abort, its idempotency, and abort
+    after commit refused; a scope released mid-write (cleanup,
+    then `scope-closed`, the partial left for abort); errno mapping
+    (EBADF on a read-only fd ⇒ `session-closed`); one writer per
+    session; the 1 MiB root-isolate budget; the session-level
+    commit and abort; the dead copy after `handoff()` (fd use
+    refused, root recovery commits); the kill path (finalizer
+    closes, `abortWrite(closeFd: false)` deletes); pipes (in order,
+    no fsync). Not stubbed: the synthesized ENOSPC (no host volume
+    writes 0) — device-only, and not forced there either.
+  - Device run (`example/lib/device_checks.dart`, `w/` in the
+    fixture), iOS simulator (two picks) and API 36 emulator: a
+    small write committed on the root isolate; a taken name ⇒
+    `already-exists`; `12:30.bin` ⇒ `invalid-name` (`12_30.bin`)
+    with no residue on Android, kept on APFS (then aborted); 8 MiB
+    written in a helper that COMMITS ITSELF through the channel
+    from the helper isolate, the consumer's commit-by-rename
+    (`big.bin.writing` → `big.bin`), and a read back in a helper,
+    0 mismatches; a helper that aborts itself (no partial left); a
+    killed helper's partial aborted by identifier (none left); the
+    listing holds exactly the two committed files; Android
+    `/proc/self/fd` 159/159.
+  - After the #72 review fixes: VM tests for the size check, the
+    abort's identity arguments, `closeFd: false` refused on an
+    owning session, a commit after the scope's release, and a full
+    non-blocking pipe (200,000 bytes, every byte counted — the
+    reviewer's probe of the old shim lost them as `errno-35`). On
+    the simulator and the emulator: the replaced-partial abort is
+    refused (`not-found`, `replaced`), the newcomer kept; the
+    simulator's commit used `F_FULLFSYNC` (Android has plain fsync
+    only).
+  - After the #72 re-review: identity-based abort on both
+    platforms (host tests: `ios/test/FileIdentityTests.swift` on
+    APFS — a newcomer never matches, the renamed partial does, the
+    FAT-style rule decides by birth time; JUnit
+    `PartialIdentityTest`), and on the simulator and the emulator:
+    a helper's own abort deletes its partial (Android: the inode
+    through the FUSE read fd matched the create's), the replaced
+    partial is refused with `residue: kept`, the killed helper's
+    abort keeps the partial. VM: abort after `size-mismatch` is a
+    `StateError`, the kill path makes no native call.
+  - Not run yet: a full or failing volume mid-write (ENOSPC, EIO;
+    whether a full FUSE volume returns 0 at all is unmeasured), a
+    pipe-backed provider, a write of 1 GB for the memory bound, a
+    revoked grant mid-write, `F_FULLFSYNC` on an iPhone and an
+    exFAT stick, and the identity check on an exFAT stick (iOS,
+    msdosfs/userfsd: the M1b case).
 
 ## 8. Graduation (experimental → stable)
 
