@@ -277,6 +277,45 @@ class DirectoryListing {
   final bool repaired;
 }
 
+/// Whether an entry can be read right now, and if not why, from
+/// [FilePickerWritable.entryState].
+@experimental
+enum EntryState {
+  /// The plugin opened it for reading just now and closed it again. If
+  /// something else failed to open it, that was a race (the volume came
+  /// back) or a fault in whatever failed.
+  readable('readable'),
+
+  /// The storage volume it lives on is not mounted: a pulled USB stick or
+  /// SD card. The grant survives, so it reads again once the volume is
+  /// back.
+  volumeAbsent('volume-absent'),
+
+  /// No grant covers it any more (revoked, never persisted, or a
+  /// bookmark that no longer resolves): it has to be picked again.
+  permissionLost('permission-lost'),
+
+  /// The grant is held but the entry is gone: deleted, renamed, moved
+  /// into the Trash on iOS, or a child identifier that leaves its root.
+  notFound('not-found'),
+
+  /// It is a directory.
+  notAFile('not-a-file');
+
+  const EntryState(this._wire);
+
+  final String _wire;
+
+  static EntryState _fromWire(String wire) {
+    for (final state in values) {
+      if (state._wire == wire) {
+        return state;
+      }
+    }
+    throw StateError('Unknown entry state: $wire');
+  }
+}
+
 typedef FileReader<T> = Future<T> Function(FileInfo fileInfo, File file);
 
 /// Singleton to accessing services of the FilePickerWritable plugin.
@@ -683,6 +722,48 @@ class FilePickerWritable {
       return null;
     }
     return ChildEntry._fromResult(result);
+  }
+
+  /// Says whether the entry [identifier] names can be read right now, and
+  /// if not why: for an app whose own open of it failed (a media decoder
+  /// handed the content URI, say) and that must tell "plug the stick back
+  /// in" from "pick the folder again". Copies nothing. Pass the identifier
+  /// exactly as stored, never reparsed.
+  ///
+  /// The first check that applies answers, in this order: the grant
+  /// ([EntryState.permissionLost]), the storage volume
+  /// ([EntryState.volumeAbsent], before the entry because a detached volume
+  /// keeps its grant and its files look missing), the entry itself
+  /// ([EntryState.notFound], [EntryState.notAFile]), and finally a real
+  /// open for reading, closed at once ([EntryState.readable]).
+  ///
+  /// Gone is proven as for [deleteEntry], never guessed. When the platform
+  /// cannot tell a gone entry from a failing provider or stick, or the
+  /// open fails for any other reason, this throws a [PlatformException]
+  /// under the native error's own code (`errno-<n>` on iOS), with its
+  /// class and message in the details: log it, it is the only trace a
+  /// dead provider leaves.
+  ///
+  /// On Android volumes are recognized on the system's storage provider
+  /// (internal storage, SD card, USB), as for [AcquiredScope]'s kinds;
+  /// elsewhere a detached volume reads as [EntryState.notFound] or throws.
+  /// A document picked on its own (not inside a picked folder) cannot be
+  /// proven gone there, so a missing one throws. On iOS an unreachable
+  /// picked root reads as [EntryState.volumeAbsent]: from the sandbox a
+  /// pulled volume and a removed picked root look the same.
+  ///
+  /// Android and iOS only; throws [UnsupportedError] elsewhere.
+  @experimental
+  Future<EntryState> entryState({required String identifier}) async {
+    _logger.finest('entryState()');
+    _requireScopePlatform('entryState');
+    final result = await _channel.invokeMethod<String>('entryState', {
+      'identifier': identifier,
+    });
+    if (result == null) {
+      throw StateError('Got null response for entryState');
+    }
+    return EntryState._fromWire(result);
   }
 
   /// Opens the file [scope] holds for reading and hands its descriptor to

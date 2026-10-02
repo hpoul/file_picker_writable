@@ -43,6 +43,14 @@
     relative path, and access comes from that folder's scope. Persist the
     picked folder's identifier and re-derive children by listing: a child
     identifier follows a rename only through its root, as on Android.
+  * `entryState(identifier:)` says why an entry cannot be read, for an
+    app whose own open of it failed (a media decoder handed a content
+    URI): an `EntryState` of `permissionLost`, `volumeAbsent`,
+    `notFound`, `notAFile` or `readable`, checked in that order (a
+    detached volume keeps its grant, so it never reads as lost), with
+    `readable` meaning the plugin opened it just now. Gone is proven,
+    never guessed: what the platform cannot tell apart stays loud, with
+    the native error's class and message in the details.
   * Large-file reads without a temp copy (`doc/large-file-reads-plan.md`):
     `openRead(scope:)` opens the file an `AcquiredScope` names and hands
     back a `ReadSession` that owns a native file descriptor (`seekable`,

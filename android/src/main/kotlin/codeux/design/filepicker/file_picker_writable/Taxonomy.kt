@@ -18,6 +18,15 @@ object ErrorKind {
   const val INVALID_NAME = "invalid-name"
 }
 
+/** `entryState`'s answers, as Dart's `EntryState` reads them. */
+object EntryState {
+  const val READABLE = "readable"
+  const val VOLUME_ABSENT = "volume-absent"
+  const val PERMISSION_LOST = "permission-lost"
+  const val NOT_FOUND = "not-found"
+  const val NOT_A_FILE = "not-a-file"
+}
+
 /**
  * A failure that belongs to the taxonomy, raised as [kind], with [details]
  * (e.g. a `reason`) added to the error's details map.

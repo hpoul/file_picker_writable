@@ -19,7 +19,10 @@
 //   error cases, and the open-descriptor count before and after;
 // - tree verbs (createDirectory, deleteEntry, moveEntry) in a `tree/`
 //   folder of the fixture, rebuilt every run, and with two or more picks
-//   a probe folder moved from the first pick to the second and back.
+//   a probe folder moved from the first pick to the second and back;
+// - entryState on a file, a directory, the picked root, the symlink, a
+//   file deleted a moment ago, an identifier nothing granted, and the
+//   identifiers saved by the previous launch.
 // Nothing outside the picked folder is read: the dart:io probe through
 // `out` logs only whether access was allowed and how many entries, never
 // names. FPW_CLEANUP=true removes the fixture folder again.
@@ -212,6 +215,11 @@ Future<void> runDeviceChecks(FileInfo directory) async {
         await plugin.release(scope);
         return 'repaired: ${scope.repaired}, name: ${scope.displayName}';
       });
+      // A volume unmounted since the last launch shows up here.
+      await step(
+        'relaunch entryState $label',
+        () => plugin.entryState(identifier: id),
+      );
       if (!label.endsWith('/')) {
         await step('relaunch readFile $label', () => read(id));
       }
@@ -307,6 +315,13 @@ Future<void> runDeviceChecks(FileInfo directory) async {
   // 7. Write sessions (doc/tree-writes-plan.md §7), in fixture/w.
   await _writeChecks(plugin, root, step, log);
 
+  // 8. entryState, what an app asks after its own open failed.
+  await _entryStateChecks(plugin, directory, root, {
+    'child probe.json': probe,
+    'child nested/': nested,
+    'symlink out': out,
+  }, step);
+
   // Saved for the next launch's relaunch checks.
   saved.writeAsStringSync(
     jsonEncode({
@@ -376,6 +391,67 @@ void _writeAndWait((WriteHandoff, SendPort) message) {
   ready.send(writer.writeChunk(Uint8List(4096)));
   // Keep the writer reachable until the kill.
   ReceivePort().listen((_) => writer.bytesWritten);
+}
+
+/// entryState on what the fixture holds ([entries]), the picked root, a
+/// file written and deleted a moment ago, and an identifier nothing
+/// granted. The relaunch checks ask it for the saved identifiers too, so a
+/// volume unmounted between launches shows there.
+Future<void> _entryStateChecks(
+  FilePickerWritable plugin,
+  FileInfo picked,
+  String root,
+  Map<String, ChildEntry?> entries,
+  Future<T?> Function<T>(String label, Future<T> Function() run) step,
+) async {
+  for (final MapEntry(key: label, value: entry) in entries.entries) {
+    if (entry != null) {
+      await step(
+        'entryState $label',
+        () => plugin.entryState(identifier: entry.identifier),
+      );
+    }
+  }
+  await step(
+    'entryState picked root',
+    () => plugin.entryState(identifier: picked.identifier),
+  );
+  final fixture = await plugin.acquire(identifier: root);
+  try {
+    final old = await plugin.lookupChild(identifier: root, name: 'gone.bin');
+    if (old != null) {
+      await plugin.deleteEntry(identifier: old.identifier);
+    }
+    final gone = await step('entryState: write gone.bin', () async {
+      final session = await plugin.openWrite(scope: fixture, name: 'gone.bin');
+      final writer = FdWriter.fromSession(session);
+      writer.writeChunk(Uint8List.fromList([1, 2, 3]));
+      return writer.closeWrite();
+    });
+    if (gone != null) {
+      await step(
+        'entryState gone.bin, written',
+        () => plugin.entryState(identifier: gone.identifier),
+      );
+      await plugin.deleteEntry(identifier: gone.identifier);
+      await step(
+        'entryState gone.bin, deleted',
+        () => plugin.entryState(identifier: gone.identifier),
+      );
+    }
+  } finally {
+    await plugin.release(fixture);
+  }
+  // Another tree on Android; a bookmark that cannot resolve on iOS.
+  final ungranted = defaultTargetPlatform == TargetPlatform.android
+      ? 'content://com.android.externalstorage.documents/tree/'
+            'primary%3Afpw-never-granted/document/'
+            'primary%3Afpw-never-granted%2Fx.bin'
+      : base64Encode(utf8.encode('not a bookmark'));
+  await step(
+    'entryState never granted',
+    () => plugin.entryState(identifier: ungranted),
+  );
 }
 
 /// openWrite, FdWriter, commit and abort in a `w/` folder of the fixture

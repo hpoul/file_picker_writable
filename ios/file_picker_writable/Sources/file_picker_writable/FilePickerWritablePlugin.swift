@@ -250,6 +250,16 @@ public class FilePickerWritablePlugin: NSObject, FlutterPlugin {
         _offMain(result) { [self] in
           try _statEntry(identifier: identifier)
         }
+      case "entryState":
+        guard
+          let args = call.arguments as? [String: Any],
+          let identifier = args["identifier"] as? String
+        else {
+          throw FilePickerError.invalidArguments(message: "Expected 'identifier'")
+        }
+        _offMain(result) { [self] in
+          try _entryState(identifier: identifier)
+        }
       case "createDirectory":
         guard
           let args = call.arguments as? [String: Any],
@@ -796,6 +806,57 @@ public class FilePickerWritablePlugin: NSObject, FlutterPlugin {
       return nil
     }
     return try _childEntry(resolved.url, identifierKey: "identifier", identifierValue: resolved.identifier(withRoot: resolved.currentRoot()))
+  }
+
+  /// Why `identifier` can or cannot be read now, for an app whose own
+  /// open of it failed: the first answer of the grant (a bookmark that no
+  /// longer resolves, a refused scope), the picked root's reachability
+  /// (`volume-absent`: from the sandbox a pulled volume and a removed
+  /// root look alike), the entry (gone, trashed or outside its root is
+  /// `not-found`; a directory `not-a-file`), and a real `open(2)`, closed
+  /// at once. Single-shot scope. A failed open outside those kinds stays
+  /// loud as `errno-<n>`.
+  private func _entryState(identifier: String) throws -> String {
+    let resolved: ResolvedIdentifier
+    do {
+      resolved = try _resolve(identifier)
+    } catch let error as TaxonomyError where error.kind == ErrorKind.permissionLost {
+      return EntryState.permissionLost
+    }
+    guard resolved.scopeURL.startAccessingSecurityScopedResource() else {
+      return EntryState.permissionLost
+    }
+    defer {
+      resolved.scopeURL.stopAccessingSecurityScopedResource()
+    }
+    let rootReachable = { (try? resolved.scopeURL.checkResourceIsReachable()) == true }
+    guard rootReachable() else {
+      return EntryState.volumeAbsent
+    }
+    do {
+      try _requireContained(resolved)
+      try _requireLive(resolved.url)
+    } catch let error as TaxonomyError where error.kind == ErrorKind.notFound {
+      return EntryState.notFound
+    }
+    if (try resolved.url.resourceValues(forKeys: [.isDirectoryKey])).isDirectory == true {
+      return EntryState.notAFile
+    }
+    let fd = open(resolved.url.path, O_RDONLY | O_CLOEXEC)
+    guard fd >= 0 else {
+      let code = errno
+      // Gone since the checks: the volume, or the entry alone.
+      if code == ENOENT {
+        return rootReachable() ? EntryState.notFound : EntryState.volumeAbsent
+      }
+      let error = Self._errnoError(code, "open \(resolved.url.lastPathComponent)")
+      if error.kind == ErrorKind.permissionLost {
+        return EntryState.permissionLost
+      }
+      throw error
+    }
+    close(fd)
+    return EntryState.readable
   }
 
   /// Creates the directory `name` under the directory a live scope token

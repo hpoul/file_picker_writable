@@ -340,6 +340,39 @@ Same bar as Gaps 1 and 2b, evaluated independently:
   as the trash guard: two separate provider-specific guards, each
   making the provider's real state loud. Other providers stay
   `not-found`.
+- Classifying a failed open (RESOLVED 2026-10-02, with the
+  cycling_storyteller encoder session): an app whose own open of an
+  identifier failed (a media decoder handed the content URI) cannot
+  classify the provider's exception itself (the cause does not
+  cross Binder, §5). `entryState(identifier:)` answers with the same
+  guards as the other verbs, as a value rather than an error:
+  `permission-lost`, `volume-absent`, `not-found`, `not-a-file`, or
+  `readable`, first match wins in that order. The volume goes before
+  the entry because a detached volume keeps its grant and its
+  documents read as missing: on an API 34 emulator (exFAT public
+  volume, tree grant) a missing document and a detached volume both
+  arrive as `IllegalArgumentException` from `isChildDocument`, before
+  the provider opens anything, while a never-granted tree and a
+  granted file's plain document URI are `SecurityException`s.
+  `readable` is a real open, closed at once
+  (`openAssetFileDescriptor` on Android, the decoder's call), so it
+  means "opened just now", not "no check fired": the app retries
+  once, and a second failure on a URI the plugin opens is the
+  decoder's or the provider's bug. Gone is proven as for the other
+  verbs; anything unprovable stays loud with the native class and
+  message, the only trace a dead provider leaves. On iOS an
+  unreachable picked root is `volume-absent`, the rule an abort
+  already follows (tree-writes-plan §5). Verified 2026-10-02 on a
+  throwaway API 34 emulator (a vfat virtual disk, tree grant):
+  file `readable`, folder and picked root `not-a-file`, a file
+  deleted a moment ago `not-found`, a tree never granted
+  `permission-lost`; `sm unmount` and then the disk removed
+  `volume-absent`, remount `readable` again; grants released with
+  the disk still gone `permission-lost` (the grant check runs
+  first). The iOS simulator gives the same answers for both picks,
+  plus `not-found` for a symlink out of the root; it does not
+  enforce the sandbox, so a refused scope is not exercised. The
+  loud path (a provider that cannot prove gone) has no run.
 
 ## 10. Recommendation
 
