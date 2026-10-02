@@ -809,54 +809,68 @@ public class FilePickerWritablePlugin: NSObject, FlutterPlugin {
   }
 
   /// Why `identifier` can or cannot be read now, for an app whose own
-  /// open of it failed: the first answer of the grant (a bookmark that no
-  /// longer resolves, a refused scope), the picked root's reachability
-  /// (`volume-absent`: from the sandbox a pulled volume and a removed
-  /// root look alike), the entry (gone, trashed or outside its root is
-  /// `not-found`; a directory `not-a-file`), and a real `open(2)`, closed
-  /// at once. Single-shot scope. A failed open outside those kinds stays
-  /// loud as `errno-<n>`.
+  /// open of it failed: [EntryStateDecision] over this platform's probes.
+  /// The grant is a bookmark that resolves and a scope that starts; the
+  /// picked root's reachability stands in for its volume (from the
+  /// sandbox a pulled volume and a removed root look alike, and a pulled
+  /// drive most likely fails the bookmark first: unmeasured); the entry
+  /// is gone when it leaves its root, sits in the Trash or is provably
+  /// missing. The open reads one byte. Single-shot scope. A failed system
+  /// call outside those answers stays loud as `errno-<n>`.
+  ///
+  /// An iCloud file that is not downloaded is loud before any open: the
+  /// open would download it, maybe gigabytes, on this queue.
   private func _entryState(identifier: String) throws -> String {
-    let resolved: ResolvedIdentifier
-    do {
-      resolved = try _resolve(identifier)
-    } catch let error as TaxonomyError where error.kind == ErrorKind.permissionLost {
-      return EntryState.permissionLost
-    }
-    guard resolved.scopeURL.startAccessingSecurityScopedResource() else {
-      return EntryState.permissionLost
-    }
+    var resolved: ResolvedIdentifier!
+    var started: URL?
     defer {
-      resolved.scopeURL.stopAccessingSecurityScopedResource()
+      started?.stopAccessingSecurityScopedResource()
     }
-    let rootReachable = { (try? resolved.scopeURL.checkResourceIsReachable()) == true }
-    guard rootReachable() else {
-      return EntryState.volumeAbsent
-    }
-    do {
-      try _requireContained(resolved)
-      try _requireLive(resolved.url)
-    } catch let error as TaxonomyError where error.kind == ErrorKind.notFound {
-      return EntryState.notFound
-    }
-    if (try resolved.url.resourceValues(forKeys: [.isDirectoryKey])).isDirectory == true {
-      return EntryState.notAFile
-    }
-    let fd = open(resolved.url.path, O_RDONLY | O_CLOEXEC)
-    guard fd >= 0 else {
-      let code = errno
-      // Gone since the checks: the volume, or the entry alone.
-      if code == ENOENT {
-        return rootReachable() ? EntryState.notFound : EntryState.volumeAbsent
+    let probes = EntryStateDecision.Probes(
+      grant: { [self] in
+        do {
+          resolved = try _resolve(identifier)
+        } catch let error as TaxonomyError where error.kind == ErrorKind.permissionLost {
+          logDebug("entryState: \(error.message)")
+          return false
+        }
+        if resolved.isStale {
+          logDebug("entryState: the bookmark is stale; acquire or listChildren repairs it")
+        }
+        guard resolved.scopeURL.startAccessingSecurityScopedResource() else {
+          return false
+        }
+        started = resolved.scopeURL
+        return true
+      },
+      root: {
+        try EntryStateDecision.reach(resolved.scopeURL)
+      },
+      entry: {
+        let url = resolved.url
+        guard resolved.isContained, !url.standardizedFileURL.pathComponents.contains(".Trash") else {
+          return .gone
+        }
+        return try EntryStateDecision.reach(url)
+      },
+      open: {
+        let url = resolved.url
+        let cloud = try? url.resourceValues(forKeys: [.isUbiquitousItemKey, .ubiquitousItemDownloadingStatusKey])
+        if cloud?.isUbiquitousItem == true && cloud?.ubiquitousItemDownloadingStatus == .notDownloaded {
+          throw NSError(
+            domain: NSCocoaErrorDomain,
+            code: NSUbiquitousFileUnavailableError,
+            userInfo: [NSLocalizedDescriptionKey: "\(url.lastPathComponent) is in iCloud and not downloaded"]
+          )
+        }
+        do {
+          return try EntryStateDecision.probeOpen(url.path)
+        } catch let failure as EntryStateDecision.SyscallFailure {
+          throw Self._errnoError(failure.code, "\(failure.call) \(url.lastPathComponent)")
+        }
       }
-      let error = Self._errnoError(code, "open \(resolved.url.lastPathComponent)")
-      if error.kind == ErrorKind.permissionLost {
-        return EntryState.permissionLost
-      }
-      throw error
-    }
-    close(fd)
-    return EntryState.readable
+    )
+    return try EntryStateDecision.decide(probes)
   }
 
   /// Creates the directory `name` under the directory a live scope token

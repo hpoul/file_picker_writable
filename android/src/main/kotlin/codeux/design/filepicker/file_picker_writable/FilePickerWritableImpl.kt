@@ -29,7 +29,6 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.File
-import java.io.FileNotFoundException
 
 interface ContextProvider : CoroutineScope {
   val activity: Activity?
@@ -728,68 +727,43 @@ class FilePickerWritableImpl(
 
   /**
    * Why [identifier] can or cannot be read now, for an app whose own open
-   * of it failed: the first answer of the grant, the volume, the entry's
-   * row and a real open, as an [EntryState]. The volume goes before the
-   * row because a detached volume keeps its grant and its documents read
-   * as missing. Absence is proven as in [rowBelowRoot]; what cannot be
-   * proven is thrown under the provider exception's own class.
+   * of it failed: [EntryStateDecision] over this platform's probes.
+   * Absence is proven as in [rowBelowRoot]; what cannot be proven is
+   * thrown under the provider exception's own class. Only content URIs
+   * are asked: anything else is loud, never `permission-lost`.
    *
    * The open is `openAssetFileDescriptor`, the call a media decoder makes
-   * (`openFileDescriptor` refuses an asset that is a sub-range), closed at
-   * once: "readable" means it opened, not that no check fired.
+   * (`openFileDescriptor` refuses an asset that is a sub-range), and one
+   * byte is read (a stick whose cached entry opens but whose first block
+   * fails is loud, not readable) before it is closed again.
    */
   @WorkerThread
   fun entryState(identifier: String): String {
     val uri = Uri.parse(identifier)
+    if (uri.scheme != ContentResolver.SCHEME_CONTENT) {
+      throw IllegalArgumentException("Not a content URI: $identifier")
+    }
     val contentResolver = requireContext().contentResolver
-    if (!hasPersistedReadGrant(contentResolver, uri)) {
-      return EntryState.PERMISSION_LOST
-    }
     val documentUri = documentUriFor(uri)
-    if (absentVolume(documentUri) != null) {
-      return EntryState.VOLUME_ABSENT
-    }
-    return try {
-      probeEntry(contentResolver, uri, documentUri)
-    } catch (e: TaxonomyException) {
-      if (e.details["reason"] != "volume-absent") {
-        throw e
-      }
-      EntryState.VOLUME_ABSENT
-    } catch (e: SecurityException) {
-      EntryState.PERMISSION_LOST
-    }
-  }
+    return EntryStateDecision.decide(
+      documentUri.toString(),
+      object : EntryStateDecision.Probes {
+        override fun hasGrant() = hasPersistedReadGrant(contentResolver, uri)
 
-  /** [entryState] past the grant and the volume. */
-  @WorkerThread
-  private fun probeEntry(contentResolver: ContentResolver, uri: Uri, documentUri: Uri): String {
-    val row = entryRow(uri, documentUri) ?: return EntryState.NOT_FOUND
-    if (row.isDirectory) {
-      return EntryState.NOT_A_FILE
-    }
-    val afd = try {
-      onVolume(documentUri) { contentResolver.openAssetFileDescriptor(documentUri, "r") }
-    } catch (e: TaxonomyException) {
-      throw e
-    } catch (e: SecurityException) {
-      throw e
-    } catch (e: Exception) {
-      // Gone since the query, proven again; else the provider's own error.
-      entryRow(uri, documentUri) ?: return EntryState.NOT_FOUND
-      // The error reply would read this one as `not-found`, which the row
-      // just disproved.
-      if (e is FileNotFoundException) {
-        throw IllegalStateException("$documentUri exists but does not open: $e", e)
+        override fun volumeAbsent() = absentVolume(documentUri) != null
+
+        override fun isDirectory() = entryRow(uri, documentUri)?.isDirectory
+
+        override fun openAndRead(): Boolean = onVolume(documentUri) {
+          val afd = contentResolver.openAssetFileDescriptor(documentUri, "r")
+            ?: return@onVolume false
+          // The stream starts at a sub-range's offset, and closes the
+          // descriptor with it.
+          afd.use { it.createInputStream().use { stream -> stream.read() } }
+          true
+        }
       }
-      throw e
-    }
-    if (afd == null) {
-      entryRow(uri, documentUri) ?: return EntryState.NOT_FOUND
-      throw IllegalStateException("The provider opened no descriptor for $documentUri, which still exists")
-    }
-    afd.close()
-    return EntryState.READABLE
+    )
   }
 
   /**

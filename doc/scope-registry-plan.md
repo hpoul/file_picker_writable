@@ -349,20 +349,40 @@ Same bar as Gaps 1 and 2b, evaluated independently:
   `permission-lost`, `volume-absent`, `not-found`, `not-a-file`, or
   `readable`, first match wins in that order. The volume goes before
   the entry because a detached volume keeps its grant and its
-  documents read as missing: on an API 34 emulator (exFAT public
-  volume, tree grant) a missing document and a detached volume both
-  arrive as `IllegalArgumentException` from `isChildDocument`, before
-  the provider opens anything, while a never-granted tree and a
-  granted file's plain document URI are `SecurityException`s.
-  `readable` is a real open, closed at once
-  (`openAssetFileDescriptor` on Android, the decoder's call), so it
-  means "opened just now", not "no check fired": the app retries
-  once, and a second failure on a URI the plugin opens is the
-  decoder's or the provider's bug. Gone is proven as for the other
-  verbs; anything unprovable stays loud with the native class and
-  message, the only trace a dead provider leaves. On iOS an
-  unreachable picked root is `volume-absent`, the rule an abort
-  already follows (tree-writes-plan §5). Verified 2026-10-02 on a
+  documents read as missing: on the encoder session's API 34
+  emulator (an exFAT public volume, tree grant) a missing document
+  and a detached volume both arrive as `IllegalArgumentException`
+  from `isChildDocument`, before the provider opens anything, while a
+  never-granted tree and a granted file's plain document URI are
+  `SecurityException`s. `readable` is a real open that reads one byte
+  (`openAssetFileDescriptor` on Android, the decoder's call; `open(2)`
+  and `read(2)` on iOS), so a stick whose cached entry opens but
+  whose first block fails is loud, not readable. Even so it says how
+  the open stands now, never why an earlier one failed (#75 review
+  M1): storage can come back in between, a later block can fail, and
+  on iOS a file provider can fetch the file for the probe. The app
+  retries once, and on a second failure reports "cannot be read right
+  now" with the native error, never "corrupt". The decision itself is
+  a pure function over injected probes on both platforms
+  (`EntryStateDecision`, unit-tested for its order and its error
+  mapping). Gone is proven as for the other verbs; anything
+  unprovable stays loud with the native class and message, the only
+  trace a dead provider leaves. Two holes the plugin cannot close:
+  ExternalStorageProvider reports a file it cannot reach on a
+  failing stick as missing (`File.exists()` behind "Missing file
+  for"), so there `not-found` can mean an unreadable stick; and on
+  iOS a not-downloaded iCloud file is loud rather than fetched, but
+  another File Provider's dataless file is fetched by the open. On
+  iOS an unreachable picked root is `volume-absent`, the rule an
+  abort already follows (tree-writes-plan §5), and only a provably
+  missing file is gone: a failing drive's EIO or ENOTCONN is loud.
+  iOS `volume-absent` for a pulled drive is NOT exercised: the
+  bookmark most likely fails to resolve first, which reads as
+  `permission-lost` ("pick again" where "plug the drive in" is the
+  fix). Classifying a failed resolution by the bookmark's volume
+  (`volumeUUIDStringKey` from the bookmark data against the mounted
+  volumes) waits for a device run with a drive; iOS is not in the
+  consumer's use case. Verified 2026-10-02 on a
   throwaway API 34 emulator (a vfat virtual disk, tree grant):
   file `readable`, folder and picked root `not-a-file`, a file
   deleted a moment ago `not-found`, a tree never granted
@@ -371,8 +391,12 @@ Same bar as Gaps 1 and 2b, evaluated independently:
   the disk still gone `permission-lost` (the grant check runs
   first). The iOS simulator gives the same answers for both picks,
   plus `not-found` for a symlink out of the root; it does not
-  enforce the sandbox, so a refused scope is not exercised. The
-  loud path (a provider that cannot prove gone) has no run.
+  enforce the sandbox, so a refused scope is not exercised. After
+  the #75 review (one byte read, the decision extracted) a second
+  throwaway AVD and the simulator gave the same answers again (the
+  AVD's mounted and unmounted cases only). The loud path (a provider
+  that cannot prove gone, a read that fails) has no device run; the
+  unit tests pin it.
 
 ## 10. Recommendation
 

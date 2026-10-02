@@ -47,10 +47,11 @@
     app whose own open of it failed (a media decoder handed a content
     URI): an `EntryState` of `permissionLost`, `volumeAbsent`,
     `notFound`, `notAFile` or `readable`, checked in that order (a
-    detached volume keeps its grant, so it never reads as lost), with
-    `readable` meaning the plugin opened it just now. Gone is proven,
-    never guessed: what the platform cannot tell apart stays loud, with
-    the native error's class and message in the details.
+    detached volume alone never reads as lost), with `readable` meaning
+    the plugin opened it and read a byte just now: how the open stands
+    now, not why an earlier one failed. Gone is proven, never guessed:
+    what the platform cannot tell apart stays loud, with the native
+    error's class and message in the details.
   * Large-file reads without a temp copy (`doc/large-file-reads-plan.md`):
     `openRead(scope:)` opens the file an `AcquiredScope` names and hands
     back a `ReadSession` that owns a native file descriptor (`seekable`,

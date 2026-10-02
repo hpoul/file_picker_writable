@@ -14,15 +14,6 @@ enum ErrorKind {
   static let invalidName = "invalid-name"
 }
 
-/// `entryState`'s answers, as Dart's `EntryState` reads them.
-enum EntryState {
-  static let readable = "readable"
-  static let volumeAbsent = "volume-absent"
-  static let permissionLost = "permission-lost"
-  static let notFound = "not-found"
-  static let notAFile = "not-a-file"
-}
-
 /// A failure that belongs to the taxonomy, raised as `kind`.
 struct TaxonomyError: Error {
   let kind: String

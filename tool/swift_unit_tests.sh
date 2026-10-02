@@ -26,3 +26,9 @@ swiftc -parse-as-library \
   ios/test/FileIdentityTests.swift \
   -o "$out/file_identity_tests"
 "$out/file_identity_tests"
+
+swiftc -parse-as-library \
+  ios/file_picker_writable/Sources/file_picker_writable/EntryStateDecision.swift \
+  ios/test/EntryStateDecisionTests.swift \
+  -o "$out/entry_state_decision_tests"
+"$out/entry_state_decision_tests"
