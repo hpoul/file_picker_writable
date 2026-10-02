@@ -726,6 +726,62 @@ class FilePickerWritableImpl(
   }
 
   /**
+   * Why [identifier] can or cannot be read now, for an app whose own open
+   * of it failed: [EntryStateDecision] over this platform's probes.
+   * Absence is proven as in [rowBelowRoot]; what cannot be proven is
+   * thrown under the provider exception's own class. Only content URIs
+   * are asked: anything else is loud, never `permission-lost`.
+   *
+   * The open is `openAssetFileDescriptor`, the call a media decoder makes
+   * (`openFileDescriptor` refuses an asset that is a sub-range), and one
+   * byte is read (a stick whose cached entry opens but whose first block
+   * fails is loud, not readable) before it is closed again.
+   */
+  @WorkerThread
+  fun entryState(identifier: String): String {
+    val uri = Uri.parse(identifier)
+    if (uri.scheme != ContentResolver.SCHEME_CONTENT) {
+      throw IllegalArgumentException("Not a content URI: $identifier")
+    }
+    val contentResolver = requireContext().contentResolver
+    val documentUri = documentUriFor(uri)
+    return EntryStateDecision.decide(
+      documentUri.toString(),
+      object : EntryStateDecision.Probes {
+        override fun hasGrant() = hasPersistedReadGrant(contentResolver, uri)
+
+        override fun volumeAbsent() = absentVolume(documentUri) != null
+
+        override fun isDirectory() = entryRow(uri, documentUri)?.isDirectory
+
+        override fun openAndRead(): Int? = onVolume(documentUri) {
+          val afd = contentResolver.openAssetFileDescriptor(documentUri, "r")
+            ?: return@onVolume null
+          // The stream starts at a sub-range's offset, and closes the
+          // descriptor with it.
+          val read = afd.use { it.createInputStream().use { stream -> stream.read() } }
+          plugin.logDebug("entryState: read ${if (read < 0) "end of file" else "1 byte"}")
+          read
+        }
+      }
+    )
+  }
+
+  /**
+   * [documentUri]'s row, or null when it is provably gone: below a tree,
+   * [rowBelowRoot]'s proof. A document picked on its own has no tree to
+   * prove that against, so a missing row there is loud.
+   */
+  @WorkerThread
+  private fun entryRow(uri: Uri, documentUri: Uri): DocumentRow? {
+    if (DocumentsContract.isTreeUri(uri)) {
+      return rowBelowRoot(documentUri)
+    }
+    return queryRow(documentUri)
+      ?: throw IllegalStateException("Cannot tell whether $documentUri is gone: the provider returned no row")
+  }
+
+  /**
    * Creates the directory [name] under the directory a live scope token
    * names (tree-writes-plan §5). The name is looked up first, so a taken
    * one is `already-exists` without trying; a stored name that differs

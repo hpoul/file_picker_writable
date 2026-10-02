@@ -250,6 +250,16 @@ public class FilePickerWritablePlugin: NSObject, FlutterPlugin {
         _offMain(result) { [self] in
           try _statEntry(identifier: identifier)
         }
+      case "entryState":
+        guard
+          let args = call.arguments as? [String: Any],
+          let identifier = args["identifier"] as? String
+        else {
+          throw FilePickerError.invalidArguments(message: "Expected 'identifier'")
+        }
+        _offMain(result) { [self] in
+          try _entryState(identifier: identifier)
+        }
       case "createDirectory":
         guard
           let args = call.arguments as? [String: Any],
@@ -798,6 +808,71 @@ public class FilePickerWritablePlugin: NSObject, FlutterPlugin {
     return try _childEntry(resolved.url, identifierKey: "identifier", identifierValue: resolved.identifier(withRoot: resolved.currentRoot()))
   }
 
+  /// Why `identifier` can or cannot be read now, for an app whose own
+  /// open of it failed: [EntryStateDecision] over this platform's probes.
+  /// The grant is a bookmark that resolves and a scope that starts; the
+  /// picked root's reachability stands in for its volume (from the
+  /// sandbox a pulled volume and a removed root look alike, and a pulled
+  /// drive most likely fails the bookmark first: unmeasured); the entry
+  /// is gone when it leaves its root, sits in the Trash or is provably
+  /// missing. The open reads up to one byte. Single-shot scope. A failed system
+  /// call outside those answers stays loud as `errno-<n>`.
+  ///
+  /// An iCloud file that is not downloaded is loud before any open: the
+  /// open would download it, maybe gigabytes, on this queue.
+  private func _entryState(identifier: String) throws -> String {
+    var resolved: ResolvedIdentifier!
+    var started: URL?
+    defer {
+      started?.stopAccessingSecurityScopedResource()
+    }
+    let probes = EntryStateDecision.Probes(
+      grant: { [self] in
+        do {
+          resolved = try _resolve(identifier)
+        } catch let error as TaxonomyError where error.kind == ErrorKind.permissionLost {
+          logDebug("entryState: \(error.message)")
+          return false
+        }
+        if resolved.isStale {
+          logDebug("entryState: the bookmark is stale; acquire or listChildren repairs it")
+        }
+        guard resolved.scopeURL.startAccessingSecurityScopedResource() else {
+          return false
+        }
+        started = resolved.scopeURL
+        return true
+      },
+      root: {
+        try EntryStateDecision.reach(resolved.scopeURL)
+      },
+      entry: {
+        let url = resolved.url
+        guard resolved.isContained, !Self._isTrashed(url) else {
+          return .gone
+        }
+        return try EntryStateDecision.reach(url)
+      },
+      open: {
+        let url = resolved.url
+        let cloud = try? url.resourceValues(forKeys: [.isUbiquitousItemKey, .ubiquitousItemDownloadingStatusKey])
+        if cloud?.isUbiquitousItem == true && cloud?.ubiquitousItemDownloadingStatus == .notDownloaded {
+          throw NSError(
+            domain: NSCocoaErrorDomain,
+            code: NSUbiquitousFileUnavailableError,
+            userInfo: [NSLocalizedDescriptionKey: "\(url.lastPathComponent) is in iCloud and not downloaded"]
+          )
+        }
+        do {
+          return try EntryStateDecision.probeOpen(url.path)
+        } catch let failure as EntryStateDecision.SyscallFailure {
+          throw Self._errnoError(failure.code, "\(failure.call) \(url.lastPathComponent)")
+        }
+      }
+    )
+    return try EntryStateDecision.decide(probes)
+  }
+
   /// Creates the directory `name` under the directory a live scope token
   /// names (tree-writes-plan §5), under that token's held scope. Nothing
   /// is created on a taken name, so there is no residue to clean.
@@ -835,7 +910,7 @@ public class FilePickerWritablePlugin: NSObject, FlutterPlugin {
     let url = resolved.url
     // Gone, or gone into the Trash with its root: either way deleted.
     guard (try? url.checkResourceIsReachable()) == true || TreeWalk.isSymlink(url),
-      !url.standardizedFileURL.pathComponents.contains(".Trash")
+      !Self._isTrashed(url)
     else {
       return
     }
@@ -1083,17 +1158,21 @@ public class FilePickerWritablePlugin: NSObject, FlutterPlugin {
     guard (try? url.checkResourceIsReachable()) == true else {
       throw TaxonomyError(kind: ErrorKind.notFound, message: "Nothing at \(url.path)")
     }
-    // A Files delete is a move into the provider's `.Trash`, and the
-    // bookmark follows it there. Deleted must read as gone, never as a
-    // live folder the app would list and write into. No public resource
-    // key reports "in the trash", so this matches a whole path component.
-    if url.standardizedFileURL.pathComponents.contains(".Trash") {
+    if Self._isTrashed(url) {
       throw TaxonomyError(
         kind: ErrorKind.notFound,
         message: "\(url.lastPathComponent) is in the Trash",
         details: ["reason": "trashed"]
       )
     }
+  }
+
+  /// A Files delete is a move into the provider's `.Trash`, and the
+  /// bookmark follows it there. Deleted must read as gone, never as a live
+  /// folder the app would list and write into. No public resource key
+  /// reports "in the trash", so this matches a whole path component.
+  private static func _isTrashed(_ url: URL) -> Bool {
+    url.standardizedFileURL.pathComponents.contains(".Trash")
   }
 
   /// Runs `work` off main and replies on main, with taxonomy errors.
