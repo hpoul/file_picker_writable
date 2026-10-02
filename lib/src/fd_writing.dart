@@ -19,12 +19,17 @@ const _rootIsolateWriteBudget = 1 << 20;
 /// with [FdWriter.fromHandoff]. Exactly one of the two, and at most one
 /// writer per session. A crash before commit or abort leaves the partial
 /// file behind: sweep it by name ([identifier] is its identifier).
+///
+/// Check [canFsync] where durability matters: a pipe-backed session cannot
+/// fsync, and its commit skips the step silently.
 @experimental
 class WriteSession {
   WriteSession._(
     this.fd,
     this.identifier,
-    this._scopeToken, {
+    this._scopeToken,
+    this._fileId,
+    this._openedAt, {
     required this.canFsync,
   });
 
@@ -39,6 +44,14 @@ class WriteSession {
   final bool canFsync;
 
   final String _scopeToken;
+
+  /// What makes an abort delete only this session's file: the file's
+  /// identity where the platform has one (iOS: device and inode).
+  final String? _fileId;
+
+  /// When the file was created (ms since the epoch), for the same check
+  /// where there is no identity (Android).
+  final int _openedAt;
 
   int _bytesWritten = 0;
   bool _handedOff = false;
@@ -59,7 +72,8 @@ class WriteSession {
   /// After a kill, the helper's finalizer has closed the descriptor: abort
   /// with `abortWrite(session, closeFd: false)`, which only deletes the
   /// partial by [identifier] and is legal on this dead copy. Never commit
-  /// after a kill.
+  /// after a kill, and never abort a session whose commit may have landed
+  /// unacknowledged: the abort would delete the committed file.
   WriteHandoff handoff() {
     _requireOwned('handoff');
     if (_writer != null) {
@@ -80,6 +94,8 @@ class WriteSession {
       canFsync: canFsync,
       scopeToken: _scopeToken,
       rootToken: rootToken,
+      fileId: _fileId,
+      openedAt: _openedAt,
     );
   }
 
@@ -94,7 +110,8 @@ class WriteSession {
 
 /// The sendable form of a [WriteSession], made only by
 /// [WriteSession.handoff]. Build the helper's writer with
-/// [FdWriter.fromHandoff], once.
+/// [FdWriter.fromHandoff], once. Its fields serve the writer; apps pass
+/// the record on and read none of them except [identifier].
 @experimental
 class WriteHandoff {
   const WriteHandoff._({
@@ -103,6 +120,8 @@ class WriteHandoff {
     required this.canFsync,
     required this.scopeToken,
     required this.rootToken,
+    required this.fileId,
+    required this.openedAt,
   });
 
   final int fd;
@@ -110,18 +129,26 @@ class WriteHandoff {
   final bool canFsync;
 
   /// The [AcquiredScope.id] the session was opened under, checked at
-  /// [WriteSession.handoff] and not again in the helper.
+  /// [WriteSession.handoff] and not again in the helper. Not for apps.
   final String scopeToken;
 
   /// Lets the helper's writer reach the plugin's channel for the stat or
-  /// delete that ends the session ([FdWriter.closeWrite], [FdWriter.abort]).
+  /// delete that ends the session ([FdWriter.closeWrite],
+  /// [FdWriter.abort]). Not for apps.
   final RootIsolateToken rootToken;
+
+  /// The file's identity for the abort check. Not for apps.
+  final String? fileId;
+
+  /// When the file was created, for the abort check. Not for apps.
+  final int openedAt;
 }
 
 /// Writes a session's descriptor with FFI, in the isolate that produces the
 /// bytes. Owns the descriptor and one staging buffer of [bufferLength]
 /// bytes (Dart heap bytes cannot reach FFI directly, so each chunk is
-/// copied there once); a NativeFinalizer closes the descriptor if the
+/// copied there once: memory is bounded by [bufferLength] plus the
+/// caller's own chunk); a NativeFinalizer closes the descriptor if the
 /// writer is collected or its isolate dies first.
 ///
 /// In a helper, the writer's own [closeWrite] and [abort] call the
@@ -133,12 +160,13 @@ class WriteHandoff {
 /// a debug-mode assertion asks for a helper isolate instead.
 @experimental
 class FdWriter {
-  /// Same-isolate path. Checks the scope is acquired now and at
-  /// [closeWrite].
+  /// Same-isolate path. Checks the scope is acquired now.
   FdWriter.fromSession(WriteSession session, {int bufferLength = 1 << 20})
     : this._(
         session.fd,
         session.identifier,
+        session._fileId,
+        session._openedAt,
         canFsync: session.canFsync,
         session: session,
         scopeToken: session._scopeToken,
@@ -152,6 +180,8 @@ class FdWriter {
     : this._(
         handoff.fd,
         handoff.identifier,
+        handoff.fileId,
+        handoff.openedAt,
         canFsync: handoff.canFsync,
         session: null,
         scopeToken: null,
@@ -161,14 +191,15 @@ class FdWriter {
 
   FdWriter._(
     int fd,
-    this.identifier, {
+    this.identifier,
+    this._fileId,
+    this._openedAt, {
     required this.canFsync,
     required WriteSession? session,
     required String? scopeToken,
     required this.bufferLength,
     RootIsolateToken? rootToken,
-  }) : _session = session,
-       _scopeToken = scopeToken {
+  }) : _session = session {
     if (bufferLength <= 0) {
       throw ArgumentError.value(
         bufferLength,
@@ -200,13 +231,15 @@ class FdWriter {
   final bool canFsync;
   final int bufferLength;
   final WriteSession? _session;
-  final String? _scopeToken;
+  final String? _fileId;
+  final int _openedAt;
   late final FdHandle _handle;
 
   int _total = 0;
   bool _closed = false;
   bool _aborted = false;
   ChildEntry? _committed;
+  bool? _lastSyncWasFull;
 
   /// Whether this writer lives on the root isolate, asked once.
   late final bool _onRootIsolate = RootIsolateToken.instance != null;
@@ -214,18 +247,26 @@ class FdWriter {
   /// Bytes written and acknowledged so far.
   int get bytesWritten => _total;
 
+  /// After a commit with fsync: whether the drive was told to write its
+  /// cache through (Apple's `F_FULLFSYNC`) rather than plain fsync. For the
+  /// device checks.
+  @visibleForTesting
+  bool? get lastSyncWasFull => _lastSyncWasFull;
+
   /// Writes all of [bytes] after what was written so far and returns the
   /// new acknowledged total: positional on a file (no shared offset), in
   /// order on a pipe. Chunks longer than [bufferLength] are staged and
-  /// written in parts; there is no size cap.
+  /// written in parts; there is no size cap. A full non-blocking pipe is
+  /// waited on.
   ///
-  /// A volume that accepts fewer bytes than offered (a full FUSE volume
-  /// writes 0 instead of failing) is loud as `errno-28` (ENOSPC) with
-  /// `synthesized: true` in the details, never a silent short write.
-  /// Other errors are as for [FdReader.readChunk]: `permission-lost` (EIO,
-  /// ENXIO, ENODEV; the writer closes its descriptor at once, and the
-  /// partial is left for [abort] or the orphan sweep), `session-closed`,
-  /// `errno-<n>`.
+  /// A volume that accepts no more bytes without failing (a write that
+  /// returns 0) is loud as `errno-28` (ENOSPC) with `synthesized: true` in
+  /// the details, never a silent short write; that a full volume answers
+  /// this way is the assumption, unmeasured. Errors keep [bytesWritten]
+  /// exact: bytes that landed before an error are counted. Otherwise as
+  /// for [FdReader.readChunk]: `permission-lost` (EIO, ENXIO, ENODEV; the
+  /// writer closes its descriptor at once, and the partial is left for
+  /// [abort] or the orphan sweep), `session-closed`, `errno-<n>`.
   int writeChunk(Uint8List bytes) {
     if (_closed) {
       throw PlatformException(
@@ -238,27 +279,31 @@ class FdWriter {
       final remaining = bytes.length - offset;
       final length = remaining < bufferLength ? remaining : bufferLength;
       _handle.buffer.setRange(0, length, bytes, offset);
-      final written = _check(
-        canFsync ? _handle.pwrite(_total, length) : _handle.write(length),
-      );
-      if (written < length) {
+      var done = 0;
+      while (done < length) {
+        final written = _check(
+          canFsync
+              ? _handle.pwrite(_total, length - done, from: done)
+              : _handle.write(length - done, from: done),
+        );
+        if (written == 0) {
+          throw PlatformException(
+            code: 'errno-28',
+            message:
+                'The volume accepted no more bytes after $_total: treated as full',
+            details: <String, Object?>{
+              'domain': 'errno',
+              'code': 28,
+              'synthesized': true,
+            },
+          );
+        }
+        done += written;
         _total += written;
         _session?._bytesWritten = _total;
-        throw PlatformException(
-          code: 'errno-28',
-          message:
-              'The volume accepted $written of $length bytes: treated as full',
-          details: <String, Object?>{
-            'domain': 'errno',
-            'code': 28,
-            'synthesized': true,
-          },
-        );
       }
-      _total += written;
       offset += length;
     }
-    _session?._bytesWritten = _total;
     assert(_withinRootBudget());
     return _total;
   }
@@ -285,15 +330,24 @@ class FdWriter {
     throw error;
   }
 
-  /// Commits the file: fsyncs it (when [fsync] and [canFsync]), closes the
-  /// descriptor, and returns the file's entry as stored. Idempotent: a
-  /// second call returns the same entry. `fsync` defaults to true; pass
-  /// false only where something else (verify-after-copy) is the guarantee.
+  /// Commits the file: fsyncs it (when [fsync] and [canFsync]; on Apple a
+  /// full flush through the drive's cache where the volume supports it),
+  /// closes the descriptor, and returns the file's entry as stored.
+  /// Idempotent: a second call returns the same entry. `fsync` defaults
+  /// to true; pass false only where something else (verify-after-copy) is
+  /// the guarantee.
   ///
   /// An fsync or close that fails still releases the descriptor, then
-  /// throws: the file stays as the partial it is, for [abort]. Built from
-  /// a session, a scope released meanwhile is `scope-closed`, also after
-  /// the release. After [abort] this is `session-closed`.
+  /// throws: the file stays as the partial it is, for [abort]. A stored
+  /// size that differs from [bytesWritten] (someone else wrote to the file
+  /// meanwhile) is loud `size-mismatch`, the file left alone; a pipe-backed
+  /// session cannot make this check. A scope released meanwhile does not
+  /// fail a commit: the bytes are down. After [abort] this is
+  /// `session-closed`.
+  ///
+  /// On Android, the system's media scan ran when the file was created,
+  /// empty: a finished media file may not show in gallery apps until it is
+  /// scanned again.
   Future<ChildEntry> closeWrite({bool fsync = true}) async {
     final committed = _committed;
     if (committed != null) {
@@ -307,25 +361,29 @@ class FdWriter {
     }
     final synced = fsync && canFsync ? _handle.fsync() : 0;
     final closed = _release();
-    final token = _scopeToken;
-    if (token != null) {
-      FilePickerWritable()._requireScopeLive(token);
-    }
     if (synced < 0) {
       throw _errnoException(-synced, 'fsync');
     }
+    _lastSyncWasFull = fsync && canFsync ? synced == 1 : null;
     if (closed < 0) {
       throw _errnoException(-closed, 'close');
     }
     final entry = await _statEntry(identifier);
+    _requireStoredSize(entry, _total, canFsync);
     _committed = entry;
     return entry;
   }
 
   /// Gives the file up: closes the descriptor and deletes the partial.
-  /// Idempotent; a partial that is already gone is success. A committed
-  /// file is not aborted ([StateError]): delete it with
-  /// [FilePickerWritable.deleteEntry] when that is meant.
+  /// Idempotent; a partial that is already gone is success.
+  ///
+  /// The delete is by name, so it checks first that the file there is
+  /// still this session's: on iOS the same device and inode; on Android a
+  /// file of [bytesWritten] bytes, last modified no earlier than its
+  /// creation. Anything else (the user renamed it away and another file
+  /// took the name) is `not-found` with `reason: replaced`, and nothing is
+  /// deleted. A committed file is not aborted ([StateError]): delete it
+  /// with [FilePickerWritable.deleteEntry] when that is meant.
   Future<void> abort() async {
     if (_committed != null) {
       throw StateError(
@@ -338,13 +396,28 @@ class FdWriter {
     }
     _aborted = true;
     _session?._aborted = true;
-    await _deletePartial(identifier);
+    await _abortPartial(identifier, _fileId, _total, _openedAt);
   }
 
   int _release() {
     _closed = true;
     _session?._closed = true;
     return _handle.close();
+  }
+}
+
+/// `size-mismatch` unless a committed file holds exactly the bytes its
+/// session wrote (pipes cannot tell).
+void _requireStoredSize(ChildEntry entry, int written, bool canFsync) {
+  final size = entry.size;
+  if (canFsync && size != null && size != written) {
+    throw PlatformException(
+      code: 'size-mismatch',
+      message:
+          'The file holds $size bytes, but this session wrote $written: '
+          'something else wrote to it',
+      details: <String, Object?>{'size': size, 'written': written},
+    );
   }
 }
 
@@ -363,9 +436,17 @@ Future<ChildEntry> _statEntry(String identifier) async {
   return ChildEntry._fromResult(result);
 }
 
-/// Deletes an aborted partial, from either isolate; gone is success.
-Future<void> _deletePartial(String identifier) =>
-    FilePickerWritable._channel.invokeMethod<void>('deleteEntry', {
-      'identifier': identifier,
-      'recursive': false,
-    });
+/// Deletes an aborted partial, from either isolate, only while it is still
+/// the session's own file; gone is success. [bytesWritten] is null where
+/// it is unknown (the root's copy after a kill).
+Future<void> _abortPartial(
+  String identifier,
+  String? fileId,
+  int? bytesWritten,
+  int openedAt,
+) => FilePickerWritable._channel.invokeMethod<void>('abortPartial', {
+  'identifier': identifier,
+  'fileId': fileId,
+  'bytesWritten': bytesWritten,
+  'openedAt': openedAt,
+});

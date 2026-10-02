@@ -227,6 +227,18 @@ public class FilePickerWritablePlugin: NSObject, FlutterPlugin {
         _offMain(result) { [self] in
           try _openWrite(token: token, name: name)
         }
+      case "abortPartial":
+        guard
+          let args = call.arguments as? [String: Any],
+          let identifier = args["identifier"] as? String
+        else {
+          throw FilePickerError.invalidArguments(message: "Expected 'identifier'")
+        }
+        let fileId = args["fileId"] as? String
+        _offMain(result) { [self] in
+          try _abortPartial(identifier: identifier, fileId: fileId)
+          return nil
+        }
       case "statEntry":
         guard
           let args = call.arguments as? [String: Any],
@@ -581,14 +593,40 @@ public class FilePickerWritablePlugin: NSObject, FlutterPlugin {
 
   /// Creates the file `name` under the directory a live scope token names
   /// and hands a write descriptor to Dart (tree-writes-plan §5), under the
-  /// token's held scope. Exclusive: `O_CREAT | O_EXCL` fails on any taken
-  /// name, a symlink included (never followed), so there is no check-then-
-  /// create window and no residue. Never writes a byte.
+  /// token's held scope. Never writes a byte.
+  ///
+  /// The create is relative to a descriptor on the parent directory whose
+  /// kernel path (`F_GETPATH`) is checked to lie in the root, so a parent
+  /// component swapped for a symlink after the scope check cannot redirect
+  /// it; `openat` with `O_CREAT | O_EXCL | O_NOFOLLOW` then fails on any
+  /// taken name, a symlink included. The stored name is verified the same
+  /// way (a volume such as exFAT may strip or refuse characters): a
+  /// mismatch removes the file just made, provably ours by device and
+  /// inode, and is `invalid-name`. The result carries the file's device
+  /// and inode, so an abort deletes only this file.
   private func _openWrite(token: String, name: String) throws -> [String: Any] {
     try _requireLeaf(name)
     let parent = try _requireDirectoryScope(token)
     let child = parent.child(name)
-    let fd = open(child.url.path, O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, 0o644)
+    let directory = open(parent.url.path, O_RDONLY | O_DIRECTORY | O_CLOEXEC)
+    guard directory >= 0 else {
+      throw Self._errnoError(errno, "open \(parent.url.lastPathComponent)")
+    }
+    defer {
+      close(directory)
+    }
+    guard
+      let root = TreeWalk.realPath(parent.scopeURL),
+      let directoryPath = Self._kernelPath(directory),
+      directoryPath == root || (root != "/" && directoryPath.hasPrefix(root + "/"))
+    else {
+      throw TaxonomyError(
+        kind: ErrorKind.notFound,
+        message: "\(parent.url.lastPathComponent) no longer resolves inside its root",
+        details: ["reason": "outside-root"]
+      )
+    }
+    let fd = openat(directory, name, O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW, 0o644)
     guard fd >= 0 else {
       let code = errno
       if code == EEXIST {
@@ -598,10 +636,24 @@ public class FilePickerWritablePlugin: NSObject, FlutterPlugin {
     }
     var info = stat()
     guard fstat(fd, &info) == 0 else {
+      // Without its identity the file cannot be proven ours: leave it.
       let error = Self._errnoError(errno, "fstat \(name)")
       close(fd)
-      unlink(child.url.path)
       throw error
+    }
+    if let stored = Self._kernelPath(fd), URL(fileURLWithPath: stored).lastPathComponent != name {
+      // Ours by identity: remove it, then report the name the volume made.
+      var there = stat()
+      if lstat(stored, &there) == 0, there.st_dev == info.st_dev, there.st_ino == info.st_ino {
+        unlink(stored)
+      }
+      close(fd)
+      let actual = URL(fileURLWithPath: stored).lastPathComponent
+      throw TaxonomyError(
+        kind: ErrorKind.invalidName,
+        message: "The volume stored \"\(name)\" as \"\(actual)\"",
+        details: ["requested": name, "actual": actual]
+      )
     }
     let isRegular = (info.st_mode & S_IFMT) == S_IFREG
     logDebug("openWrite: fd \(fd), regular \(isRegular)")
@@ -609,7 +661,72 @@ public class FilePickerWritablePlugin: NSObject, FlutterPlugin {
       "fd": Int(fd),
       "identifier": child.identifier(withRoot: try child.currentRoot()),
       "canFsync": isRegular,
+      "fileId": "\(info.st_dev):\(info.st_ino)",
     ]
+  }
+
+  /// The kernel's path for an open descriptor (`F_GETPATH`), nil when it
+  /// cannot tell.
+  private static func _kernelPath(_ fd: Int32) -> String? {
+    var buffer = [CChar](repeating: 0, count: Int(MAXPATHLEN))
+    guard fcntl(fd, F_GETPATH, &buffer) != -1 else {
+      return nil
+    }
+    return String(cString: buffer)
+  }
+
+  /// Deletes an aborted write session's partial, only while the file there
+  /// is still the one the session created: the same device and inode, a
+  /// regular file. Anything else (renamed away, and another file took the
+  /// name) is `not-found` with `reason: replaced`, nothing deleted. Gone is
+  /// success, but only while the root is reachable: a pulled volume is
+  /// `permission-lost`, never "gone". Single-shot scope.
+  private func _abortPartial(identifier: String, fileId: String?) throws {
+    let resolved = try _resolve(identifier)
+    try _requireBelowRoot(resolved)
+    guard resolved.scopeURL.startAccessingSecurityScopedResource() else {
+      throw TaxonomyError(kind: ErrorKind.permissionLost, message: "startAccessingSecurityScopedResource refused for \(resolved.scopeURL)")
+    }
+    defer {
+      resolved.scopeURL.stopAccessingSecurityScopedResource()
+    }
+    try _requireContained(resolved)
+    try _requireRootReachable(resolved)
+    var there = stat()
+    guard lstat(resolved.url.path, &there) == 0 else {
+      let code = errno
+      if code == ENOENT {
+        return
+      }
+      throw Self._errnoError(code, "lstat \(resolved.url.lastPathComponent)")
+    }
+    let isRegular = (there.st_mode & S_IFMT) == S_IFREG
+    guard isRegular, let fileId = fileId, fileId == "\(there.st_dev):\(there.st_ino)" else {
+      throw TaxonomyError(
+        kind: ErrorKind.notFound,
+        message: "\(resolved.url.lastPathComponent) is no longer this session's file: not deleted",
+        details: ["reason": "replaced"]
+      )
+    }
+    guard unlink(resolved.url.path) == 0 else {
+      let code = errno
+      if code == ENOENT {
+        return
+      }
+      throw Self._errnoError(code, "unlink \(resolved.url.lastPathComponent)")
+    }
+  }
+
+  /// `permission-lost` (`volume-absent`) when the picked root itself cannot
+  /// be reached: an entry that is missing there is not proven gone.
+  private func _requireRootReachable(_ resolved: ResolvedIdentifier) throws {
+    guard (try? resolved.scopeURL.checkResourceIsReachable()) == true else {
+      throw TaxonomyError(
+        kind: ErrorKind.permissionLost,
+        message: "\(resolved.scopeURL.lastPathComponent) cannot be reached",
+        details: ["reason": "volume-absent"]
+      )
+    }
   }
 
   /// The entry `identifier` names, or nil when it is gone: the stat a
@@ -661,6 +778,8 @@ public class FilePickerWritablePlugin: NSObject, FlutterPlugin {
       resolved.scopeURL.stopAccessingSecurityScopedResource()
     }
     try _requireContained(resolved)
+    // "Gone" below needs a reachable root: a pulled volume is not deleted.
+    try _requireRootReachable(resolved)
     let url = resolved.url
     // Gone, or gone into the Trash with its root: either way deleted.
     guard (try? url.checkResourceIsReachable()) == true || TreeWalk.isSymlink(url),

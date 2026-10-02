@@ -32,6 +32,7 @@ import 'dart:isolate';
 
 import 'package:file_picker_writable/file_picker_writable.dart';
 import 'package:flutter/foundation.dart';
+import 'package:flutter/services.dart';
 import 'package:logging/logging.dart';
 import 'package:path_provider/path_provider.dart';
 
@@ -415,7 +416,48 @@ Future<void> _writeChecks(
         final writer = FdWriter.fromSession(session);
         writer.writeChunk(Uint8List.fromList(utf8.encode('{"written":true}')));
         final entry = await writer.closeWrite();
-        return '${entry.name}, ${entry.size} bytes';
+        // ignore: invalid_use_of_visible_for_testing_member
+        final full = writer.lastSyncWasFull;
+        return '${entry.name}, ${entry.size} bytes, '
+            'fsync ${full == true ? 'full (F_FULLFSYNC)' : 'plain'}';
+      });
+      await step('write: abort after the partial was replaced', () async {
+        final session = await plugin.openWrite(
+          scope: wScope,
+          name: 'swap.writing',
+        );
+        final writer = FdWriter.fromSession(session)..writeChunk(Uint8List(10));
+        // The partial is renamed away, and another file takes its name.
+        final partial = await plugin.lookupChild(
+          identifier: w.identifier,
+          name: 'swap.writing',
+        );
+        await plugin.moveEntry(
+          identifier: partial!.identifier,
+          sourceParent: wScope,
+          newParent: wScope,
+          newName: 'moved-away',
+        );
+        final other = await plugin.openWrite(
+          scope: wScope,
+          name: 'swap.writing',
+        );
+        await (FdWriter.fromSession(
+          other,
+        )..writeChunk(Uint8List(20))).closeWrite();
+        String outcome;
+        try {
+          await writer.abort();
+          outcome = 'abort succeeded';
+        } on PlatformException catch (e) {
+          outcome = 'abort threw ${e.code} ${e.details}';
+        }
+        final newcomer = await plugin.lookupChild(
+          identifier: w.identifier,
+          name: 'swap.writing',
+        );
+        return '$outcome; the newcomer is '
+            '${newcomer == null ? 'GONE' : 'kept (${newcomer.size} bytes)'}';
       });
       await step(
         'write: small.json again (taken)',

@@ -137,7 +137,7 @@ void main() {
         case 'statEntry':
           final path = args!['identifier']! as String;
           return File(path).existsSync() ? entryFor(path) : null;
-        case 'deleteEntry':
+        case 'abortPartial':
           final file = File(args!['identifier']! as String);
           if (file.existsSync()) {
             file.deleteSync();
@@ -227,14 +227,55 @@ void main() {
       await plugin.release(scope);
     });
 
-    test('a scope released mid-write: commit cleans up, then throws', () async {
+    test('a scope released mid-write does not fail the commit', () async {
       final (scope, session) = await open('c.bin');
       final writer = FdWriter.fromSession(session)..writeChunk(bytes);
       await plugin.release(scope);
-      await expectLater(writer.closeWrite(), kind('scope-closed'));
+      // The bytes are down: throwing here would invite an abort of a good
+      // file.
+      expect((await writer.closeWrite()).size, 100);
       expect(isClosed(session.fd), isTrue);
-      // The partial stays for the caller to abort.
-      expect(File(session.identifier).lengthSync(), 100);
+    });
+
+    test('a file someone else wrote to is size-mismatch, kept', () async {
+      final (scope, session) = await open('m.bin');
+      final writer = FdWriter.fromSession(session)..writeChunk(bytes);
+      File(
+        session.identifier,
+      ).writeAsBytesSync(List.filled(50, 1), mode: FileMode.append);
+      await expectLater(
+        writer.closeWrite(),
+        throwsA(
+          isA<PlatformException>()
+              .having((e) => e.code, 'code', 'size-mismatch')
+              .having((e) => (e.details as Map)['size'], 'size', 150),
+        ),
+      );
+      expect(File(session.identifier).lengthSync(), 150);
+      await plugin.release(scope);
+    });
+
+    test('abort sends what proves the file is still the session’s', () async {
+      nextOpen = (name) {
+        final path = '${dir.path}/$name';
+        return {
+          'fd': openPath(path, _oWronly | _oCreatExcl),
+          'identifier': path,
+          'canFsync': true,
+          'fileId': '1:42',
+        };
+      };
+      final before = DateTime.now().millisecondsSinceEpoch;
+      final (scope, session) = await open('p.bin');
+      final writer = FdWriter.fromSession(session)..writeChunk(bytes);
+      await writer.abort();
+      final sent = calls.lastWhere((c) => c.method == 'abortPartial');
+      final args = (sent.arguments as Map).cast<String, Object?>();
+      expect(args['identifier'], session.identifier);
+      expect(args['fileId'], '1:42');
+      expect(args['bytesWritten'], 100);
+      expect(args['openedAt'] as int, greaterThanOrEqualTo(before));
+      await plugin.release(scope);
     });
 
     test('errno maps as for reads: a read-only descriptor is EBADF', () async {
@@ -330,11 +371,55 @@ void main() {
       expect(File(session.identifier).lengthSync(), 100, reason: 'the partial');
       await plugin.abortWrite(session, closeFd: false);
       expect(File(session.identifier).existsSync(), isFalse);
+      // The root's copy does not know what the helper wrote.
+      final sent = calls.lastWhere((c) => c.method == 'abortPartial');
+      expect((sent.arguments as Map)['bytesWritten'], isNull);
+      await plugin.release(scope);
+    });
+
+    test('closeFd: false on a session that owns its fd is refused', () async {
+      final (scope, session) = await open('l.bin');
+      await expectLater(
+        plugin.abortWrite(session, closeFd: false),
+        throwsStateError,
+      );
+      expect(isClosed(session.fd), isFalse);
+      await plugin.abortWrite(session);
       await plugin.release(scope);
     });
   });
 
   group('pipes', () {
+    test('a full non-blocking pipe is waited on, every byte counted', () async {
+      final fds = _malloc(8).cast<Int32>();
+      expect(_pipe(fds), 0);
+      final (readEnd, writeEnd) = (fds[0], fds[1]);
+      _free(fds.cast());
+      // Non-blocking write end: a write into a full pipe is EAGAIN.
+      final nonBlocking = Platform.isMacOS ? 0x4 : 0x800;
+      expect(_fcntl(writeEnd, 4 /* F_SETFL */, nonBlocking), 0);
+      final path = '${dir.path}/nb.bin';
+      File(path).writeAsBytesSync([]);
+      nextOpen = (_) => {'fd': writeEnd, 'identifier': path, 'canFsync': false};
+      final (scope, session) = await open('nb.bin');
+      // A reader drains in parallel; start it before the writer blocks.
+      final started = ReceivePort();
+      final done = ReceivePort();
+      await Isolate.spawn(_drainAndReport, (
+        readEnd,
+        started.sendPort,
+        done.sendPort,
+      ));
+      await started.first;
+      final writer = FdWriter.fromSession(session);
+      final payload = Uint8List.fromList(List.generate(200000, (i) => i % 251));
+      expect(writer.writeChunk(payload), 200000);
+      await writer.closeWrite();
+      expect(await done.first, payload);
+      expect(closeFd(readEnd), 0);
+      await plugin.release(scope);
+    });
+
     test('sequential writes, no fsync, in order', () async {
       final fds = _malloc(8).cast<Int32>();
       expect(_pipe(fds), 0);
@@ -365,6 +450,13 @@ void main() {
     debugDefaultTargetPlatformOverride = null;
     await plugin.release(scope);
   });
+}
+
+/// Signals it is running, drains the pipe [fd] to EOF, and sends the bytes.
+void _drainAndReport((int, SendPort, SendPort) message) {
+  final (fd, started, done) = message;
+  started.send(true);
+  done.send(drain(fd));
 }
 
 /// A helper that writes 100 bytes, reports, and waits to be killed.

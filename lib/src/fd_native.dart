@@ -91,9 +91,9 @@ final class FdHandle implements Finalizable {
     final result = fpw_adopt(owner, fd);
     if (result == -16 /* EBUSY */ ) {
       throw StateError(
-        'Descriptor $fd is already owned by a reader: either a ReadHandoff '
-        'was consumed twice, or the descriptor was closed behind a live '
-        "reader's back and its number reused",
+        'Descriptor $fd is already owned by a reader or writer: either a '
+        'handoff record was consumed twice, or the descriptor was closed '
+        "behind a live reader's or writer's back and its number reused",
       );
     }
     if (result < 0) {
@@ -128,15 +128,18 @@ final class FdHandle implements Finalizable {
   /// Sequential read into [buffer]: the count, or -errno.
   int read(int length) => fpw_read_full(fd, _buffer, length);
 
-  /// Positional write of [buffer]'s first [length] bytes: the count (short
-  /// when the volume wrote 0), or -errno.
-  int pwrite(int position, int length) =>
-      fpw_pwrite_full(fd, _buffer, position, length);
+  /// Positional write of [length] bytes of [buffer], starting at [from]:
+  /// the count (short when the volume wrote 0, or when an error followed
+  /// some bytes), or -errno when nothing was written.
+  int pwrite(int position, int length, {int from = 0}) =>
+      fpw_pwrite_full(fd, _buffer + from, position, length);
 
-  /// Sequential write of [buffer]'s first [length] bytes, as [pwrite].
-  int write(int length) => fpw_write_full(fd, _buffer, length);
+  /// Sequential write of [buffer]'s bytes, as [pwrite].
+  int write(int length, {int from = 0}) =>
+      fpw_write_full(fd, _buffer + from, length);
 
-  /// fsync: 0, or -errno.
+  /// Makes the bytes durable: 1 for a full flush through the drive's cache
+  /// (Apple's F_FULLFSYNC), 0 for plain fsync, or -errno.
   int fsync() => fpw_fsync(fd);
 
   /// Releases the descriptor: 0, or -errno from close. Call at most once.

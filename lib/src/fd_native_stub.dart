@@ -18,9 +18,11 @@ final class FdHandle {
 
   int read(int length) => throw UnsupportedError('No dart:ffi');
 
-  int pwrite(int position, int length) => throw UnsupportedError('No dart:ffi');
+  int pwrite(int position, int length, {int from = 0}) =>
+      throw UnsupportedError('No dart:ffi');
 
-  int write(int length) => throw UnsupportedError('No dart:ffi');
+  int write(int length, {int from = 0}) =>
+      throw UnsupportedError('No dart:ffi');
 
   int fsync() => throw UnsupportedError('No dart:ffi');
 

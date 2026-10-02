@@ -73,6 +73,9 @@ class FilePickerWritableImpl(
      * sooner (4096 bytes); the cap only stops a provider whose tree loops.
      */
     private const val MAX_WALK_DEPTH = 256
+
+    /** FAT stores modification times in 2-second steps. */
+    private const val MTIME_SLACK_MS = 2000L
   }
 
   // Every mutable field below is touched on the main hop only, except the
@@ -617,10 +620,28 @@ class FilePickerWritableImpl(
       onVolume(created) { contentResolver.openFileDescriptor(created, "w") }
         ?: throw IllegalStateException("The provider opened no descriptor for $created")
     } catch (e: Exception) {
-      deleteResidue(created)
+      // Ours only while still empty: someone may have taken the name since.
+      val stillEmpty = try {
+        rowBelowRoot(created)?.size == 0L
+      } catch (check: Exception) {
+        false
+      }
+      if (stillEmpty) {
+        deleteResidue(created)
+      }
       throw e
     }
     val statSize = pfd.statSize
+    if (statSize > 0) {
+      // "w" does not truncate on current AOSP, so content here means the
+      // name holds someone else's file by now: leave it alone.
+      pfd.close()
+      throw TaxonomyException(
+        ErrorKind.ALREADY_EXISTS,
+        "\"$name\" was replaced while it was being opened",
+        details = mapOf("name" to name, "reason" to "replaced")
+      )
+    }
     val fd = pfd.detachFd()
     plugin.logDebug("openWrite: fd $fd, statSize $statSize")
     return mapOf(
@@ -628,6 +649,43 @@ class FilePickerWritableImpl(
       "identifier" to row.toResult(parent.treeUri)["identifier"],
       "canFsync" to (statSize >= 0)
     )
+  }
+
+  /**
+   * Deletes an aborted write session's partial [identifier], only while
+   * the file there is still the session's: SAF has no inode, so "still the
+   * session's" is a file of [bytesWritten] bytes (when known: the root's
+   * copy after a kill does not know) modified no earlier than [openedAt]
+   * (less [MTIME_SLACK_MS] for FAT's 2-second times). The user may have
+   * renamed the partial away and another file taken its name; that is
+   * `not-found` with `reason: replaced`, and nothing is deleted. Gone is
+   * success.
+   */
+  @WorkerThread
+  fun abortPartial(identifier: String, bytesWritten: Long?, openedAt: Long) {
+    val uri = Uri.parse(identifier)
+    requireBelowRoot(uri)
+    requireWriteGrant(uri)
+    val documentUri = documentUriFor(uri)
+    val row = rowBelowRoot(documentUri) ?: return
+    val size = row.size
+    val modified = row.lastModified
+    val sameFile = !row.isDirectory &&
+      (bytesWritten == null || size == null || size == bytesWritten) &&
+      (modified == null || modified >= openedAt - MTIME_SLACK_MS)
+    if (!sameFile) {
+      throw TaxonomyException(
+        ErrorKind.NOT_FOUND,
+        "${row.name} is no longer this session's file: not deleted",
+        details = mapOf(
+          "reason" to "replaced",
+          "size" to size,
+          "written" to bytesWritten,
+          "lastModified" to modified
+        )
+      )
+    }
+    deleteDocument(documentUri)
   }
 
   /**
@@ -1071,7 +1129,10 @@ class FilePickerWritableImpl(
     }
     val taken = lookupChildRow(parent, name) != null
     val residue = Directory(parent.treeUri, DocumentsContract.getDocumentId(created), created, isTreeRoot = false)
-    // Fresh: an empty directory, or a file of size 0 (openWrite's create).
+    // Fresh: an empty directory, or a file of size 0 (openWrite's create),
+    // the latter only on ExternalStorageProvider, which always creates a
+    // new file: elsewhere an empty file handed back for a cleaned name may
+    // be the user's own (an empty marker file).
     val isFresh = if (row.isDirectory) {
       try {
         childrenBelowRoot(residue)?.isEmpty() == true
@@ -1079,7 +1140,7 @@ class FilePickerWritableImpl(
         false
       }
     } else {
-      row.size == 0L
+      row.size == 0L && created.authority == StorageVolumes.AUTHORITY
     }
     val extra = if (isFresh) {
       deleteResidue(created)

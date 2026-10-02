@@ -92,8 +92,13 @@
     `already-exists`; exclusive on iOS) and hands back a `WriteSession`
     that owns a native descriptor. `FdWriter.writeChunk` writes over FFI
     and returns the acknowledged total (progress); `closeWrite` fsyncs
-    (default on), closes and returns the stored `ChildEntry`; `abort`
-    closes and deletes the partial. Both are idempotent. As for reads,
+    (default on; `F_FULLFSYNC` on Apple where the volume supports it),
+    closes and returns the stored `ChildEntry` (`size-mismatch` when
+    something else wrote to the file); `abort` closes and deletes the
+    partial, but only while the file under that name is still the
+    session's (iOS: same device and inode; Android: its size and age),
+    else `not-found` with `reason: replaced` and nothing deleted. Both
+    are idempotent. As for reads,
     write where the bytes are produced: `FdWriter.fromSession`, or
     `WriteSession.handoff()` and `FdWriter.fromHandoff` in a helper,
     which then commits or aborts by itself through the plugin's channel.

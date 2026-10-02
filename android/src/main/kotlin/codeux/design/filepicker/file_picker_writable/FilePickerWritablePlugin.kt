@@ -159,6 +159,14 @@ class FilePickerWritablePlugin : FlutterPlugin, MethodCallHandler,
           )
         )
       }
+      "abortPartial" -> onQueue(call, result, Result::taxonomyError) {
+        impl.abortPartial(
+          call.requireArgument("identifier"),
+          call.argument<Number>("bytesWritten")?.toLong(),
+          call.requireArgument<Number>("openedAt").toLong()
+        )
+        result.success(null)
+      }
       "statEntry" -> onQueue(call, result, Result::taxonomyError) {
         result.success(impl.statEntry(call.requireArgument("identifier")))
       }

@@ -754,10 +754,12 @@ class FilePickerWritable {
   /// [WriteSession]), then commit or abort it.
   ///
   /// Fail-if-exists: a taken name is `already-exists` and nothing is
-  /// touched, so an abort can never delete someone else's file (callers
-  /// that mean to replace a file delete it first, deliberately). On iOS the
-  /// create is exclusive (`O_EXCL`); Android has no such primitive, so a
-  /// concurrent create of the same name can slip past the check there.
+  /// touched (callers that mean to replace a file delete it first,
+  /// deliberately). On iOS the create is exclusive (`O_EXCL`); Android has
+  /// no such primitive, so a concurrent create of the same name can slip
+  /// past the check there. An abort deletes by name, and only after
+  /// checking the file there is still this session's (see
+  /// [FdWriter.abort]).
   ///
   /// [mimeType] is the caller's statement, required by Android. Keep the
   /// default for `.writing`/`.part`/marker files: a real type may make a
@@ -780,6 +782,9 @@ class FilePickerWritable {
     _requireScopePlatform('openWrite');
     _requireLeafName(name);
     _requireScopeLive(scope.id);
+    // Before the create, and a little early on purpose: an abort's check
+    // accepts a file modified no earlier than this.
+    final openedAt = DateTime.now().millisecondsSinceEpoch;
     final result = await _channel.invokeMapMethod<String, Object?>(
       'openWrite',
       {'scope': scope.id, 'name': name, 'mimeType': mimeType},
@@ -791,6 +796,8 @@ class FilePickerWritable {
       result['fd']! as int,
       result['identifier']! as String,
       scope.id,
+      result['fileId'] as String?,
+      openedAt,
       canFsync: result['canFsync']! as bool,
     );
   }
@@ -817,23 +824,27 @@ class FilePickerWritable {
     final synced = fsync && session.canFsync ? fsyncFd(session.fd) : 0;
     session._closed = true;
     final closed = closeFd(session.fd);
-    _requireScopeLive(session._scopeToken);
     if (synced < 0) {
       throw _errnoException(-synced, 'fsync');
     }
     if (closed < 0) {
       throw _errnoException(-closed, 'close');
     }
-    return _statEntry(session.identifier);
+    final entry = await _statEntry(session.identifier);
+    _requireStoredSize(entry, session._bytesWritten, session.canFsync);
+    return entry;
   }
 
   /// Aborts a [WriteSession]: closes its descriptor and deletes the
-  /// partial. Idempotent; a partial already gone is success.
+  /// partial, only while it is still this session's file (see
+  /// [FdWriter.abort]). Idempotent; a partial already gone is success.
   ///
   /// [closeFd] false is the kill path: after a helper holding the
   /// descriptor was killed, its finalizer closed it, and this deletes the
-  /// partial by identifier only. That is the one call allowed on a
-  /// handed-off session. Never pass false otherwise: the descriptor leaks.
+  /// partial by identifier only. It is allowed only on a handed-off or
+  /// already closed session ([StateError] otherwise: the descriptor would
+  /// leak). On Android the root's copy does not know how many bytes the
+  /// helper wrote, so that abort checks the file's age only.
   @experimental
   Future<void> abortWrite(WriteSession session, {bool closeFd = true}) async {
     if (closeFd) {
@@ -846,9 +857,19 @@ class FilePickerWritable {
         session._closed = true;
         _closeIgnoringResult(session.fd);
       }
+    } else if (!session._handedOff && !session._closed) {
+      throw StateError(
+        'abortWrite(closeFd: false) on a session that still owns its '
+        'descriptor: it would leak',
+      );
     }
     session._aborted = true;
-    await _deletePartial(session.identifier);
+    await _abortPartial(
+      session.identifier,
+      session._fileId,
+      session._handedOff ? null : session._bytesWritten,
+      session._openedAt,
+    );
   }
 
   static void _closeIgnoringResult(int fd) {

@@ -24,6 +24,8 @@
 #define _FILE_OFFSET_BITS 64
 
 #include <errno.h>
+#include <fcntl.h>
+#include <poll.h>
 #include <pthread.h>
 #include <stdint.h>
 #include <stdlib.h>
@@ -146,10 +148,25 @@ FPW_EXPORT int64_t fpw_read_full(int32_t fd, uint8_t* buffer, int64_t length) {
   return total;
 }
 
+// Waits until fd takes more bytes (a non-blocking pipe that is full).
+// 0, or -errno.
+static int wait_writable(int32_t fd) {
+  struct pollfd entry = {.fd = fd, .events = POLLOUT, .revents = 0};
+  while (poll(&entry, 1, -1) < 0) {
+    if (errno != EINTR) {
+      return -errno;
+    }
+  }
+  return 0;
+}
+
 // Writes `length` bytes from `buffer` at `offset`, looping over short
-// writes. Returns the bytes written or -errno. A write that returns 0 ends
-// the loop short (a full FUSE volume does that instead of ENOSPC); the
-// caller sees fewer bytes than asked and reports it, so a 0 never spins.
+// writes. Returns the bytes written, or -errno when nothing was written:
+// once some bytes are down, an error ends the loop and the count is
+// returned, so the caller never loses track of what landed (it re-issues
+// the rest and sees the real errno then). A write that returns 0 also ends
+// the loop short; the caller reports fewer bytes than asked, so a 0 never
+// spins. EAGAIN (a non-blocking descriptor that is full) waits for room.
 FPW_EXPORT int64_t fpw_pwrite_full(int32_t fd, const uint8_t* buffer, int64_t offset, int64_t length) {
   int64_t total = 0;
   while (total < length) {
@@ -158,7 +175,14 @@ FPW_EXPORT int64_t fpw_pwrite_full(int32_t fd, const uint8_t* buffer, int64_t of
       if (errno == EINTR) {
         continue;
       }
-      return -(int64_t)errno;
+      if (errno == EAGAIN || errno == EWOULDBLOCK) {
+        int waited = wait_writable(fd);
+        if (waited == 0) {
+          continue;
+        }
+        return total > 0 ? total : waited;
+      }
+      return total > 0 ? total : -(int64_t)errno;
     }
     if (n == 0) {
       break;
@@ -177,7 +201,14 @@ FPW_EXPORT int64_t fpw_write_full(int32_t fd, const uint8_t* buffer, int64_t len
       if (errno == EINTR) {
         continue;
       }
-      return -(int64_t)errno;
+      if (errno == EAGAIN || errno == EWOULDBLOCK) {
+        int waited = wait_writable(fd);
+        if (waited == 0) {
+          continue;
+        }
+        return total > 0 ? total : waited;
+      }
+      return total > 0 ? total : -(int64_t)errno;
     }
     if (n == 0) {
       break;
@@ -187,8 +218,25 @@ FPW_EXPORT int64_t fpw_write_full(int32_t fd, const uint8_t* buffer, int64_t len
   return total;
 }
 
-// fsync: 0 or -errno, EINTR retried.
+// Makes the file's bytes durable: 1 when the drive was told to write its
+// cache through (Apple's F_FULLFSYNC: plain fsync there only hands the
+// bytes to the drive), 0 for plain fsync, or -errno. F_FULLFSYNC falls
+// back to fsync only where the volume refuses it (ENOTSUP, EINVAL: some
+// exFAT and network volumes), as SQLite does; any other failure is loud.
 FPW_EXPORT int32_t fpw_fsync(int32_t fd) {
+#if defined(__APPLE__)
+  while (fcntl(fd, F_FULLFSYNC) != 0) {
+    if (errno == EINTR) {
+      continue;
+    }
+    if (errno != ENOTSUP && errno != EINVAL) {
+      return -errno;
+    }
+    goto plain;
+  }
+  return 1;
+plain:
+#endif
   while (fsync(fd) != 0) {
     if (errno != EINTR) {
       return -errno;
