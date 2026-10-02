@@ -498,11 +498,108 @@ void main() {
       await plugin.release(scope);
     });
 
+    test('toList() collects the right bytes: chunks are owned', () async {
+      final (scope, session) = await open();
+      final reader = FdReader.fromSession(session, bufferLength: 1000);
+      final chunks = await reader.readStream(end: 5500).toList();
+      expect(chunks.expand((c) => c).toList(), content.sublist(0, 5500));
+      await plugin.release(scope);
+    });
+
+    test('the fingerprint shape: keeping the first and last chunk', () async {
+      final (scope, session) = await open();
+      final reader = FdReader.fromSession(session, bufferLength: 1000);
+      Uint8List? head;
+      Uint8List? last;
+      await for (final chunk in reader.readStream(end: 5500)) {
+        head ??= chunk;
+        last = chunk;
+      }
+      expect(head, content.sublist(0, 1000));
+      expect(last, content.sublist(5000, 5500));
+      await plugin.release(scope);
+    });
+
+    test('readViews hands out views of one buffer, as documented', () async {
+      final (scope, session) = await open();
+      final reader = FdReader.fromSession(session, bufferLength: 1000);
+      final views = await reader.readViews(end: 3000).toList();
+      // Collected views all show the buffer's last contents: why
+      // readStream copies, and readViews must be consumed in place.
+      for (final view in views) {
+        expect(view, content.sublist(2000, 3000));
+      }
+      await plugin.release(scope);
+    });
+
+    test('a stream owns the reader while it runs', () async {
+      final (scope, session) = await open();
+      final reader = FdReader.fromSession(session, bufferLength: 100);
+      final stream = reader.readStream(end: 1000);
+      final done = Completer<void>();
+      stream.listen((_) {
+        // readChunk and a second stream would share the one buffer.
+        expect(() => reader.readChunk(0, 10), throwsStateError);
+        expect(() => reader.readStream(), throwsStateError);
+      }, onDone: done.complete);
+      await done.future;
+      await plugin.release(scope);
+    });
+
+    test('two streams listened at once: the second fails on its own', () async {
+      final (scope, session) = await open();
+      final reader = FdReader.fromSession(session, bufferLength: 100);
+      final first = reader.readStream(end: 500);
+      final second = reader.readStream(end: 500);
+      final collected = first.toList();
+      await expectLater(second.toList(), throwsStateError);
+      expect(
+        (await collected).expand((c) => c).toList(),
+        content.sublist(0, 500),
+      );
+      await plugin.release(scope);
+    });
+
+    test('cancel inside onData, and break from await-for, close', () async {
+      final (scope, session) = await open();
+      final reader = FdReader.fromSession(session, bufferLength: 100);
+      late StreamSubscription<Uint8List> subscription;
+      final cancelled = Completer<void>();
+      subscription = reader.readStream().listen((_) {
+        subscription.cancel().then((_) => cancelled.complete());
+      });
+      await cancelled.future;
+      expect(isClosed(session.fd), isTrue);
+
+      final (scope2, session2) = await open();
+      final reader2 = FdReader.fromSession(session2, bufferLength: 100);
+      await for (final _ in reader2.readStream()) {
+        break;
+      }
+      expect(isClosed(session2.fd), isTrue);
+      await plugin.release(scope);
+      await plugin.release(scope2);
+    });
+
+    test('a pipe streams forward', () async {
+      final bytes = List.generate(250, (i) => i);
+      nextOpen = () => {
+        'fd': pipeWith(bytes),
+        'seekable': false,
+        'length': null,
+      };
+      final (scope, session) = await open();
+      final reader = FdReader.fromSession(session, bufferLength: 64);
+      final chunks = await reader.readStream(start: 10).toList();
+      expect(chunks.expand((c) => c).toList(), bytes.sublist(10));
+      await plugin.release(scope);
+    });
+
     test('a view is valid while the await-for body awaits', () async {
       final (scope, session) = await open();
       final reader = FdReader.fromSession(session, bufferLength: 64);
       var position = 0;
-      await for (final view in reader.readStream(end: 640)) {
+      await for (final view in reader.readViews(end: 640)) {
         await Future<void>.delayed(const Duration(milliseconds: 1));
         expect(view, content.sublist(position, position + view.length));
         position += view.length;

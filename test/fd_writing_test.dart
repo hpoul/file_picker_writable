@@ -421,6 +421,18 @@ void main() {
       await plugin.release(scope);
     });
 
+    test('non-byte values in a plain list fail in debug mode', () async {
+      final (scope, session) = await open('v.bin');
+      final writer = FdWriter.fromSession(session);
+      await expectLater(
+        writer.writeStream(Stream.value([1, 300, -1])),
+        throwsA(isA<AssertionError>()),
+      );
+      expect(writer.bytesWritten, 0);
+      await writer.abort();
+      await plugin.release(scope);
+    });
+
     test('a failing source ends the call, the writer stays open', () async {
       final (scope, session) = await open('t.bin');
       final writer = FdWriter.fromSession(session);

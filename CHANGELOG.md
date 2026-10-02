@@ -110,11 +110,13 @@
     write. More than 1 MiB per writer on the root isolate fails a debug
     assertion.
   * Streams: `FdReader.readStream({start, end, chunkLength})` reads a
-    range as a stream of views, each valid until the listener is ready
-    for the next (after `onData`, or an `await for` body), and closes the
-    reader when it ends, fails or is cancelled. `FdWriter.writeStream`
-    writes a `Stream<List<int>>` in order and returns the total; it does
-    not commit.
+    range as a stream of chunks the listener owns (one copy each, as from
+    `File.openRead()`), and closes the reader when it ends, fails or is
+    cancelled. `FdReader.readViews` is the zero-copy variant: views of the
+    reader's one buffer, valid only while their event is handled (not for
+    `toList`, `asyncMap`, broadcast streams or anything that keeps
+    events). `FdWriter.writeStream` writes a `Stream<List<int>>` in order
+    and returns the total; it does not commit.
 * Android: every method-channel call now runs on a shared background
   TaskQueue instead of the main thread, so slow providers no longer block
   frames. The pickers and `init` still hop to the main thread. Launch URLs

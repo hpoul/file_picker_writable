@@ -314,12 +314,26 @@ class FdWriter {
 
   /// Writes every chunk of [source] in order ([writeChunk] for each) and
   /// returns the new acknowledged total. Does not commit: call [closeWrite]
-  /// (or [abort]) after, deliberately. An error from [source] or from a
-  /// write ends the call with that error and leaves the writer open, with
-  /// [bytesWritten] exact, for the caller to abort or retry.
+  /// (or [abort]) after, deliberately. Each chunk is written synchronously
+  /// as it arrives, before the next is asked for; nothing is buffered. An
+  /// error from [source] or from a write ends the call with that error and
+  /// leaves the writer open, with [bytesWritten] exact, for the caller to
+  /// abort or retry.
+  ///
+  /// A chunk that is not a [Uint8List] is converted; its values must be
+  /// bytes (0..255): others would be truncated, so in debug mode they fail
+  /// an assertion.
   Future<int> writeStream(Stream<List<int>> source) async {
     await for (final chunk in source) {
-      writeChunk(chunk is Uint8List ? chunk : Uint8List.fromList(chunk));
+      if (chunk is Uint8List) {
+        writeChunk(chunk);
+        continue;
+      }
+      assert(
+        chunk.every((value) => value >= 0 && value <= 255),
+        'writeStream: a chunk holds values outside 0..255',
+      );
+      writeChunk(Uint8List.fromList(chunk));
     }
     return _total;
   }
