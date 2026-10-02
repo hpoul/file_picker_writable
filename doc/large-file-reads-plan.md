@@ -559,12 +559,14 @@ All three, then drop `@experimental` in a minor:
   over open/read/close for in-helper callers? RESOLVED yes
   (owner, 2026-10-02): `FdReader.readStream({start, end,
   chunkLength})` yields chunks the listener OWNS (one copy each:
-  ~0.3 ms per MiB, 3–12% of a USB stick's pread, ~30% of a warm
-  flash read), because a stream of views is a silent-wrong-output
-  trap: the #74 review collected views through `toList`, `fold`,
-  `expand`, `asyncMap`, broadcast streams, `listen(list.add)`,
-  first/last-chunk fingerprints and slow sinks, and every one gave
-  the right length with the wrong bytes. `FdReader.readViews` keeps
+  about half a millisecond per MiB inside the stream, measured at
+  412–418 µs per MiB because each chunk is garbage a turn later;
+  roughly 4–20% of a USB stick's pread, 40–50% of a warm flash
+  read), because a stream of views is a silent-wrong-output trap:
+  the #74 review collected views through `toList`, `fold`,
+  `expand`, `asyncMap(...).toList()`, broadcast streams,
+  `listen(list.add)`, first/last-chunk fingerprints and slow
+  sinks, and every one gave the right length with the wrong bytes. `FdReader.readViews` keeps
   the zero-copy stream as an opt-in, named apart so a search finds
   every consumer (in-place hashing, `writeStream`). Both run
   through a sync controller, read the first chunk after `listen()`

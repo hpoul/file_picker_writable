@@ -314,9 +314,9 @@ class FdReader {
   ///
   /// Each chunk is a fresh [Uint8List] the listener owns, as from
   /// `File.openRead()`: keep it, collect it, hand it to any transformer.
-  /// That costs one copy per chunk (about 0.3 ms per MiB); where that
-  /// matters and the consumer reads each chunk in place, [readViews] skips
-  /// it.
+  /// That costs one copy per chunk (about half a millisecond per MiB);
+  /// where that matters and the consumer reads each chunk in place,
+  /// [readViews] skips it.
   ///
   /// The first chunk is read after `listen()` returns, the next ones only
   /// once the listener is ready for them (after `onData` returns, or after
@@ -340,9 +340,10 @@ class FdReader {
   /// handled: in `onData` before it returns, or in an `await for` body
   /// (which may await) before it ends. Anything that keeps events longer
   /// gets bytes a later read put there, with the right length and no
-  /// error: `toList()`, `fold` collecting views, `expand`, `asyncMap`,
-  /// `asBroadcastStream`, `listen(list.add)`, `BytesBuilder(copy: false)`,
-  /// keeping a first or last view, an `IOSink.add` slower than the reads.
+  /// error: `toList()` (directly or after `asyncMap`), `fold` collecting
+  /// views, `expand`, `asBroadcastStream`, `listen(list.add)`,
+  /// `BytesBuilder(copy: false)`, keeping a first or last view, an
+  /// `IOSink.add` slower than the reads.
   /// Consumers that copy on arrival are fine: `sha256.bind`, `gzip`,
   /// `IOSink.addStream`, [FdWriter.writeStream]. Named apart from
   /// [readStream] so a search finds every zero-copy consumer.
