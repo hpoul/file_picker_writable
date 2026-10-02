@@ -193,6 +193,9 @@ class FdReader {
   /// known gap, since pipes are the rare path.
   int _bytesRead = 0;
 
+  /// Whether a stream is reading: it and [readChunk] share one buffer.
+  bool _streaming = false;
+
   /// Whether this reader lives on the root isolate, asked once.
   late final bool _onRootIsolate = RootIsolateToken.instance != null;
 
@@ -219,7 +222,19 @@ class FdReader {
   /// descriptors on it killed), so every later call is `session-closed`,
   /// never an empty view that would read as a complete file. Other readers
   /// on the same volume keep their descriptors until their own next read.
+  ///
+  /// A [StateError] while [readStream] or [readViews] reads this reader:
+  /// they share its one buffer.
   Uint8List readChunk(int position, int length) {
+    if (_streaming) {
+      throw StateError(
+        'readChunk() while a stream reads this FdReader: they share one buffer',
+      );
+    }
+    return _read(position, length);
+  }
+
+  Uint8List _read(int position, int length) {
     if (_closed) {
       throw PlatformException(
         code: 'session-closed',
@@ -290,6 +305,153 @@ class FdReader {
       _release();
     }
     throw error;
+  }
+
+  /// Reads from [start] to the end of the file (or to [end]) as a stream of
+  /// chunks, [chunkLength] bytes each (default [bufferLength]), and closes
+  /// the reader when the stream ends, fails or is cancelled (awaiting the
+  /// subscription's `cancel()` waits for that close).
+  ///
+  /// Each chunk is a fresh [Uint8List] the listener owns, as from
+  /// `File.openRead()`: keep it, collect it, hand it to any transformer.
+  /// That costs one copy per chunk (about half a millisecond per MiB);
+  /// where that matters and the consumer reads each chunk in place,
+  /// [readViews] skips it.
+  ///
+  /// The first chunk is read after `listen()` returns, the next ones only
+  /// once the listener is ready for them (after `onData` returns, or after
+  /// an `await for` body finishes). Between chunks the stream yields to the
+  /// event loop, so a cancel message to a helper isolate gets through.
+  ///
+  /// Errors are [readChunk]'s, delivered on the stream; so is a close that
+  /// fails (`scope-closed` when the scope was released mid-read: the whole
+  /// range is delivered first) and, on the root isolate in debug mode, the
+  /// 1 MiB budget's `AssertionError`. Single subscription. While it runs,
+  /// [readChunk] and a second stream on this reader are a [StateError]. On a
+  /// pipe, [start] must not lie behind what was read already. To pipe it
+  /// into an `IOSink` (a `StreamConsumer<List<int>>`), use
+  /// `sink.addStream(stream)` or `stream.cast<List<int>>().pipe(sink)`.
+  Stream<Uint8List> readStream({int start = 0, int? end, int? chunkLength}) =>
+      _stream(start, end, chunkLength, copy: true);
+
+  /// [readStream] without the copy: each event is a VIEW of the reader's
+  /// one buffer, valid only until the next chunk is read. The next read
+  /// waits for the listener, so a view is safe exactly while its event is
+  /// handled: in `onData` before it returns, or in an `await for` body
+  /// (which may await) before it ends. Anything that keeps events longer
+  /// gets bytes a later read put there, with the right length and no
+  /// error: `toList()` (directly or after `asyncMap`), `fold` collecting
+  /// views, `expand`, `asBroadcastStream`, `listen(list.add)`,
+  /// `BytesBuilder(copy: false)`, keeping a first or last view, an
+  /// `IOSink.add` slower than the reads.
+  /// Consumers that copy on arrival are fine: `sha256.bind`, `gzip`,
+  /// `IOSink.addStream`, [FdWriter.writeStream]. Named apart from
+  /// [readStream] so a search finds every zero-copy consumer.
+  Stream<Uint8List> readViews({int start = 0, int? end, int? chunkLength}) =>
+      _stream(start, end, chunkLength, copy: false);
+
+  Stream<Uint8List> _stream(
+    int start,
+    int? end,
+    int? chunkLength, {
+    required bool copy,
+  }) {
+    if (_streaming) {
+      throw StateError('A stream already reads this FdReader');
+    }
+    final length = chunkLength ?? bufferLength;
+    if (length <= 0 || length > bufferLength) {
+      throw ArgumentError.value(
+        chunkLength,
+        'chunkLength',
+        'must be 1..$bufferLength',
+      );
+    }
+    if (start < 0 || (end != null && end < start)) {
+      throw ArgumentError('Not a range: $start..$end');
+    }
+    late final StreamController<Uint8List> controller;
+    var cancelled = false;
+    Completer<void>? resumed;
+
+    Future<void> pump() async {
+      var position = start;
+      Object? failure;
+      StackTrace? failureTrace;
+      try {
+        while (!cancelled) {
+          if (controller.isPaused) {
+            resumed = Completer<void>();
+            await resumed!.future;
+            continue;
+          }
+          final remaining = end == null ? length : end - position;
+          if (remaining <= 0) {
+            break;
+          }
+          final view = _read(position, remaining < length ? remaining : length);
+          if (view.isEmpty) {
+            break;
+          }
+          position += view.length;
+          controller.add(copy ? Uint8List.fromList(view) : view);
+          // Let the event loop run: other events (a cancel message) get in.
+          await Future<void>.delayed(Duration.zero);
+        }
+      } catch (error, trace) {
+        failure = error;
+        failureTrace = trace;
+      }
+      _streaming = false;
+      try {
+        close();
+      } catch (error, trace) {
+        failure ??= error;
+        failureTrace ??= trace;
+      }
+      if (!cancelled) {
+        if (failure != null) {
+          // May cancel the subscription right here (cancelOnError), whose
+          // cancel then waits on this very pump: never await the close.
+          controller.addError(failure, failureTrace);
+        }
+        unawaited(controller.close());
+      }
+    }
+
+    Future<void>? pumping;
+    controller = StreamController<Uint8List>(
+      // Sync delivery: a chunk reaches onData before the next read.
+      sync: true,
+      onListen: () {
+        if (_streaming) {
+          // Two streams made before either was listened to: the second one
+          // fails on its own stream (a throw here would escape to the zone).
+          controller.addError(
+            StateError('A stream already reads this FdReader'),
+          );
+          unawaited(controller.close());
+          return;
+        }
+        _streaming = true;
+        // Not inside listen(): the first read waits for the event loop, so
+        // `listen()..pause()` reads nothing and a caller's frame stays
+        // free.
+        pumping = Future<void>(pump);
+      },
+      onResume: () {
+        resumed?.complete();
+        resumed = null;
+      },
+      // `await subscription.cancel()` returns once the reader is closed.
+      onCancel: () {
+        cancelled = true;
+        resumed?.complete();
+        resumed = null;
+        return pumping;
+      },
+    );
+    return controller.stream;
   }
 
   /// Closes the descriptor. Idempotent. Built from a session, it also

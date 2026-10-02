@@ -556,7 +556,29 @@ All three, then drop `@experimental` in a minor:
 - Chunk default 1MB (C1 row is flat 64K–1M)? Confirm on cold
   flash; views make big buffers cheap either way.
 - Dart-side convenience: a thin sequential `Stream<Uint8List>`
-  over open/read/close for in-helper callers? Probably yes.
+  over open/read/close for in-helper callers? RESOLVED yes
+  (owner, 2026-10-02): `FdReader.readStream({start, end,
+  chunkLength})` yields chunks the listener OWNS (one copy each:
+  about half a millisecond per MiB inside the stream, measured at
+  412–418 µs per MiB because each chunk is garbage a turn later;
+  roughly 4–20% of a USB stick's pread, 40–50% of a warm flash
+  read), because a stream of views is a silent-wrong-output trap:
+  the #74 review collected views through `toList`, `fold`,
+  `expand`, `asyncMap(...).toList()`, broadcast streams,
+  `listen(list.add)`, first/last-chunk fingerprints and slow
+  sinks, and every one gave the right length with the wrong bytes. `FdReader.readViews` keeps
+  the zero-copy stream as an opt-in, named apart so a search finds
+  every consumer (in-place hashing, `writeStream`). Both run
+  through a sync controller, read the first chunk after `listen()`
+  returns and each next one only once the listener is ready (after
+  `onData`, or after an `await for` body), yield to the event loop
+  between chunks (a timer, not a microtask: a microtask loop
+  starves a cancel message; 15–27 µs per chunk), and close the
+  reader at the end, on an error, or on cancel (awaiting
+  `cancel()` waits for the close). A stream owns its reader:
+  `readChunk` or a second stream meanwhile is a `StateError`. The
+  write half is `FdWriter.writeStream(Stream<List<int>>)`, which
+  writes each chunk as it arrives and does not commit.
 - Single-owner enforcement: discipline plus idempotent close for
   v1; add a debug-mode double-close detector if cross-isolate
   leaks bite in practice?
