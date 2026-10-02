@@ -274,11 +274,14 @@ Notes:
   plain `fsync` only hands the bytes to the drive, which may keep
   them in its cache (man fsync): the shim uses `F_FULLFSYNC` and
   falls back to `fsync` only where the volume refuses it (ENOTSUP,
-  EINVAL — some exFAT and network volumes), as SQLite does (#72
-  review M2). Measured: APFS (simulator) answers `F_FULLFSYNC`;
-  the iPhone and an exFAT stick are still to be recorded. Callers
-  for whom durability matters check `canFsync` first: a pipe has
-  none, and its commit skips the step.
+  EINVAL, ENOTTY — man fcntl lists F_FULLFSYNC for HFS, FAT, UDF
+  and APFS only, so exFAT, smbfs and webdav fall back), as SQLite
+  does (#72 review M2). `FdWriter.lastSyncWasFull` (public) says
+  which one a commit got, so a consumer can record a weaker sync.
+  Measured: APFS (simulator) answers `F_FULLFSYNC`; Android has
+  plain fsync only; the iPhone and an exFAT stick are still to be
+  recorded. Callers for whom durability matters check `canFsync`
+  first: a pipe has none, and its commit skips the step.
 - Kill story (same as 2b §4, write half): after kill, the dead
   helper's finalizer closed the fd — the root calls `abortWrite`
   on its fd-dead copy with `closeFd: false`, which stays legal
@@ -399,13 +402,31 @@ Notes:
   and only a handed-off or closed session may pass it), then an
   internal `abortPartial` that deletes the partial BY NAME only
   while it is still the session's file (#72 review M1: the user
-  can rename a partial away and another file take its name). iOS
-  proves it by device and inode recorded at create; SAF has no
-  inode, so Android requires a file of the bytes written (unknown
-  on the root's copy after a kill) modified no earlier than the
-  create (2 s slack for FAT). Anything else is `not-found`,
-  `reason: replaced`, nothing deleted — verified on device by
-  renaming a partial away and creating a newcomer under its name.
+  can rename a partial away and another file take its name),
+  proved by identity recorded at create, plus size == bytes
+  written. iOS (`FileIdentity`): device and birth time (±2 s for
+  FAT's coarse create times), plus the inode only where the
+  volume keeps it stable (APFS, HFS): msdosfs derives file IDs
+  from the first cluster, every empty file sharing one (#72
+  re-review M1b). Android (`PartialIdentity`): the inode only —
+  the create's write fd is on the lower file system and the
+  abort's read fd goes through FUSE, which reports the lower inode
+  but its own device — plus mtime ≥ create − 2 s. Residuals, both
+  failing safe except the first: an inode reused after our
+  partial was deleted AND a same-size newcomer created under its
+  name (ext4/f2fs); vfat/exfat reassigning a number on reload (a
+  false refuse: the partial kept). Anything that fails the check
+  is `not-found`, `reason: replaced`, `residue: kept`; a session
+  without an identity (a pipe) is `reason: unverifiable`. Verified
+  on device by renaming a partial away and creating a newcomer
+  under its name. The KILL PATH deletes nothing (decision, #72
+  re-review M1a): the root's copy cannot know what the helper
+  wrote, and a newcomer passes any age check by construction, so
+  `abortWrite(closeFd: false)` only marks the session aborted; the
+  partial stays for a deliberate delete by name once no writer can
+  run (the consumer's repair does exactly that). After a commit
+  found `size-mismatch`, abort is a `StateError`: someone else's
+  bytes are in the file (re-review S2').
   Gone is success, but on iOS only while the root is reachable (a
   pulled volume is `permission-lost`, review S5; Android already
   proves gone). Both idempotent: a second commit returns the same
@@ -560,10 +581,16 @@ Notes:
   swapped for a link after the scope check cannot redirect it,
   and a link at the name is refused (#72 review S6; the draft's
   "nothing is ever followed" held for the last component only).
-  The stored name is verified through `F_GETPATH` on the new fd
-  (exFAT may strip or refuse characters): a mismatch removes the
-  file, provably ours by device and inode, as `invalid-name`
-  (review S4). `writeChunk`/`closeWrite`/
+  The stored name is verified by identity (exFAT may strip or
+  refuse characters): `fstatat(dirfd, name, AT_SYMLINK_NOFOLLOW)`
+  must be the descriptor's own file, strictly (device, inode,
+  exact birth time). Otherwise it is `invalid-name`, and the file
+  is removed only where a scan of the directory finds exactly it
+  (review S4; corrected in re-review S4': an `F_GETPATH` name check
+  sees the name cache, built from the requested name, and so never
+  fires in the case it targets). The parent's `F_GETPATH` (S6) can
+  lag a concurrent move by microseconds: an accepted window.
+  `writeChunk`/`closeWrite`/
   `abortWrite` are the same Dart FFI as Android (`pwrite`,
   `fsync`, `close`; abort removes the partial through the shared
   `deleteEntry`, under its guards).
@@ -759,11 +786,22 @@ before graduation.
     refused (`not-found`, `replaced`), the newcomer kept; the
     simulator's commit used `F_FULLFSYNC` (Android has plain fsync
     only).
+  - After the #72 re-review: identity-based abort on both
+    platforms (host tests: `ios/test/FileIdentityTests.swift` on
+    APFS — a newcomer never matches, the renamed partial does, the
+    FAT-style rule decides by birth time; JUnit
+    `PartialIdentityTest`), and on the simulator and the emulator:
+    a helper's own abort deletes its partial (Android: the inode
+    through the FUSE read fd matched the create's), the replaced
+    partial is refused with `residue: kept`, the killed helper's
+    abort keeps the partial. VM: abort after `size-mismatch` is a
+    `StateError`, the kill path makes no native call.
   - Not run yet: a full or failing volume mid-write (ENOSPC, EIO;
     whether a full FUSE volume returns 0 at all is unmeasured), a
     pipe-backed provider, a write of 1 GB for the memory bound, a
     revoked grant mid-write, `F_FULLFSYNC` on an iPhone and an
-    exFAT stick.
+    exFAT stick, and the identity check on an exFAT stick (iOS,
+    msdosfs/userfsd: the M1b case).
 
 ## 8. Graduation (experimental → stable)
 

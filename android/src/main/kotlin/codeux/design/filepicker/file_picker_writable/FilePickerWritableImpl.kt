@@ -73,9 +73,6 @@ class FilePickerWritableImpl(
      * sooner (4096 bytes); the cap only stops a provider whose tree loops.
      */
     private const val MAX_WALK_DEPTH = 256
-
-    /** FAT stores modification times in 2-second steps. */
-    private const val MTIME_SLACK_MS = 2000L
   }
 
   // Every mutable field below is touched on the main hop only, except the
@@ -642,46 +639,72 @@ class FilePickerWritableImpl(
         details = mapOf("name" to name, "reason" to "replaced")
       )
     }
+    // The file's inode, which an abort compares (PartialIdentity); a pipe
+    // has none worth keeping.
+    val inode = if (statSize >= 0) {
+      try {
+        Os.fstat(pfd.fileDescriptor).st_ino
+      } catch (e: Exception) {
+        null
+      }
+    } else {
+      null
+    }
     val fd = pfd.detachFd()
-    plugin.logDebug("openWrite: fd $fd, statSize $statSize")
+    plugin.logDebug("openWrite: fd $fd, statSize $statSize, inode $inode")
     return mapOf(
       "fd" to fd,
       "identifier" to row.toResult(parent.treeUri)["identifier"],
-      "canFsync" to (statSize >= 0)
+      "canFsync" to (statSize >= 0),
+      "fileId" to inode?.toString()
     )
   }
 
   /**
    * Deletes an aborted write session's partial [identifier], only while
-   * the file there is still the session's: SAF has no inode, so "still the
-   * session's" is a file of [bytesWritten] bytes (when known: the root's
-   * copy after a kill does not know) modified no earlier than [openedAt]
-   * (less [MTIME_SLACK_MS] for FAT's 2-second times). The user may have
-   * renamed the partial away and another file taken its name; that is
-   * `not-found` with `reason: replaced`, and nothing is deleted. Gone is
-   * success.
+   * the file there is still the session's ([PartialIdentity]: the inode
+   * recorded at create, against a read descriptor on the name now, plus
+   * size and modification time). The user may have renamed the partial
+   * away and another file taken its name: `not-found` with `reason:
+   * replaced`, nothing deleted. A session without an inode (a pipe) is
+   * `reason: unverifiable`, also kept. Gone is success.
    */
   @WorkerThread
-  fun abortPartial(identifier: String, bytesWritten: Long?, openedAt: Long) {
+  fun abortPartial(identifier: String, fileId: String?, bytesWritten: Long, openedAt: Long) {
     val uri = Uri.parse(identifier)
     requireBelowRoot(uri)
     requireWriteGrant(uri)
     val documentUri = documentUriFor(uri)
     val row = rowBelowRoot(documentUri) ?: return
-    val size = row.size
-    val modified = row.lastModified
-    val sameFile = !row.isDirectory &&
-      (bytesWritten == null || size == null || size == bytesWritten) &&
-      (modified == null || modified >= openedAt - MTIME_SLACK_MS)
+    val recorded = fileId?.toLongOrNull()
+      ?: throw TaxonomyException(
+        ErrorKind.NOT_FOUND,
+        "${row.name} cannot be proven this session's file: not deleted",
+        details = mapOf("reason" to "unverifiable", "residue" to "kept")
+      )
+    val inodeNow = if (row.isDirectory) {
+      null
+    } else {
+      try {
+        requireContext().contentResolver.openFileDescriptor(documentUri, "r")
+          ?.use { Os.fstat(it.fileDescriptor).st_ino }
+      } catch (e: Exception) {
+        plugin.logDebug("abortPartial: cannot stat ${row.name}: $e")
+        null
+      }
+    }
+    val sameFile = inodeNow != null && PartialIdentity.matches(
+      recorded, inodeNow, row.size, bytesWritten, row.lastModified, openedAt
+    )
     if (!sameFile) {
       throw TaxonomyException(
         ErrorKind.NOT_FOUND,
         "${row.name} is no longer this session's file: not deleted",
         details = mapOf(
           "reason" to "replaced",
-          "size" to size,
-          "written" to bytesWritten,
-          "lastModified" to modified
+          "residue" to "kept",
+          "size" to row.size,
+          "written" to bytesWritten
         )
       )
     }

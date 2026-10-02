@@ -252,6 +252,9 @@ void main() {
         ),
       );
       expect(File(session.identifier).lengthSync(), 150);
+      // Someone else's bytes are in it: no abort deletes it.
+      await expectLater(writer.abort(), throwsStateError);
+      expect(File(session.identifier).existsSync(), isTrue);
       await plugin.release(scope);
     });
 
@@ -355,7 +358,7 @@ void main() {
       await plugin.release(scope);
     });
 
-    test('kill: the finalizer closes; abort by identifier only', () async {
+    test('kill: the finalizer closes; the abort keeps the partial', () async {
       final (scope, session) = await open('k.bin');
       final record = session.handoff();
       final ready = ReceivePort();
@@ -369,11 +372,11 @@ void main() {
       await exited.first;
       expect(isClosed(record.fd), isTrue, reason: 'closed by the finalizer');
       expect(File(session.identifier).lengthSync(), 100, reason: 'the partial');
+      // The root's copy cannot know what the helper wrote, so nothing can
+      // prove the file is still the partial: no delete, no native call.
       await plugin.abortWrite(session, closeFd: false);
-      expect(File(session.identifier).existsSync(), isFalse);
-      // The root's copy does not know what the helper wrote.
-      final sent = calls.lastWhere((c) => c.method == 'abortPartial');
-      expect((sent.arguments as Map)['bytesWritten'], isNull);
+      expect(calls.where((c) => c.method == 'abortPartial'), isEmpty);
+      expect(File(session.identifier).lengthSync(), 100, reason: 'kept');
       await plugin.release(scope);
     });
 

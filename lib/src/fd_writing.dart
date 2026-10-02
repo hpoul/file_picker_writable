@@ -57,6 +57,7 @@ class WriteSession {
   bool _handedOff = false;
   bool _closed = false;
   bool _aborted = false;
+  bool _sizeMismatched = false;
   FdWriter? _writer;
 
   /// Bytes written and acknowledged so far, on the copy that owns the
@@ -69,11 +70,12 @@ class WriteSession {
   /// the root isolate, before spawning: when it throws, the session is
   /// still yours to [FilePickerWritable.abortWrite].
   ///
-  /// After a kill, the helper's finalizer has closed the descriptor: abort
-  /// with `abortWrite(session, closeFd: false)`, which only deletes the
-  /// partial by [identifier] and is legal on this dead copy. Never commit
-  /// after a kill, and never abort a session whose commit may have landed
-  /// unacknowledged: the abort would delete the committed file.
+  /// After a kill, the helper's finalizer has closed the descriptor: mark
+  /// this dead copy aborted with `abortWrite(session, closeFd: false)`,
+  /// which deletes nothing (nothing can prove the file under [identifier]
+  /// is still this session's); delete the partial by name with
+  /// [FilePickerWritable.deleteEntry] once no writer can be running. Never
+  /// commit after a kill.
   WriteHandoff handoff() {
     _requireOwned('handoff');
     if (_writer != null) {
@@ -238,6 +240,7 @@ class FdWriter {
   int _total = 0;
   bool _closed = false;
   bool _aborted = false;
+  bool _sizeMismatched = false;
   ChildEntry? _committed;
   bool? _lastSyncWasFull;
 
@@ -248,9 +251,10 @@ class FdWriter {
   int get bytesWritten => _total;
 
   /// After a commit with fsync: whether the drive was told to write its
-  /// cache through (Apple's `F_FULLFSYNC`) rather than plain fsync. For the
-  /// device checks.
-  @visibleForTesting
+  /// cache through (Apple's `F_FULLFSYNC`) rather than plain fsync. False
+  /// where the volume refuses a full flush (exFAT, network volumes) and on
+  /// Android, which has none; null before a commit, or without fsync. A
+  /// caller that records how durable a copy is reads it here.
   bool? get lastSyncWasFull => _lastSyncWasFull;
 
   /// Writes all of [bytes] after what was written so far and returns the
@@ -369,7 +373,13 @@ class FdWriter {
       throw _errnoException(-closed, 'close');
     }
     final entry = await _statEntry(identifier);
-    _requireStoredSize(entry, _total, canFsync);
+    try {
+      _requireStoredSize(entry, _total, canFsync);
+    } on PlatformException {
+      _sizeMismatched = true;
+      _session?._sizeMismatched = true;
+      rethrow;
+    }
     _committed = entry;
     return entry;
   }
@@ -378,17 +388,22 @@ class FdWriter {
   /// Idempotent; a partial that is already gone is success.
   ///
   /// The delete is by name, so it checks first that the file there is
-  /// still this session's: on iOS the same device and inode; on Android a
-  /// file of [bytesWritten] bytes, last modified no earlier than its
-  /// creation. Anything else (the user renamed it away and another file
-  /// took the name) is `not-found` with `reason: replaced`, and nothing is
-  /// deleted. A committed file is not aborted ([StateError]): delete it
-  /// with [FilePickerWritable.deleteEntry] when that is meant.
+  /// still this session's, by identity: the file recorded at create (iOS:
+  /// device and birth time, plus the inode where the volume keeps it
+  /// stable; Android: the inode), holding [bytesWritten] bytes. Anything
+  /// else (the user renamed it away and another file took the name) is
+  /// `not-found` with `reason: replaced`; a session whose file has no
+  /// identity (a pipe) is `reason: unverifiable`; nothing is deleted either
+  /// way, and the details say `residue: kept`. A committed file is not
+  /// aborted, nor one whose commit found a `size-mismatch` (someone else's
+  /// bytes are in it) ([StateError]): delete it with
+  /// [FilePickerWritable.deleteEntry] when that is meant.
   Future<void> abort() async {
-    if (_committed != null) {
+    if (_committed != null || _sizeMismatched) {
       throw StateError(
-        'abort() after closeWrite(): the file is committed; delete it with '
-        'deleteEntry if that is meant',
+        'abort() after closeWrite(): the file is committed, or holds bytes '
+        'this session did not write; delete it with deleteEntry if that is '
+        'meant',
       );
     }
     if (!_closed) {
@@ -437,12 +452,11 @@ Future<ChildEntry> _statEntry(String identifier) async {
 }
 
 /// Deletes an aborted partial, from either isolate, only while it is still
-/// the session's own file; gone is success. [bytesWritten] is null where
-/// it is unknown (the root's copy after a kill).
+/// the session's own file; gone is success.
 Future<void> _abortPartial(
   String identifier,
   String? fileId,
-  int? bytesWritten,
+  int bytesWritten,
   int openedAt,
 ) => FilePickerWritable._channel.invokeMethod<void>('abortPartial', {
   'identifier': identifier,

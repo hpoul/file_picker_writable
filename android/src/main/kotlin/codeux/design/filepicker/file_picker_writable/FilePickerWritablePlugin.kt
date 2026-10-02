@@ -162,7 +162,8 @@ class FilePickerWritablePlugin : FlutterPlugin, MethodCallHandler,
       "abortPartial" -> onQueue(call, result, Result::taxonomyError) {
         impl.abortPartial(
           call.requireArgument("identifier"),
-          call.argument<Number>("bytesWritten")?.toLong(),
+          call.argument("fileId"),
+          call.requireArgument<Number>("bytesWritten").toLong(),
           call.requireArgument<Number>("openedAt").toLong()
         )
         result.success(null)

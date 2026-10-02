@@ -96,14 +96,16 @@
     closes and returns the stored `ChildEntry` (`size-mismatch` when
     something else wrote to the file); `abort` closes and deletes the
     partial, but only while the file under that name is still the
-    session's (iOS: same device and inode; Android: its size and age),
-    else `not-found` with `reason: replaced` and nothing deleted. Both
-    are idempotent. As for reads,
+    session's (its identity from the create, plus its size), else
+    `not-found` with `reason: replaced` and nothing deleted. Both are
+    idempotent. As for reads,
     write where the bytes are produced: `FdWriter.fromSession`, or
     `WriteSession.handoff()` and `FdWriter.fromHandoff` in a helper,
     which then commits or aborts by itself through the plugin's channel.
-    After a killed helper, `abortWrite(session, closeFd: false)` deletes
-    the partial by identifier. A volume that accepts fewer bytes than
+    After a killed helper, `abortWrite(session, closeFd: false)` marks the
+    session aborted and keeps the partial (nothing can prove it is still
+    the session's file): delete it by name with `deleteEntry` once no
+    writer can be running. A volume that accepts fewer bytes than
     offered is `errno-28` with `synthesized: true`, never a silent short
     write. More than 1 MiB per writer on the root isolate fails a debug
     assertion.

@@ -235,8 +235,9 @@ public class FilePickerWritablePlugin: NSObject, FlutterPlugin {
           throw FilePickerError.invalidArguments(message: "Expected 'identifier'")
         }
         let fileId = args["fileId"] as? String
+        let bytesWritten = (args["bytesWritten"] as? NSNumber)?.int64Value
         _offMain(result) { [self] in
-          try _abortPartial(identifier: identifier, fileId: fileId)
+          try _abortPartial(identifier: identifier, fileId: fileId, bytesWritten: bytesWritten)
           return nil
         }
       case "statEntry":
@@ -599,11 +600,13 @@ public class FilePickerWritablePlugin: NSObject, FlutterPlugin {
   /// kernel path (`F_GETPATH`) is checked to lie in the root, so a parent
   /// component swapped for a symlink after the scope check cannot redirect
   /// it; `openat` with `O_CREAT | O_EXCL | O_NOFOLLOW` then fails on any
-  /// taken name, a symlink included. The stored name is verified the same
-  /// way (a volume such as exFAT may strip or refuse characters): a
-  /// mismatch removes the file just made, provably ours by device and
-  /// inode, and is `invalid-name`. The result carries the file's device
-  /// and inode, so an abort deletes only this file.
+  /// taken name, a symlink included. The stored name is verified by
+  /// identity, not by path (the name cache would echo the request): the
+  /// requested name must hold the descriptor's file ([FileIdentity],
+  /// strict). Otherwise the volume stored it elsewhere (exFAT may strip or
+  /// refuse characters): the file is removed where a scan of the directory
+  /// finds exactly it, and the result is `invalid-name`. The result
+  /// carries the file's identity, so an abort deletes only this file.
   private func _openWrite(token: String, name: String) throws -> [String: Any] {
     try _requireLeaf(name)
     let parent = try _requireDirectoryScope(token)
@@ -641,18 +644,15 @@ public class FilePickerWritablePlugin: NSObject, FlutterPlugin {
       close(fd)
       throw error
     }
-    if let stored = Self._kernelPath(fd), URL(fileURLWithPath: stored).lastPathComponent != name {
-      // Ours by identity: remove it, then report the name the volume made.
-      var there = stat()
-      if lstat(stored, &there) == 0, there.st_dev == info.st_dev, there.st_ino == info.st_ino {
-        unlink(stored)
-      }
+    let identity = FileIdentity(info, inodesStable: FileIdentity.inodesStable(fd: fd))
+    var named = stat()
+    guard fstatat(directory, name, &named, AT_SYMLINK_NOFOLLOW) == 0, identity.isSame(named) else {
+      let actual = Self._removeStoredAs(identity, in: directory)
       close(fd)
-      let actual = URL(fileURLWithPath: stored).lastPathComponent
       throw TaxonomyError(
         kind: ErrorKind.invalidName,
-        message: "The volume stored \"\(name)\" as \"\(actual)\"",
-        details: ["requested": name, "actual": actual]
+        message: "The volume did not store \"\(name)\" under that name",
+        details: ["requested": name, "actual": actual ?? NSNull()]
       )
     }
     let isRegular = (info.st_mode & S_IFMT) == S_IFREG
@@ -661,8 +661,40 @@ public class FilePickerWritablePlugin: NSObject, FlutterPlugin {
       "fd": Int(fd),
       "identifier": child.identifier(withRoot: try child.currentRoot()),
       "canFsync": isRegular,
-      "fileId": "\(info.st_dev):\(info.st_ino)",
+      "fileId": identity.encoded,
     ]
+  }
+
+  /// Finds the file `identity` names in `directory` by scanning it, and
+  /// removes it when exactly one entry is that file (strictly: device,
+  /// inode, exact birth time). Returns the name it was stored as, or nil
+  /// when none or several matched (nothing is removed then).
+  private static func _removeStoredAs(_ identity: FileIdentity, in directory: Int32) -> String? {
+    let scan = dup(directory)
+    guard scan >= 0, let stream = fdopendir(scan) else {
+      return nil
+    }
+    defer {
+      closedir(stream)
+    }
+    var matches: [String] = []
+    while let entry = readdir(stream) {
+      let name = withUnsafeBytes(of: entry.pointee.d_name) { raw in
+        String(cString: raw.bindMemory(to: CChar.self).baseAddress!)
+      }
+      if name == "." || name == ".." {
+        continue
+      }
+      var info = stat()
+      if fstatat(directory, name, &info, AT_SYMLINK_NOFOLLOW) == 0, identity.isSame(info) {
+        matches.append(name)
+      }
+    }
+    guard matches.count == 1 else {
+      return nil
+    }
+    unlinkat(directory, matches[0], 0)
+    return matches[0]
   }
 
   /// The kernel's path for an open descriptor (`F_GETPATH`), nil when it
@@ -676,12 +708,15 @@ public class FilePickerWritablePlugin: NSObject, FlutterPlugin {
   }
 
   /// Deletes an aborted write session's partial, only while the file there
-  /// is still the one the session created: the same device and inode, a
-  /// regular file. Anything else (renamed away, and another file took the
-  /// name) is `not-found` with `reason: replaced`, nothing deleted. Gone is
+  /// is still the one the session created: a regular file matching the
+  /// session's [FileIdentity] (device, birth time, and the inode where the
+  /// volume keeps it stable) and holding the bytes the session wrote.
+  /// Anything else (renamed away, and another file took the name) is
+  /// `not-found` with `reason: replaced`; a session without an identity is
+  /// `reason: unverifiable`; nothing is deleted either way. Gone is
   /// success, but only while the root is reachable: a pulled volume is
   /// `permission-lost`, never "gone". Single-shot scope.
-  private func _abortPartial(identifier: String, fileId: String?) throws {
+  private func _abortPartial(identifier: String, fileId: String?, bytesWritten: Int64?) throws {
     let resolved = try _resolve(identifier)
     try _requireBelowRoot(resolved)
     guard resolved.scopeURL.startAccessingSecurityScopedResource() else {
@@ -700,12 +735,20 @@ public class FilePickerWritablePlugin: NSObject, FlutterPlugin {
       }
       throw Self._errnoError(code, "lstat \(resolved.url.lastPathComponent)")
     }
+    guard let identity = fileId.flatMap({ FileIdentity(encoded: $0) }) else {
+      throw TaxonomyError(
+        kind: ErrorKind.notFound,
+        message: "\(resolved.url.lastPathComponent) cannot be proven this session's file: not deleted",
+        details: ["reason": "unverifiable", "residue": "kept"]
+      )
+    }
     let isRegular = (there.st_mode & S_IFMT) == S_IFREG
-    guard isRegular, let fileId = fileId, fileId == "\(there.st_dev):\(there.st_ino)" else {
+    let sizeMatches = bytesWritten.map { Int64(there.st_size) == $0 } ?? true
+    guard isRegular, identity.matches(there), sizeMatches else {
       throw TaxonomyError(
         kind: ErrorKind.notFound,
         message: "\(resolved.url.lastPathComponent) is no longer this session's file: not deleted",
-        details: ["reason": "replaced"]
+        details: ["reason": "replaced", "residue": "kept"]
       )
     }
     guard unlink(resolved.url.path) == 0 else {

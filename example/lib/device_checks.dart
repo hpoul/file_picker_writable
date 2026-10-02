@@ -416,7 +416,6 @@ Future<void> _writeChecks(
         final writer = FdWriter.fromSession(session);
         writer.writeChunk(Uint8List.fromList(utf8.encode('{"written":true}')));
         final entry = await writer.closeWrite();
-        // ignore: invalid_use_of_visible_for_testing_member
         final full = writer.lastSyncWasFull;
         return '${entry.name}, ${entry.size} bytes, '
             'fsync ${full == true ? 'full (F_FULLFSYNC)' : 'plain'}';
@@ -535,7 +534,7 @@ Future<void> _writeChecks(
         );
         return 'partial left: ${left != null}';
       });
-      await step('write: killed helper, abort by identifier', () async {
+      await step('write: killed helper, abort keeps the partial', () async {
         final session = await plugin.openWrite(
           scope: wScope,
           name: 'killed.writing',
@@ -554,7 +553,11 @@ Future<void> _writeChecks(
           identifier: w.identifier,
           name: 'killed.writing',
         );
-        return 'partial left: ${left != null}';
+        // The app's own repair deletes it by name, deliberately.
+        if (left != null) {
+          await plugin.deleteEntry(identifier: left.identifier);
+        }
+        return 'partial kept by the abort: ${left != null}, then deleted';
       });
       await step('write: listing of w', () async {
         final listing = await plugin.listChildren(identifier: w.identifier);

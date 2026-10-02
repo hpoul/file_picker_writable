@@ -831,7 +831,12 @@ class FilePickerWritable {
       throw _errnoException(-closed, 'close');
     }
     final entry = await _statEntry(session.identifier);
-    _requireStoredSize(entry, session._bytesWritten, session.canFsync);
+    try {
+      _requireStoredSize(entry, session._bytesWritten, session.canFsync);
+    } on PlatformException {
+      session._sizeMismatched = true;
+      rethrow;
+    }
     return entry;
   }
 
@@ -840,34 +845,46 @@ class FilePickerWritable {
   /// [FdWriter.abort]). Idempotent; a partial already gone is success.
   ///
   /// [closeFd] false is the kill path: after a helper holding the
-  /// descriptor was killed, its finalizer closed it, and this deletes the
-  /// partial by identifier only. It is allowed only on a handed-off or
+  /// descriptor was killed, its finalizer closed it. This marks the
+  /// session aborted and DELETES NOTHING: the root's copy cannot know what
+  /// the helper wrote, and without that no check can tell the partial from
+  /// a file that took its name since. The partial stays; delete it by name
+  /// with [deleteEntry] once no writer can be running (an app's own repair
+  /// at its next start, typically). It is allowed only on a handed-off or
   /// already closed session ([StateError] otherwise: the descriptor would
-  /// leak). On Android the root's copy does not know how many bytes the
-  /// helper wrote, so that abort checks the file's age only.
+  /// leak).
   @experimental
   Future<void> abortWrite(WriteSession session, {bool closeFd = true}) async {
-    if (closeFd) {
-      session._requireOwned('abortWrite');
-      final writer = session._writer;
-      if (writer != null) {
-        return writer.abort();
+    if (!closeFd) {
+      if (!session._handedOff && !session._closed) {
+        throw StateError(
+          'abortWrite(closeFd: false) on a session that still owns its '
+          'descriptor: it would leak',
+        );
       }
-      if (!session._closed) {
-        session._closed = true;
-        _closeIgnoringResult(session.fd);
-      }
-    } else if (!session._handedOff && !session._closed) {
+      session._aborted = true;
+      return;
+    }
+    session._requireOwned('abortWrite');
+    final writer = session._writer;
+    if (writer != null) {
+      return writer.abort();
+    }
+    if (session._sizeMismatched) {
       throw StateError(
-        'abortWrite(closeFd: false) on a session that still owns its '
-        'descriptor: it would leak',
+        'abortWrite() after closeWrite() found bytes this session did not '
+        'write; delete the file with deleteEntry if that is meant',
       );
+    }
+    if (!session._closed) {
+      session._closed = true;
+      _closeIgnoringResult(session.fd);
     }
     session._aborted = true;
     await _abortPartial(
       session.identifier,
       session._fileId,
-      session._handedOff ? null : session._bytesWritten,
+      session._bytesWritten,
       session._openedAt,
     );
   }

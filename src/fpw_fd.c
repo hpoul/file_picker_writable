@@ -221,15 +221,16 @@ FPW_EXPORT int64_t fpw_write_full(int32_t fd, const uint8_t* buffer, int64_t len
 // Makes the file's bytes durable: 1 when the drive was told to write its
 // cache through (Apple's F_FULLFSYNC: plain fsync there only hands the
 // bytes to the drive), 0 for plain fsync, or -errno. F_FULLFSYNC falls
-// back to fsync only where the volume refuses it (ENOTSUP, EINVAL: some
-// exFAT and network volumes), as SQLite does; any other failure is loud.
+// back to fsync only where the volume refuses it (ENOTSUP, EINVAL,
+// ENOTTY: exFAT, smbfs and webdav implement none, per man fcntl), as
+// SQLite does; any other failure is loud.
 FPW_EXPORT int32_t fpw_fsync(int32_t fd) {
 #if defined(__APPLE__)
   while (fcntl(fd, F_FULLFSYNC) != 0) {
     if (errno == EINTR) {
       continue;
     }
-    if (errno != ENOTSUP && errno != EINVAL) {
+    if (errno != ENOTSUP && errno != EINVAL && errno != ENOTTY) {
       return -errno;
     }
     goto plain;
