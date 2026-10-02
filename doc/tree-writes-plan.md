@@ -1,9 +1,9 @@
 # Tree writes without whole-file staging: evaluation & plan (Gap 3)
 
-Status: proposal, for review. No commitments. In implementation:
-R1 (`openDirectory`) shipped with Gap 1a (#68); the single-shot
-tree verbs (`createDirectory`, `deleteEntry`, `moveEntry`) with
-#71; write sessions (`openWrite`, `FdWriter`) are PR 5.
+Status: implemented, experimental. R1 (`openDirectory`) shipped
+with Gap 1a (#68); the single-shot tree verbs (`createDirectory`,
+`deleteEntry`, `moveEntry`) with #71; write sessions (`openWrite`,
+`FdWriter`) with #72. Graduation (§8) is open.
 Date: 2026-09-30.
 Transport decision revised 2026-09-30 after measurement (`bench/`, 2b §3).
 Context: same consumer as the Gap-1/1a/2b plans — phone-side trip
@@ -278,10 +278,11 @@ Notes:
   and APFS only, so exFAT, smbfs and webdav fall back), as SQLite
   does (#72 review M2). `FdWriter.lastSyncWasFull` (public) says
   which one a commit got, so a consumer can record a weaker sync.
-  Measured: APFS (simulator) answers `F_FULLFSYNC`; Android has
-  plain fsync only; the iPhone and an exFAT stick are still to be
-  recorded. Callers for whom durability matters check `canFsync`
-  first: a pipe has none, and its commit skips the step.
+  Measured: APFS answers `F_FULLFSYNC` on the simulator and on an
+  iPhone XR (2026-10-02); Android has plain fsync only; an exFAT
+  stick is still to be recorded. Callers for whom durability
+  matters check `canFsync` first: a pipe has none, and its commit
+  skips the step.
 - Kill story (same as 2b §4, write half): after kill, the dead
   helper's finalizer closed the fd — the root calls `abortWrite`
   on its fd-dead copy with `closeFd: false`, which stays legal
@@ -813,12 +814,25 @@ before graduation.
     partial is refused with `residue: kept`, the killed helper's
     abort keeps the partial. VM: abort after `size-mismatch` is a
     `StateError`, the kill path makes no native call.
+  - The write matrix on a physical iPhone XR (iOS 18.7, debug
+    build of the example, sandbox enforced), at bcf88b2, the merged
+    head of #72: `F_FULLFSYNC: APFS on iPhone XR answers full;
+    exFAT still to record.` A small root-isolate write committed; a
+    taken name ⇒ `already-exists`; `12:30.bin` kept as is on APFS,
+    then aborted; 8 MiB written in a helper that committed itself
+    through the channel, the commit-by-rename, and a read back in a
+    helper, 0 mismatches; a helper that aborted itself (nothing
+    left); the replaced-partial abort refused (`replaced`,
+    `residue: kept`), the newcomer kept; the killed helper's abort
+    kept its partial, deleted by name afterwards. Reads and tree
+    verbs passed again in the same run. The fixture was removed
+    afterwards (`FPW_CLEANUP`).
   - Not run yet: a full or failing volume mid-write (ENOSPC, EIO;
     whether a full FUSE volume returns 0 at all is unmeasured), a
     pipe-backed provider, a write of 1 GB for the memory bound, a
-    revoked grant mid-write, `F_FULLFSYNC` on an iPhone and an
-    exFAT stick, and the identity check on an exFAT stick (iOS,
-    msdosfs/userfsd: the M1b case).
+    revoked grant mid-write, `F_FULLFSYNC` on an exFAT stick, and
+    the identity check on an exFAT stick (iOS, msdosfs/userfsd:
+    the M1b case, and what userfsd reports as birth time).
 
 ## 8. Graduation (experimental → stable)
 
