@@ -645,7 +645,10 @@ before graduation.
     build of the example, sandbox enforced), at efad722: every
     step as on the simulator. Only one folder is picked there, so
     no cross-pick move. The fixture was removed afterwards
-    (`FPW_CLEANUP`).
+    (`FPW_CLEANUP`). Re-run on the XR at 94ed79d, after both review
+    rounds: the same matrix, plus the real-path guards active on
+    every create, move and delete, and `a/inner` deleted after `a`
+    (gone parent) ⇒ success. Fixture removed afterwards.
   - Not run yet: `move-partial` and the `state: unknown` path
     (need a rename that fails after a move, or a detach between a
     landed rename and its check; neither can be forced on the
