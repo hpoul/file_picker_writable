@@ -644,34 +644,43 @@ public class FilePickerWritablePlugin: NSObject, FlutterPlugin {
       close(fd)
       throw error
     }
-    let identity = FileIdentity(info, inodesStable: FileIdentity.inodesStable(fd: fd))
     var named = stat()
-    guard fstatat(directory, name, &named, AT_SYMLINK_NOFOLLOW) == 0, identity.isSame(named) else {
-      let actual = Self._removeStoredAs(identity, in: directory)
+    guard fstatat(directory, name, &named, AT_SYMLINK_NOFOLLOW) == 0, FileIdentity.sameFile(info, named) else {
+      let actual = Self._removeStoredAs(info, in: directory)
       close(fd)
       throw TaxonomyError(
         kind: ErrorKind.invalidName,
-        message: "The volume did not store \"\(name)\" under that name",
+        message: actual == nil
+          ? "The volume did not store \"\(name)\" under that name; the file was left in place"
+          : "The volume stored \"\(name)\" as \"\(actual!)\"",
         details: ["requested": name, "actual": actual ?? NSNull()]
       )
     }
+    // Nil without a birth time: the abort then keeps the partial.
+    let identity = FileIdentity(info, inodesStable: FileIdentity.inodesStable(fd: fd))
     let isRegular = (info.st_mode & S_IFMT) == S_IFREG
-    logDebug("openWrite: fd \(fd), regular \(isRegular)")
+    logDebug("openWrite: fd \(fd), regular \(isRegular), identity \(identity?.encoded ?? "none")")
     return [
       "fd": Int(fd),
       "identifier": child.identifier(withRoot: try child.currentRoot()),
       "canFsync": isRegular,
-      "fileId": identity.encoded,
+      "fileId": identity?.encoded ?? NSNull(),
     ]
   }
 
-  /// Finds the file `identity` names in `directory` by scanning it, and
-  /// removes it when exactly one entry is that file (strictly: device,
-  /// inode, exact birth time). Returns the name it was stored as, or nil
-  /// when none or several matched (nothing is removed then).
-  private static func _removeStoredAs(_ identity: FileIdentity, in directory: Int32) -> String? {
+  /// Finds the file `created` describes in `directory` by scanning it, and
+  /// removes it when exactly one entry is that regular file
+  /// ([FileIdentity.sameFile]: device, inode, exact birth time). Returns
+  /// the name it was stored as, or nil when none or several matched (the
+  /// file is left in place then). The window between the scan and the
+  /// unlink is accepted, as #71's between a check and its delete.
+  private static func _removeStoredAs(_ created: stat, in directory: Int32) -> String? {
     let scan = dup(directory)
-    guard scan >= 0, let stream = fdopendir(scan) else {
+    guard scan >= 0 else {
+      return nil
+    }
+    guard let stream = fdopendir(scan) else {
+      close(scan)
       return nil
     }
     defer {
@@ -686,7 +695,7 @@ public class FilePickerWritablePlugin: NSObject, FlutterPlugin {
         continue
       }
       var info = stat()
-      if fstatat(directory, name, &info, AT_SYMLINK_NOFOLLOW) == 0, identity.isSame(info) {
+      if fstatat(directory, name, &info, AT_SYMLINK_NOFOLLOW) == 0, FileIdentity.sameFile(created, info) {
         matches.append(name)
       }
     }

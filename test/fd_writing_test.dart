@@ -335,6 +335,15 @@ void main() {
       await plugin.release(scope);
     });
 
+    test('a session-level size-mismatch blocks abortWrite', () async {
+      final (scope, session) = await open('sm.bin');
+      File(session.identifier).writeAsBytesSync([1, 2, 3]);
+      await expectLater(plugin.closeWrite(session), kind('size-mismatch'));
+      await expectLater(plugin.abortWrite(session), throwsStateError);
+      expect(File(session.identifier).lengthSync(), 3, reason: 'kept');
+      await plugin.release(scope);
+    });
+
     test('abortWrite closes and deletes; again is fine', () async {
       final (scope, session) = await open('g.bin');
       await plugin.abortWrite(session);

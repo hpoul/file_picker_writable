@@ -24,5 +24,7 @@ class PartialIdentityTest {
     assertFalse(PartialIdentity.matches(42, 42, 20, 100, openedAt + 5_000, openedAt))
     // The same inode, but older than the session: renamed into place.
     assertFalse(PartialIdentity.matches(42, 42, 100, 100, openedAt - 60_000, openedAt))
+    // The boundary: just past FAT's 2-second slack.
+    assertFalse(PartialIdentity.matches(42, 42, 100, 100, openedAt - 2_001, openedAt))
   }
 }

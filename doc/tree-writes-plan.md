@@ -408,16 +408,33 @@ Notes:
   FAT's coarse create times), plus the inode only where the
   volume keeps it stable (APFS, HFS): msdosfs derives file IDs
   from the first cluster, every empty file sharing one (#72
-  re-review M1b). Android (`PartialIdentity`): the inode only —
+  re-review M1b). The tolerance is 50 ms (third review S-A): FAT
+  and exFAT store create times to 10 ms and the in-memory value
+  is already the rounded one; it is also the window in which a
+  newcomer created right after ours under the same name passes on
+  a volume without stable inodes (a host test writes the window
+  down). A file without a birth time has no identity (third review
+  M-A): the session's `fileId` is null and its abort keeps the
+  partial (`unverifiable`), never "same device" alone. What
+  userfsd reports for an exFAT stick's birth time, after create
+  and after a remount, is still to be recorded. On FAT12/16/32
+  msdosfs converts DOS times with the local offset, so a time-zone
+  change between create and abort shifts the birth time by hours:
+  a false refuse (exFAT stores a UTC offset and is immune).
+  Android (`PartialIdentity`): the inode only —
   the create's write fd is on the lower file system and the
   abort's read fd goes through FUSE, which reports the lower inode
-  but its own device — plus mtime ≥ create − 2 s. Residuals, both
+  but its own device — plus mtime ≥ create − 2 s (no birth time:
+  `Os.statx` is not public API). The abort's "r" open of the name
+  triggers MediaStore's scan of whatever is there, which is
+  harmless. Residuals, both
   failing safe except the first: an inode reused after our
   partial was deleted AND a same-size newcomer created under its
   name (ext4/f2fs); vfat/exfat reassigning a number on reload (a
   false refuse: the partial kept). Anything that fails the check
   is `not-found`, `reason: replaced`, `residue: kept`; a session
-  without an identity (a pipe) is `reason: unverifiable`. Verified
+  without an identity (a pipe, or no birth time on iOS) is
+  `reason: unverifiable`. Verified
   on device by renaming a partial away and creating a newcomer
   under its name. The KILL PATH deletes nothing (decision, #72
   re-review M1a): the root's copy cannot know what the helper

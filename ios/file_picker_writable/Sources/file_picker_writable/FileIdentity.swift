@@ -10,20 +10,26 @@ import Foundation
 /// clusters are reused first-fit). So the birth time is part of the
 /// identity on every volume, and the inode only where the file system keeps
 /// it stable. A file born after the session's create fails either way.
+/// Without a birth time there is no identity at all (`init` fails): a
+/// volume that reports none would otherwise reduce the check to "same
+/// device", and an abort keeps the partial instead.
 ///
 /// Foundation-only on purpose: `ios/test/FileIdentityTests.swift` pins the
 /// decision on the host (`tool/swift_unit_tests.sh`).
 struct FileIdentity: Equatable {
   let device: Int64
   let inode: UInt64
-  /// Birth time in nanoseconds since the epoch.
+  /// Birth time in nanoseconds since the epoch; never 0.
   let birth: Int64
   /// Whether this volume's inode numbers identify a file (APFS, HFS).
   let inodesStable: Bool
 
-  /// FAT stores create times coarsely (2 s on some variants): a birth time
-  /// read back later may differ by that much from the one read at create.
-  static let birthTolerance: Int64 = 2_000_000_000
+  /// FAT and exFAT store create times to 10 ms, and the in-memory value is
+  /// already the rounded one, so a stat after create and one after a
+  /// remount agree exactly; the slack only covers rounding between layers.
+  /// It is also the window in which a file created right after ours,
+  /// under the same name, on a volume without stable inodes, would pass.
+  static let birthTolerance: Int64 = 50_000_000
 
   init(device: Int64, inode: UInt64, birth: Int64, inodesStable: Bool) {
     self.device = device
@@ -32,11 +38,16 @@ struct FileIdentity: Equatable {
     self.inodesStable = inodesStable
   }
 
-  init(_ info: stat, inodesStable: Bool) {
+  /// Nil when `info` carries no birth time (0): no identity, no delete.
+  init?(_ info: stat, inodesStable: Bool) {
+    let birth = Self.birthNanos(info)
+    guard birth > 0 else {
+      return nil
+    }
     self.init(
       device: Int64(info.st_dev),
       inode: UInt64(info.st_ino),
-      birth: Self.birthNanos(info),
+      birth: birth,
       inodesStable: inodesStable
     )
   }
@@ -52,6 +63,7 @@ struct FileIdentity: Equatable {
       let device = Int64(parts[0]),
       let inode = UInt64(parts[1]),
       let birth = Int64(parts[2]),
+      birth > 0,
       let stable = Int(parts[3])
     else {
       return nil
@@ -63,17 +75,22 @@ struct FileIdentity: Equatable {
   /// birth time within `birthTolerance`, and the same inode where inodes
   /// are stable. Fails safe: a mismatch only keeps a partial.
   func matches(_ info: stat) -> Bool {
-    let other = FileIdentity(info, inodesStable: inodesStable)
-    guard other.device == device, abs(other.birth - birth) <= Self.birthTolerance else {
+    guard let other = FileIdentity(info, inodesStable: inodesStable),
+      other.device == device,
+      abs(other.birth - birth) <= Self.birthTolerance
+    else {
       return false
     }
     return !inodesStable || other.inode == inode
   }
 
-  /// Strict: the same device, inode and exact birth time. For two stats
-  /// of one file moments apart (the create's descriptor and its name).
-  func isSame(_ info: stat) -> Bool {
-    self == FileIdentity(info, inodesStable: inodesStable)
+  /// Strict: two stats of one regular file moments apart (the create's
+  /// descriptor and its name): the same device, inode and exact birth
+  /// time. A hard link to the file passes too; callers that pick one entry
+  /// refuse when several do.
+  static func sameFile(_ a: stat, _ b: stat) -> Bool {
+    (a.st_mode & S_IFMT) == S_IFREG && (b.st_mode & S_IFMT) == S_IFREG
+      && a.st_dev == b.st_dev && a.st_ino == b.st_ino && birthNanos(a) == birthNanos(b)
   }
 
   static func birthNanos(_ info: stat) -> Int64 {
