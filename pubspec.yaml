@@ -14,10 +14,13 @@ dependencies:
     sdk: flutter
   logging: ">=1.0.0 <2.0.0"
   meta: ^1.12.0
-  # The fd shim's build hook (hook/build.dart).
-  code_assets: ^1.0.0
-  hooks: ^1.0.0
-  native_toolchain_c: ^0.17.4
+  # The fd shim's build hook (hook/build.dart). Wide ranges so an app's other
+  # native-asset packages decide the versions: a caret range here forced an
+  # app back to hooks 1 / code_assets 1.0. Tested at both ends and at
+  # hooks 2.0.2 / code_assets 1.2.1 / native_toolchain_c 0.19.3.
+  code_assets: '>=1.0.0 <3.0.0'
+  hooks: '>=1.0.0 <3.0.0'
+  native_toolchain_c: '>=0.17.4 <0.20.0'
   convert: ^3.0.0
   synchronized: ^3.0.0
   path_provider: ">=2.0.0 <3.0.0"
