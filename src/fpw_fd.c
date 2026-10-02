@@ -1,7 +1,8 @@
 // Copyright (c) 2019 Herbert Poul. MIT License, see LICENSE.
 //
-// The byte path of doc/large-file-reads-plan.md §5: the few syscalls Dart
-// makes on a detached file descriptor, wrapped so each returns -errno from
+// The byte path of doc/large-file-reads-plan.md §5 and, for writes,
+// doc/tree-writes-plan.md §5: the few syscalls Dart makes on a detached
+// file descriptor, wrapped so each returns -errno from
 // the call itself (an errno read through a second FFI call can be stale:
 // the VM may make syscalls of its own in between) and retries EINTR
 // inside.
@@ -143,6 +144,57 @@ FPW_EXPORT int64_t fpw_read_full(int32_t fd, uint8_t* buffer, int64_t length) {
     total += n;
   }
   return total;
+}
+
+// Writes `length` bytes from `buffer` at `offset`, looping over short
+// writes. Returns the bytes written or -errno. A write that returns 0 ends
+// the loop short (a full FUSE volume does that instead of ENOSPC); the
+// caller sees fewer bytes than asked and reports it, so a 0 never spins.
+FPW_EXPORT int64_t fpw_pwrite_full(int32_t fd, const uint8_t* buffer, int64_t offset, int64_t length) {
+  int64_t total = 0;
+  while (total < length) {
+    ssize_t n = pwrite(fd, buffer + total, (size_t)(length - total), (off_t)(offset + total));
+    if (n < 0) {
+      if (errno == EINTR) {
+        continue;
+      }
+      return -(int64_t)errno;
+    }
+    if (n == 0) {
+      break;
+    }
+    total += n;
+  }
+  return total;
+}
+
+// The same for a non-seekable descriptor (a pipe): sequential write.
+FPW_EXPORT int64_t fpw_write_full(int32_t fd, const uint8_t* buffer, int64_t length) {
+  int64_t total = 0;
+  while (total < length) {
+    ssize_t n = write(fd, buffer + total, (size_t)(length - total));
+    if (n < 0) {
+      if (errno == EINTR) {
+        continue;
+      }
+      return -(int64_t)errno;
+    }
+    if (n == 0) {
+      break;
+    }
+    total += n;
+  }
+  return total;
+}
+
+// fsync: 0 or -errno, EINTR retried.
+FPW_EXPORT int32_t fpw_fsync(int32_t fd) {
+  while (fsync(fd) != 0) {
+    if (errno != EINTR) {
+      return -errno;
+    }
+  }
+  return 0;
 }
 
 // Closes a bare descriptor (a session that was never wrapped). Returns 0

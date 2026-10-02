@@ -591,6 +591,60 @@ class FilePickerWritableImpl(
   }
 
   /**
+   * Creates the file [name] under the directory a live scope token names
+   * and detaches a write descriptor into Dart's ownership
+   * (tree-writes-plan §5). Never writes a byte. Fail-if-exists by
+   * lookup-first (no exclusive create exists here); a stored name that
+   * differs is undone by [requireCreatedName]. A file that cannot be
+   * opened once created is deleted again: it is ours, and empty.
+   * `getStatSize` says whether the descriptor is a file (`canFsync`, and
+   * positional writes) or a pipe.
+   */
+  @WorkerThread
+  fun openWrite(token: String, name: String, mimeType: String): Map<String, Any?> {
+    requireLeaf(name)
+    val parent = requireWritableScope(token)
+    if (lookupChildRow(parent, name) != null) {
+      throw alreadyExists(name)
+    }
+    val contentResolver = requireContext().contentResolver
+    val created = onVolume(parent.documentUri) {
+      DocumentsContract.createDocument(contentResolver, parent.documentUri, mimeType, name)
+    } ?: throw missingDocument(parent.documentUri)
+    val row = rowBelowRoot(created) ?: throw missingDocument(created)
+    requireCreatedName(parent, created, row, name)
+    val pfd = try {
+      onVolume(created) { contentResolver.openFileDescriptor(created, "w") }
+        ?: throw IllegalStateException("The provider opened no descriptor for $created")
+    } catch (e: Exception) {
+      deleteResidue(created)
+      throw e
+    }
+    val statSize = pfd.statSize
+    val fd = pfd.detachFd()
+    plugin.logDebug("openWrite: fd $fd, statSize $statSize")
+    return mapOf(
+      "fd" to fd,
+      "identifier" to row.toResult(parent.treeUri)["identifier"],
+      "canFsync" to (statSize >= 0)
+    )
+  }
+
+  /**
+   * The entry [identifier] names, or null when it is provably gone: the
+   * stat a write session's commit returns.
+   */
+  @WorkerThread
+  fun statEntry(identifier: String): Map<String, Any?>? {
+    val uri = Uri.parse(identifier)
+    if (!hasPersistedReadGrant(requireContext().contentResolver, uri)) {
+      throw TaxonomyException(ErrorKind.PERMISSION_LOST, "No persisted grant covers $uri")
+    }
+    val row = rowBelowRoot(documentUriFor(uri)) ?: return null
+    return row.toResult(treeUriOf(uri))
+  }
+
+  /**
    * Creates the directory [name] under the directory a live scope token
    * names (tree-writes-plan §5). The name is looked up first, so a taken
    * one is `already-exists` without trying; a stored name that differs
@@ -1004,10 +1058,11 @@ class FilePickerWritableImpl(
    * throws `already-exists` when [name] is taken by now (a concurrent
    * create, and the provider auto-renamed ours), else `invalid-name` (the
    * provider cleaned the name). Only a residue that is provably fresh, an
-   * empty directory, is deleted: a provider may hand back an EXISTING
-   * folder for the cleaned name (ExternalStorageProvider never does; it
-   * always makes a new one), and deleting that would delete the user's
-   * files. Anything else is left alone, its identifier in the details.
+   * empty directory or a file of size 0, is deleted: a provider may hand
+   * back an EXISTING entry for the cleaned name (ExternalStorageProvider
+   * never does; it always makes a new one), and deleting that would delete
+   * the user's data. Anything else is left alone, its identifier in the
+   * details.
    */
   @WorkerThread
   private fun requireCreatedName(parent: Directory, created: Uri, row: DocumentRow, name: String) {
@@ -1016,16 +1071,21 @@ class FilePickerWritableImpl(
     }
     val taken = lookupChildRow(parent, name) != null
     val residue = Directory(parent.treeUri, DocumentsContract.getDocumentId(created), created, isTreeRoot = false)
-    val isFresh = row.isDirectory && try {
-      childrenBelowRoot(residue)?.isEmpty() == true
-    } catch (e: Exception) {
-      false
+    // Fresh: an empty directory, or a file of size 0 (openWrite's create).
+    val isFresh = if (row.isDirectory) {
+      try {
+        childrenBelowRoot(residue)?.isEmpty() == true
+      } catch (e: Exception) {
+        false
+      }
+    } else {
+      row.size == 0L
     }
     val extra = if (isFresh) {
       deleteResidue(created)
       emptyMap()
     } else {
-      plugin.logWarning("Not deleting $created: not an empty, fresh directory")
+      plugin.logWarning("Not deleting $created: not provably fresh (empty)")
       mapOf("identifier" to row.toResult(parent.treeUri)["identifier"], "residue" to "kept")
     }
     if (taken) {

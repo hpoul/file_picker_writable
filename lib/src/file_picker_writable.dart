@@ -16,6 +16,7 @@ import 'package:path_provider/path_provider.dart';
 import 'package:synchronized/synchronized.dart';
 
 part 'fd_reading.dart';
+part 'fd_writing.dart';
 
 final _logger = Logger('file_picker_writable');
 
@@ -744,6 +745,118 @@ class FilePickerWritable {
     final result = closeFd(session.fd);
     if (result < 0) {
       throw _errnoException(-result, 'close');
+    }
+  }
+
+  /// Creates the file [name] directly under the directory [scope] holds and
+  /// opens it for writing: a control call that never writes a byte. Write
+  /// it with an [FdWriter] in the isolate that produces the bytes (see
+  /// [WriteSession]), then commit or abort it.
+  ///
+  /// Fail-if-exists: a taken name is `already-exists` and nothing is
+  /// touched, so an abort can never delete someone else's file (callers
+  /// that mean to replace a file delete it first, deliberately). On iOS the
+  /// create is exclusive (`O_EXCL`); Android has no such primitive, so a
+  /// concurrent create of the same name can slip past the check there.
+  ///
+  /// [mimeType] is the caller's statement, required by Android. Keep the
+  /// default for `.writing`/`.part`/marker files: a real type may make a
+  /// provider append its own extension, which is then `invalid-name` (the
+  /// new file deleted again, as for [createDirectory]).
+  ///
+  /// [name] follows the leaf-name rule of [lookupChild] ([ArgumentError]).
+  /// Other failures: `scope-closed`, `not-a-directory`, `not-found`,
+  /// `permission-lost` (on Android also `reason: read-only`).
+  ///
+  /// Root isolate only. Android and iOS only; throws [UnsupportedError]
+  /// elsewhere.
+  @experimental
+  Future<WriteSession> openWrite({
+    required AcquiredScope scope,
+    required String name,
+    String mimeType = 'application/octet-stream',
+  }) async {
+    _logger.finest('openWrite()');
+    _requireScopePlatform('openWrite');
+    _requireLeafName(name);
+    _requireScopeLive(scope.id);
+    final result = await _channel.invokeMapMethod<String, Object?>(
+      'openWrite',
+      {'scope': scope.id, 'name': name, 'mimeType': mimeType},
+    );
+    if (result == null) {
+      throw StateError('Got null response for openWrite');
+    }
+    return WriteSession._(
+      result['fd']! as int,
+      result['identifier']! as String,
+      scope.id,
+      canFsync: result['canFsync']! as bool,
+    );
+  }
+
+  /// Commits a [WriteSession] that no [FdWriter] took over (or, with one,
+  /// commits through it): fsync when [fsync] and the session can, close,
+  /// and return the file's entry. As [FdWriter.closeWrite].
+  @experimental
+  Future<ChildEntry> closeWrite(
+    WriteSession session, {
+    bool fsync = true,
+  }) async {
+    session._requireOwned('closeWrite');
+    final writer = session._writer;
+    if (writer != null) {
+      return writer.closeWrite(fsync: fsync);
+    }
+    if (session._closed || session._aborted) {
+      throw PlatformException(
+        code: 'session-closed',
+        message: 'The WriteSession was already closed or aborted',
+      );
+    }
+    final synced = fsync && session.canFsync ? fsyncFd(session.fd) : 0;
+    session._closed = true;
+    final closed = closeFd(session.fd);
+    _requireScopeLive(session._scopeToken);
+    if (synced < 0) {
+      throw _errnoException(-synced, 'fsync');
+    }
+    if (closed < 0) {
+      throw _errnoException(-closed, 'close');
+    }
+    return _statEntry(session.identifier);
+  }
+
+  /// Aborts a [WriteSession]: closes its descriptor and deletes the
+  /// partial. Idempotent; a partial already gone is success.
+  ///
+  /// [closeFd] false is the kill path: after a helper holding the
+  /// descriptor was killed, its finalizer closed it, and this deletes the
+  /// partial by identifier only. That is the one call allowed on a
+  /// handed-off session. Never pass false otherwise: the descriptor leaks.
+  @experimental
+  Future<void> abortWrite(WriteSession session, {bool closeFd = true}) async {
+    if (closeFd) {
+      session._requireOwned('abortWrite');
+      final writer = session._writer;
+      if (writer != null) {
+        return writer.abort();
+      }
+      if (!session._closed) {
+        session._closed = true;
+        _closeIgnoringResult(session.fd);
+      }
+    }
+    session._aborted = true;
+    await _deletePartial(session.identifier);
+  }
+
+  static void _closeIgnoringResult(int fd) {
+    // An abort gives the file up either way; a failing close must not keep
+    // the partial from being deleted.
+    final result = closeFd(fd);
+    if (result < 0) {
+      _logger.warning('abortWrite: close failed with errno ${-result}');
     }
   }
 

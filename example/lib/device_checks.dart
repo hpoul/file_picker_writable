@@ -303,6 +303,9 @@ Future<void> runDeviceChecks(FileInfo directory) async {
   // 6. Tree verbs (doc/tree-writes-plan.md §7), in fixture/tree.
   await _treeChecks(plugin, directory, root, step, log);
 
+  // 7. Write sessions (doc/tree-writes-plan.md §7), in fixture/w.
+  await _writeChecks(plugin, root, step, log);
+
   // Saved for the next launch's relaunch checks.
   saved.writeAsStringSync(
     jsonEncode({
@@ -312,6 +315,224 @@ Future<void> runDeviceChecks(FileInfo directory) async {
     }),
   );
   log('=== done; saved ${saved.path}');
+}
+
+/// Size of the file a helper writes: 8 MiB and an odd tail.
+const _writeLength = (8 << 20) + 321;
+
+/// A helper's write of [length] bytes of big.bin's pattern, 1 MiB per
+/// chunk, then its own commit (or, with [abort], its own abort) through the
+/// plugin's channel from the helper: the stored name and size, the
+/// microseconds the writes took, or (-1) after an abort. A factory, so the
+/// closure captures the record and nothing else.
+Future<(String, int, int)> Function() _helperWrite(
+  WriteHandoff handoff,
+  int length, {
+  bool abort = false,
+}) => () async {
+  final writer = FdWriter.fromHandoff(handoff);
+  final chunk = Uint8List(1 << 20);
+  final stopwatch = Stopwatch()..start();
+  for (var offset = 0; offset < length; offset += chunk.length) {
+    final n = length - offset < chunk.length ? length - offset : chunk.length;
+    for (var i = 0; i < n; i++) {
+      chunk[i] = _bigByte(offset + i);
+    }
+    writer.writeChunk(Uint8List.sublistView(chunk, 0, n));
+  }
+  final micros = stopwatch.elapsedMicroseconds;
+  if (abort) {
+    await writer.abort();
+    return ('', -1, micros);
+  }
+  final entry = await writer.closeWrite();
+  return (entry.name, entry.size ?? -1, micros);
+};
+
+/// Reads [length] bytes of big.bin's pattern back in a helper: mismatches.
+int Function() _helperVerify(ReadHandoff handoff, int length) => () {
+  final reader = FdReader.fromHandoff(handoff);
+  try {
+    var position = 0;
+    var mismatches = 0;
+    while (true) {
+      final chunk = reader.readChunk(position, reader.bufferLength);
+      if (chunk.isEmpty) {
+        return position == length ? mismatches : -1;
+      }
+      mismatches += _mismatches(chunk, position);
+      position += chunk.length;
+    }
+  } finally {
+    reader.close();
+  }
+};
+
+/// A helper that writes, reports, and waits to be killed.
+void _writeAndWait((WriteHandoff, SendPort) message) {
+  final (record, ready) = message;
+  final writer = FdWriter.fromHandoff(record);
+  ready.send(writer.writeChunk(Uint8List(4096)));
+  // Keep the writer reachable until the kill.
+  ReceivePort().listen((_) => writer.bytesWritten);
+}
+
+/// openWrite, FdWriter, commit and abort in a `w/` folder of the fixture
+/// [root], rebuilt on every run: a small write on this isolate; a helper
+/// that writes 8 MiB and commits itself (the channel from a helper), then
+/// the consumer's rename-to-commit and a read back; a helper that aborts
+/// itself; a taken name; a FAT-style name; and a killed helper's partial
+/// aborted by identifier only. The open-descriptor count before and after
+/// shows every path closed what it opened.
+Future<void> _writeChecks(
+  FilePickerWritable plugin,
+  String root,
+  Future<T?> Function<T>(String label, Future<T> Function() run) step,
+  void Function(String) log,
+) async {
+  final fdsBefore = _openFds();
+  final fixture = await plugin.acquire(identifier: root);
+  try {
+    final old = await plugin.lookupChild(identifier: root, name: 'w');
+    if (old != null) {
+      await plugin.deleteEntry(identifier: old.identifier, recursive: true);
+    }
+    final w = await step(
+      'write: createDirectory w',
+      () => plugin.createDirectory(scope: fixture, name: 'w'),
+    );
+    if (w == null) {
+      return;
+    }
+    final wScope = await plugin.acquire(identifier: w.identifier);
+    try {
+      await step('write: small file on this isolate', () async {
+        final session = await plugin.openWrite(
+          scope: wScope,
+          name: 'small.json',
+          mimeType: 'application/json',
+        );
+        final writer = FdWriter.fromSession(session);
+        writer.writeChunk(Uint8List.fromList(utf8.encode('{"written":true}')));
+        final entry = await writer.closeWrite();
+        return '${entry.name}, ${entry.size} bytes';
+      });
+      await step(
+        'write: small.json again (taken)',
+        () => plugin.openWrite(scope: wScope, name: 'small.json'),
+      );
+      await step('write: "12:30.bin" (FAT-style name)', () async {
+        // APFS keeps the name; what opened is aborted again.
+        final session = await plugin.openWrite(
+          scope: wScope,
+          name: '12:30.bin',
+        );
+        await plugin.abortWrite(session);
+        return 'opened as is, aborted';
+      });
+      final big = await step(
+        'write: 8 MiB in a helper, committed there',
+        () async {
+          final session = await plugin.openWrite(
+            scope: wScope,
+            name: 'big.bin.writing',
+          );
+          final record = session.handoff();
+          final (name, size, micros) = await Isolate.run(
+            _helperWrite(record, _writeLength),
+          );
+          final mibs = (size / (1 << 20) / (micros / 1e6)).toStringAsFixed(0);
+          return '$name, $size bytes (expected $_writeLength), '
+              '${micros ~/ 1000} ms of writes ($mibs MiB/s)';
+        },
+      );
+      if (big != null) {
+        final writing = await plugin.lookupChild(
+          identifier: w.identifier,
+          name: 'big.bin.writing',
+        );
+        final committed = writing == null
+            ? null
+            : await step(
+                'write: commit by rename to big.bin',
+                () => plugin.moveEntry(
+                  identifier: writing.identifier,
+                  sourceParent: wScope,
+                  newParent: wScope,
+                  newName: 'big.bin',
+                ),
+              );
+        if (committed != null) {
+          await step('write: read big.bin back in a helper', () async {
+            final scope = await plugin.acquire(
+              identifier: committed.identifier,
+            );
+            try {
+              final session = await plugin.openRead(scope: scope);
+              final mismatches = await Isolate.run(
+                _helperVerify(session.handoff(), _writeLength),
+              );
+              return '$mismatches mismatches (-1: wrong length)';
+            } finally {
+              await plugin.release(scope);
+            }
+          });
+        }
+      }
+      await step('write: 1 MiB in a helper, aborted there', () async {
+        final session = await plugin.openWrite(
+          scope: wScope,
+          name: 'aborted.writing',
+        );
+        await Isolate.run(
+          _helperWrite(session.handoff(), 1 << 20, abort: true),
+        );
+        final left = await plugin.lookupChild(
+          identifier: w.identifier,
+          name: 'aborted.writing',
+        );
+        return 'partial left: ${left != null}';
+      });
+      await step('write: killed helper, abort by identifier', () async {
+        final session = await plugin.openWrite(
+          scope: wScope,
+          name: 'killed.writing',
+        );
+        final ready = ReceivePort();
+        final exited = ReceivePort();
+        final helper = await Isolate.spawn(_writeAndWait, (
+          session.handoff(),
+          ready.sendPort,
+        ), onExit: exited.sendPort);
+        await ready.first;
+        helper.kill(priority: Isolate.immediate);
+        await exited.first;
+        await plugin.abortWrite(session, closeFd: false);
+        final left = await plugin.lookupChild(
+          identifier: w.identifier,
+          name: 'killed.writing',
+        );
+        return 'partial left: ${left != null}';
+      });
+      await step('write: listing of w', () async {
+        final listing = await plugin.listChildren(identifier: w.identifier);
+        return (listing.entries.map((e) => '${e.name} ${e.size}').toList()
+              ..sort())
+            .join(', ');
+      });
+    } finally {
+      await plugin.release(wScope);
+    }
+    await step(
+      'write: delete w, recursive',
+      () => plugin
+          .deleteEntry(identifier: w.identifier, recursive: true)
+          .then((_) => 'ok'),
+    );
+  } finally {
+    await plugin.release(fixture);
+  }
+  log('write checks: open descriptors $fdsBefore before, ${_openFds()} after');
 }
 
 /// A move between two picked folders: a probe folder created in [first]

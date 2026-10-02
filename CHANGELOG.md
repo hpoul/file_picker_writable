@@ -87,6 +87,21 @@
     a picked folder's own root (or a single picked file) cannot be
     deleted or moved, only what is inside a picked folder. On Android a
     read-only tree grant is `permission-lost`, `reason: read-only`.
+  * Write sessions without temp staging: `openWrite(scope:, name:,
+    mimeType:)` creates a new file (fail-if-exists: a taken name is
+    `already-exists`; exclusive on iOS) and hands back a `WriteSession`
+    that owns a native descriptor. `FdWriter.writeChunk` writes over FFI
+    and returns the acknowledged total (progress); `closeWrite` fsyncs
+    (default on), closes and returns the stored `ChildEntry`; `abort`
+    closes and deletes the partial. Both are idempotent. As for reads,
+    write where the bytes are produced: `FdWriter.fromSession`, or
+    `WriteSession.handoff()` and `FdWriter.fromHandoff` in a helper,
+    which then commits or aborts by itself through the plugin's channel.
+    After a killed helper, `abortWrite(session, closeFd: false)` deletes
+    the partial by identifier. A volume that accepts fewer bytes than
+    offered is `errno-28` with `synthesized: true`, never a silent short
+    write. More than 1 MiB per writer on the root isolate fails a debug
+    assertion.
 * Android: every method-channel call now runs on a shared background
   TaskQueue instead of the main thread, so slow providers no longer block
   frames. The pickers and `init` still hop to the main thread. Launch URLs

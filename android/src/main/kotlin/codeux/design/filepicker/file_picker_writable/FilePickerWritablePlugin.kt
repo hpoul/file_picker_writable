@@ -150,6 +150,18 @@ class FilePickerWritablePlugin : FlutterPlugin, MethodCallHandler,
       "openRead" -> onQueue(call, result, Result::taxonomyError) {
         result.success(impl.openRead(call.requireArgument("scope")))
       }
+      "openWrite" -> onQueue(call, result, Result::taxonomyError) {
+        result.success(
+          impl.openWrite(
+            call.requireArgument("scope"),
+            call.requireArgument("name"),
+            call.requireArgument("mimeType")
+          )
+        )
+      }
+      "statEntry" -> onQueue(call, result, Result::taxonomyError) {
+        result.success(impl.statEntry(call.requireArgument("identifier")))
+      }
       "createDirectory" -> onQueue(call, result, Result::taxonomyError) {
         result.success(
           impl.createDirectory(call.requireArgument("scope"), call.requireArgument("name"))

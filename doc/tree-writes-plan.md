@@ -2,8 +2,8 @@
 
 Status: proposal, for review. No commitments. In implementation:
 R1 (`openDirectory`) shipped with Gap 1a (#68); the single-shot
-tree verbs (`createDirectory`, `deleteEntry`, `moveEntry`) are
-PR 4; write sessions (`openWrite`, `FdWriter`) follow in PR 5.
+tree verbs (`createDirectory`, `deleteEntry`, `moveEntry`) with
+#71; write sessions (`openWrite`, `FdWriter`) are PR 5.
 Date: 2026-09-30.
 Transport decision revised 2026-09-30 after measurement (`bench/`, 2b §3).
 Context: same consumer as the Gap-1/1a/2b plans — phone-side trip
@@ -216,8 +216,16 @@ Notes:
   unreleased scope ids; same-isolate `fromSession` checks at
   construction and close. `handoff()` validates root-side and
   carries the opaque token; the helper performs no live check
-  (handoff-time snapshot). The scope MUST stay acquired until
-  close (caller obligation on the helper path).
+  (handoff-time snapshot). The scope should stay acquired until
+  close (softened as in 2b §5: an open fd survives a release).
+  A helper's own commit or abort needs the channel: the handoff
+  carries the root isolate's `RootIsolateToken`, and
+  `FdWriter.fromHandoff` sets up the
+  `BackgroundIsolateBinaryMessenger` from it. The plugin's channel
+  is a static constant, so the helper calls it without touching
+  the `FilePickerWritable()` singleton (whose constructor installs
+  a handler, which background isolates refuse); no separate
+  channel client was needed (implementation finding, PR 5).
 - Leaf-name rule (peer-confirmed): `name`/`newName` reject empty,
   `.`/`..`, and any `/` or NUL — one rule, both platforms (Android
   display names and iOS path components alike). Names starting
@@ -271,11 +279,13 @@ Notes:
   after kill is meaningless: abort, don't commit. The `closeFd` /
   `fsync` escape hatches live on the session-level verbs only;
   `FdWriter` methods run in the owning isolate and always take
-  the full path. Recovery: if `Isolate.spawn` throws after
-  `handoff()` (or the helper dies before its wrapper exists),
-  the root recovers with `fromHandoff` on its own copy and
-  closes/aborts normally (fd still open — nothing attached a
-  finalizer yet). A kill in that window leaks the fd.
+  the full path. Recovery: only if the spawn itself throws
+  (`IsolateSpawnException`) after `handoff()` does the root
+  recover with `fromHandoff` on its own copy and close/abort
+  normally — the same correction as 2b (#70 review S2): a helper
+  that died later may already have closed the fd. A kill before
+  the helper's wrapper exists leaks the fd; the partial is still
+  aborted by identifier.
 - Fail-if-exists is the documented `openWrite` rule (peer
   re-confirmed, superseding truncate): an existing name is loud
   `already-exists`, so abort can never destroy an overwrite
@@ -370,15 +380,22 @@ Notes:
   resumes. Maps into the §6 taxonomy.
 - `closeWrite`: FFI `fsync` (iff requested and `canFsync`) +
   `close`, then a channel control call stats the child into a
-  `ChildEntry`. `abortWrite`: FFI `close` (skipped with
-  `closeFd: false` on the kill path — the finalizer closed it),
-  then a channel control call `deleteDocument`s the partial. Both
-  idempotent; use-after-either is loud `session-closed`. A close
-  whose liveness check fails still runs the native cleanup (fd +
-  buffer), then throws — same rule as 2b.
-  Explicit close/abort and the finalizer backstop all release the
-  fd + `malloc` buffer as one native cleanup record (same rule as
-  2b — a closing fd alone would leak the buffer on the kill path).
+  `ChildEntry` (an internal `statEntry` verb: identifier in,
+  entry out, single-shot scope). `abortWrite`: FFI `close`
+  (skipped with `closeFd: false` on the kill path — the finalizer
+  closed it), then the channel's `deleteEntry` (non-recursive) on
+  the partial: gone is success, and the #71 guards apply. Both
+  idempotent: a second commit returns the same entry, a second
+  abort is a no-op; commit after abort is `session-closed`, and
+  abort after a commit is a `StateError` (it would delete the
+  committed file; `deleteEntry` is the deliberate way). A close
+  whose liveness check fails still runs the native cleanup, then
+  throws — same rule as 2b. The fd's owner record and the Dart-owned
+  staging buffer are separate, as in 2b after its review: explicit
+  close/abort and the finalizer release the fd; the buffer frees
+  itself. A file whose open fails after its create is deleted
+  again (it is ours, and empty); a mismatched-name residue is
+  deleted only when fresh — for a file, size 0 (#71's M3 rule).
 - `createDirectory`: `lookupChild` first (taken name ⇒ loud
   `already-exists`, not attempted); `createDocument` with
   `MIME_TYPE_DIR`, then verify the returned display name matches
@@ -504,9 +521,12 @@ Notes:
   atomically with exclusive semantics (`O_CREAT|O_EXCL` — taken
   name ⇒ loud `already-exists`, no TOCTOU); the fd IS the session
   payload (no `FileHandle` wrapper), `canFsync` always true
-  (regular files). `writeChunk`/`closeWrite`/
+  (regular files). `O_EXCL` also refuses a symlink at the name, so
+  nothing is ever followed, and the parent is the scope directory
+  re-checked by real path (#71 S-B). `writeChunk`/`closeWrite`/
   `abortWrite` are the same Dart FFI as Android (`pwrite`,
-  `fsync`, `close`; abort removes the partial via `FileManager`).
+  `fsync`, `close`; abort removes the partial through the shared
+  `deleteEntry`, under its guards).
   Off main; results hop to main per convention.
 - `createDirectory`: `FileManager.createDirectory` under the
   passed-in parent scope (not per-call — §4). `deleteEntry`:
@@ -661,6 +681,35 @@ before graduation.
     proven-gone path ("Missing file for" plus a live ancestor), and
     a move between two picks on one volume (two tree URIs,
     `FpwTree` → `FpwTree2` and back) on Android too.
+- Results for the write sessions (PR 5, 2026-10-02):
+  - VM tests (`test/fd_writing_test.dart`, real descriptors and
+    the real shim, control calls faked): what `openWrite` sends;
+    totals and staging past the buffer; commit, its idempotency
+    (same entry, no second stat); abort, its idempotency, and abort
+    after commit refused; a scope released mid-write (cleanup,
+    then `scope-closed`, the partial left for abort); errno mapping
+    (EBADF on a read-only fd ⇒ `session-closed`); one writer per
+    session; the 1 MiB root-isolate budget; the session-level
+    commit and abort; the dead copy after `handoff()` (fd use
+    refused, root recovery commits); the kill path (finalizer
+    closes, `abortWrite(closeFd: false)` deletes); pipes (in order,
+    no fsync). Not stubbed: the synthesized ENOSPC (no host volume
+    writes 0) — device-only, and not forced there either.
+  - Device run (`example/lib/device_checks.dart`, `w/` in the
+    fixture), iOS simulator (two picks) and API 36 emulator: a
+    small write committed on the root isolate; a taken name ⇒
+    `already-exists`; `12:30.bin` ⇒ `invalid-name` (`12_30.bin`)
+    with no residue on Android, kept on APFS (then aborted); 8 MiB
+    written in a helper that COMMITS ITSELF through the channel
+    from the helper isolate, the consumer's commit-by-rename
+    (`big.bin.writing` → `big.bin`), and a read back in a helper,
+    0 mismatches; a helper that aborts itself (no partial left); a
+    killed helper's partial aborted by identifier (none left); the
+    listing holds exactly the two committed files; Android
+    `/proc/self/fd` 159/159.
+  - Not run yet: a full or failing volume mid-write (ENOSPC, EIO),
+    a pipe-backed provider, a write of 1 GB for the memory bound,
+    a revoked grant mid-write.
 
 ## 8. Graduation (experimental → stable)
 

@@ -216,6 +216,27 @@ public class FilePickerWritablePlugin: NSObject, FlutterPlugin {
         _offMain(result) { [self] in
           try _openRead(token: token)
         }
+      case "openWrite":
+        guard
+          let args = call.arguments as? [String: Any],
+          let token = args["scope"] as? String,
+          let name = args["name"] as? String
+        else {
+          throw FilePickerError.invalidArguments(message: "Expected 'scope' and 'name'")
+        }
+        _offMain(result) { [self] in
+          try _openWrite(token: token, name: name)
+        }
+      case "statEntry":
+        guard
+          let args = call.arguments as? [String: Any],
+          let identifier = args["identifier"] as? String
+        else {
+          throw FilePickerError.invalidArguments(message: "Expected 'identifier'")
+        }
+        _offMain(result) { [self] in
+          try _statEntry(identifier: identifier)
+        }
       case "createDirectory":
         guard
           let args = call.arguments as? [String: Any],
@@ -556,6 +577,56 @@ public class FilePickerWritablePlugin: NSObject, FlutterPlugin {
       message: "\(message): \(String(cString: strerror(code)))",
       details: ["domain": "errno", "code": Int(code)]
     )
+  }
+
+  /// Creates the file `name` under the directory a live scope token names
+  /// and hands a write descriptor to Dart (tree-writes-plan §5), under the
+  /// token's held scope. Exclusive: `O_CREAT | O_EXCL` fails on any taken
+  /// name, a symlink included (never followed), so there is no check-then-
+  /// create window and no residue. Never writes a byte.
+  private func _openWrite(token: String, name: String) throws -> [String: Any] {
+    try _requireLeaf(name)
+    let parent = try _requireDirectoryScope(token)
+    let child = parent.child(name)
+    let fd = open(child.url.path, O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, 0o644)
+    guard fd >= 0 else {
+      let code = errno
+      if code == EEXIST {
+        throw TaxonomyError(kind: ErrorKind.alreadyExists, message: "\"\(name)\" is taken", details: ["name": name])
+      }
+      throw Self._errnoError(code, "open \(name)")
+    }
+    var info = stat()
+    guard fstat(fd, &info) == 0 else {
+      let error = Self._errnoError(errno, "fstat \(name)")
+      close(fd)
+      unlink(child.url.path)
+      throw error
+    }
+    let isRegular = (info.st_mode & S_IFMT) == S_IFREG
+    logDebug("openWrite: fd \(fd), regular \(isRegular)")
+    return [
+      "fd": Int(fd),
+      "identifier": child.identifier(withRoot: try child.currentRoot()),
+      "canFsync": isRegular,
+    ]
+  }
+
+  /// The entry `identifier` names, or nil when it is gone: the stat a
+  /// write session's commit returns. Single-shot scope.
+  private func _statEntry(identifier: String) throws -> [String: Any]? {
+    let resolved = try _resolve(identifier)
+    guard resolved.scopeURL.startAccessingSecurityScopedResource() else {
+      throw TaxonomyError(kind: ErrorKind.permissionLost, message: "startAccessingSecurityScopedResource refused for \(resolved.scopeURL)")
+    }
+    defer {
+      resolved.scopeURL.stopAccessingSecurityScopedResource()
+    }
+    try _requireContained(resolved)
+    guard (try? resolved.url.checkResourceIsReachable()) == true else {
+      return nil
+    }
+    return try _childEntry(resolved.url, identifierKey: "identifier", identifierValue: resolved.identifier(withRoot: resolved.currentRoot()))
   }
 
   /// Creates the directory `name` under the directory a live scope token
