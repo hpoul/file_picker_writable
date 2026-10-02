@@ -6,9 +6,11 @@
 // the finalizer, pipes, and scope liveness. Only a device run can prove the
 // providers' descriptors and the errno set after a detach.
 
+import 'dart:async';
 import 'dart:ffi';
 import 'dart:io';
 import 'dart:isolate';
+import 'dart:typed_data' show BytesBuilder;
 
 import 'package:file_picker_writable/file_picker_writable.dart';
 import 'package:file_picker_writable/src/fd_native.dart';
@@ -480,6 +482,93 @@ void main() {
     });
   });
 
+  group('readStream', () {
+    test('a range, in chunks, then the reader is closed', () async {
+      final (scope, session) = await open();
+      final reader = FdReader.fromSession(session, bufferLength: 1000);
+      final chunks = <int>[];
+      final bytes = BytesBuilder();
+      await for (final view in reader.readStream(start: 100, end: 2600)) {
+        chunks.add(view.length);
+        bytes.add(view); // add copies
+      }
+      expect(chunks, [1000, 1000, 500]);
+      expect(bytes.takeBytes(), content.sublist(100, 2600));
+      expect(isClosed(session.fd), isTrue);
+      await plugin.release(scope);
+    });
+
+    test('a view is valid while the await-for body awaits', () async {
+      final (scope, session) = await open();
+      final reader = FdReader.fromSession(session, bufferLength: 64);
+      var position = 0;
+      await for (final view in reader.readStream(end: 640)) {
+        await Future<void>.delayed(const Duration(milliseconds: 1));
+        expect(view, content.sublist(position, position + view.length));
+        position += view.length;
+      }
+      expect(position, 640);
+      await plugin.release(scope);
+    });
+
+    test('cancel closes the reader; awaiting it waits for the close', () async {
+      final (scope, session) = await open();
+      final reader = FdReader.fromSession(session, bufferLength: 64);
+      late StreamSubscription<Uint8List> subscription;
+      final first = Completer<void>();
+      subscription = reader.readStream().listen((_) {
+        if (!first.isCompleted) {
+          first.complete();
+        }
+      });
+      await first.future;
+      await subscription.cancel();
+      expect(isClosed(session.fd), isTrue);
+      await plugin.release(scope);
+    });
+
+    test('errors arrive on the stream, and the reader still closes', () async {
+      final (scope, session) = await open();
+      expect(fpw_close(session.fd), 0, reason: 'closed behind its back');
+      final reader = FdReader.fromSession(session);
+      await expectLater(
+        reader.readStream(end: 10).toList(),
+        throwsA(
+          isA<PlatformException>().having(
+            (e) => e.code,
+            'code',
+            'session-closed',
+          ),
+        ),
+      );
+      expect(
+        () => reader.readChunk(0, 1),
+        throwsA(isA<PlatformException>()),
+        reason: 'closed by the stream',
+      );
+      await plugin.release(scope);
+    });
+
+    test('bad ranges and chunk lengths are ArgumentErrors', () async {
+      final (scope, session) = await open();
+      final reader = FdReader.fromSession(session, bufferLength: 16);
+      expect(() => reader.readStream(chunkLength: 17), throwsArgumentError);
+      expect(() => reader.readStream(chunkLength: 0), throwsArgumentError);
+      expect(() => reader.readStream(start: -1), throwsArgumentError);
+      expect(() => reader.readStream(start: 5, end: 4), throwsArgumentError);
+      reader.close();
+      await plugin.release(scope);
+    });
+
+    test('a helper streams the whole file', () async {
+      final (scope, session) = await open();
+      final copy = await Isolate.run(_streamAll(session.handoff()));
+      expect(copy, content);
+      expect(isClosed(session.fd), isTrue);
+      await plugin.release(scope);
+    });
+  });
+
   group('pipes', () {
     test(
       'sequential reads, forward skips, backward is seek-unsupported',
@@ -585,6 +674,15 @@ void _writeInParts((int, SendPort) message) {
   _free(buffer);
   fpw_close(fd);
 }
+
+/// A helper that streams the whole handed-off file and returns a copy.
+Future<Uint8List> Function() _streamAll(ReadHandoff record) => () async {
+  final bytes = BytesBuilder();
+  await for (final view in FdReader.fromHandoff(record).readStream()) {
+    bytes.add(view);
+  }
+  return bytes.takeBytes();
+};
 
 /// The helper's work, built at top level so the closure captures only the
 /// record (a closure inside the test would capture its unsendable context).

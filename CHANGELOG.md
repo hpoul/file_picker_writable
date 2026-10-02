@@ -109,6 +109,12 @@
     offered is `errno-28` with `synthesized: true`, never a silent short
     write. More than 1 MiB per writer on the root isolate fails a debug
     assertion.
+  * Streams: `FdReader.readStream({start, end, chunkLength})` reads a
+    range as a stream of views, each valid until the listener is ready
+    for the next (after `onData`, or an `await for` body), and closes the
+    reader when it ends, fails or is cancelled. `FdWriter.writeStream`
+    writes a `Stream<List<int>>` in order and returns the total; it does
+    not commit.
 * Android: every method-channel call now runs on a shared background
   TaskQueue instead of the main thread, so slow providers no longer block
   frames. The pickers and `init` still hop to the main thread. Launch URLs

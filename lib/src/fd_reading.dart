@@ -292,6 +292,105 @@ class FdReader {
     throw error;
   }
 
+  /// Reads from [start] to the end of the file (or to [end]) as a stream of
+  /// views, [chunkLength] bytes each (default [bufferLength]), and closes
+  /// the reader when the stream ends, fails or is cancelled (awaiting the
+  /// subscription's `cancel()` waits for that close).
+  ///
+  /// Each event is a VIEW of the reader's buffer, as from [readChunk]:
+  /// valid until the next event. The next chunk is read only once the
+  /// listener is ready for it: after `onData` returns, or with `await for`
+  /// after the loop body (which may await) finishes. So consume it in
+  /// place, and copy it to keep it. Between chunks the stream yields to the
+  /// event loop, so a cancel message to a helper isolate gets through.
+  ///
+  /// Errors are [readChunk]'s, delivered on the stream; a close that fails
+  /// (`scope-closed` after a mid-read release) is too. Single
+  /// subscription; no other reads on this reader while it runs. On a pipe,
+  /// [start] must not lie behind what was read already.
+  Stream<Uint8List> readStream({int start = 0, int? end, int? chunkLength}) {
+    final length = chunkLength ?? bufferLength;
+    if (length <= 0 || length > bufferLength) {
+      throw ArgumentError.value(
+        chunkLength,
+        'chunkLength',
+        'must be 1..$bufferLength',
+      );
+    }
+    if (start < 0 || (end != null && end < start)) {
+      throw ArgumentError('Not a range: $start..$end');
+    }
+    late final StreamController<Uint8List> controller;
+    var cancelled = false;
+    Completer<void>? resumed;
+
+    Future<void> pump() async {
+      var position = start;
+      Object? failure;
+      StackTrace? failureTrace;
+      try {
+        while (!cancelled) {
+          if (controller.isPaused) {
+            resumed = Completer<void>();
+            await resumed!.future;
+            continue;
+          }
+          final remaining = end == null ? length : end - position;
+          if (remaining <= 0) {
+            break;
+          }
+          final view = readChunk(
+            position,
+            remaining < length ? remaining : length,
+          );
+          if (view.isEmpty) {
+            break;
+          }
+          position += view.length;
+          controller.add(view);
+          // Let the event loop run: other events (a cancel message) get in.
+          await Future<void>.delayed(Duration.zero);
+        }
+      } catch (error, trace) {
+        failure = error;
+        failureTrace = trace;
+      }
+      try {
+        close();
+      } catch (error, trace) {
+        failure ??= error;
+        failureTrace ??= trace;
+      }
+      if (!cancelled) {
+        if (failure != null) {
+          // May cancel the subscription right here (cancelOnError), whose
+          // cancel then waits on this very pump: never await the close.
+          controller.addError(failure, failureTrace);
+        }
+        unawaited(controller.close());
+      }
+    }
+
+    Future<void>? pumping;
+    controller = StreamController<Uint8List>(
+      // Sync delivery: the view reaches onData before the next read.
+      sync: true,
+      onListen: () => pumping = pump(),
+      onResume: () {
+        resumed?.complete();
+        resumed = null;
+      },
+      // `await subscription.cancel()` returns once the reader is closed.
+      onCancel: () {
+        cancelled = true;
+        resumed?.complete();
+        resumed = null;
+        return pumping;
+      },
+    );
+    return controller.stream;
+  }
+
   /// Closes the descriptor. Idempotent. Built from a session, it also
   /// checks the scope is still acquired, and throws `scope-closed` after
   /// the cleanup if it was released mid-read.

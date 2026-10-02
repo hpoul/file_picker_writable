@@ -312,6 +312,18 @@ class FdWriter {
     return _total;
   }
 
+  /// Writes every chunk of [source] in order ([writeChunk] for each) and
+  /// returns the new acknowledged total. Does not commit: call [closeWrite]
+  /// (or [abort]) after, deliberately. An error from [source] or from a
+  /// write ends the call with that error and leaves the writer open, with
+  /// [bytesWritten] exact, for the caller to abort or retry.
+  Future<int> writeStream(Stream<List<int>> source) async {
+    await for (final chunk in source) {
+      writeChunk(chunk is Uint8List ? chunk : Uint8List.fromList(chunk));
+    }
+    return _total;
+  }
+
   bool _withinRootBudget() {
     if (_total > _rootIsolateWriteBudget && _onRootIsolate) {
       throw AssertionError(

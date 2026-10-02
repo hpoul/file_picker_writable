@@ -99,6 +99,19 @@ int _mismatches(Uint8List view, int offset) {
   }
 };
 
+/// Streams the whole handed-off file in a helper with
+/// [FdReader.readStream], checking each view in place: the byte count and
+/// how many bytes differ from big.bin.
+Future<(int, int)> Function() _streamAll(ReadHandoff handoff) => () async {
+  var position = 0;
+  var mismatches = 0;
+  await for (final view in FdReader.fromHandoff(handoff).readStream()) {
+    mismatches += _mismatches(view, position);
+    position += view.length;
+  }
+  return (position, mismatches);
+};
+
 /// Open descriptors of this process, or null where it cannot tell.
 int? _openFds() {
   for (final path in ['/proc/self/fd', '/dev/fd']) {
@@ -977,6 +990,13 @@ Future<void> _readChecks(
         },
       );
     }
+    await step('read all as a stream in a helper (verified)', () async {
+      final session = await plugin.openRead(scope: scope);
+      final (bytes, mismatches) = await Isolate.run(
+        _streamAll(session.handoff()),
+      );
+      return '$bytes bytes (expected $_bigLength), $mismatches mismatches';
+    });
     await step('closeRead twice', () async {
       final session = await plugin.openRead(scope: scope);
       await plugin.closeRead(session);

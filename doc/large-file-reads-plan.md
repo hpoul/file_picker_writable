@@ -556,7 +556,16 @@ All three, then drop `@experimental` in a minor:
 - Chunk default 1MB (C1 row is flat 64K–1M)? Confirm on cold
   flash; views make big buffers cheap either way.
 - Dart-side convenience: a thin sequential `Stream<Uint8List>`
-  over open/read/close for in-helper callers? Probably yes.
+  over open/read/close for in-helper callers? RESOLVED yes
+  (owner, 2026-10-02): `FdReader.readStream({start, end,
+  chunkLength})` yields views of the reader's buffer through a
+  sync controller, reading the next chunk only once the listener
+  is ready (after `onData` returns, or after an `await for` body),
+  yields to the event loop between chunks (a cancel message gets
+  in), and closes the reader at its end, on an error, or on
+  cancel (awaiting `cancel()` waits for the close). The write half
+  is `FdWriter.writeStream(Stream<List<int>>)`, which writes in
+  order and does not commit. Views stay views: copy to keep.
 - Single-owner enforcement: discipline plus idempotent close for
   v1; add a debug-mode double-close detector if cross-isolate
   leaks bite in practice?

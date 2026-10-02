@@ -8,6 +8,7 @@
 // channel calls (commit or abort from the helper) need a real engine: the
 // device run proves those.
 
+import 'dart:async';
 import 'dart:ffi';
 import 'dart:io';
 import 'dart:isolate';
@@ -397,6 +398,41 @@ void main() {
       );
       expect(isClosed(session.fd), isFalse);
       await plugin.abortWrite(session);
+      await plugin.release(scope);
+    });
+  });
+
+  group('writeStream', () {
+    test('writes every chunk in order, then the caller commits', () async {
+      final (scope, session) = await open('s.bin');
+      final writer = FdWriter.fromSession(session, bufferLength: 16);
+      final total = await writer.writeStream(
+        Stream.fromIterable([
+          bytes.sublist(0, 30),
+          bytes.sublist(30, 31),
+          bytes.sublist(31).toList(), // a plain List<int> too
+        ]),
+      );
+      expect(total, 100);
+      // Not committed by writeStream.
+      expect(isClosed(session.fd), isFalse);
+      expect((await writer.closeWrite()).size, 100);
+      expect(File(session.identifier).readAsBytesSync(), bytes);
+      await plugin.release(scope);
+    });
+
+    test('a failing source ends the call, the writer stays open', () async {
+      final (scope, session) = await open('t.bin');
+      final writer = FdWriter.fromSession(session);
+      final source = StreamController<List<int>>();
+      final writing = writer.writeStream(source.stream);
+      source.add(bytes.sublist(0, 10));
+      source.addError(StateError('source failed'));
+      await expectLater(writing, throwsStateError);
+      expect(writer.bytesWritten, 10);
+      expect(isClosed(session.fd), isFalse);
+      await writer.abort();
+      expect(File(session.identifier).existsSync(), isFalse);
       await plugin.release(scope);
     });
   });
