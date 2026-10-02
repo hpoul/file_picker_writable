@@ -7,6 +7,10 @@ enum ErrorKind {
   static let scopeClosed = "scope-closed"
   static let notADirectory = "not-a-directory"
   static let notAFile = "not-a-file"
+  static let alreadyExists = "already-exists"
+  static let directoryNotEmpty = "directory-not-empty"
+  static let unsupportedMove = "unsupported-move"
+  static let rootProtected = "root-protected"
   static let invalidName = "invalid-name"
 }
 
@@ -41,8 +45,9 @@ final class ScopeRegistry {
   /// instances for the same file.
   private var holds: [String: Hold] = [:]
   private var tokenKeys: [String: String] = [:]
-  /// What each token was acquired for: the held file, or a child of it.
-  private var tokenTargets: [String: URL] = [:]
+  /// What each token was acquired for: the held file, or a child of it,
+  /// with the root and path its child identifiers are minted from.
+  private var tokenTargets: [String: ResolvedIdentifier] = [:]
 
   /// Adds a token for `target`, held through the scope of `url` (the
   /// target itself, or the root it lives under), starting access if that
@@ -51,7 +56,7 @@ final class ScopeRegistry {
   /// those tokens fail loud rather than silently rebind. Throws
   /// `StartRefused` when the system refuses the scope. Returns the token
   /// and how many old tokens were dropped.
-  func acquire(url: URL, target: URL, session: String) throws -> (token: String, dropped: Int) {
+  func acquire(url: URL, target: ResolvedIdentifier, session: String) throws -> (token: String, dropped: Int) {
     lock.lock()
     defer { lock.unlock() }
     var dropped = 0
@@ -78,7 +83,7 @@ final class ScopeRegistry {
   /// The target `token` was acquired for, or nil when the token is not
   /// live (released, from an old session, or never issued): the verbs
   /// that take a scope answer that with `scope-closed`.
-  func target(of token: String) -> URL? {
+  func target(of token: String) -> ResolvedIdentifier? {
     lock.lock()
     defer { lock.unlock() }
     return tokenTargets[token]

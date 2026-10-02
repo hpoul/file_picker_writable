@@ -747,6 +747,145 @@ class FilePickerWritable {
     }
   }
 
+  /// Creates the directory [name] directly under the directory [scope]
+  /// holds, and returns its entry. Taking the parent's scope lets a caller
+  /// creating many folders pay for one acquire.
+  ///
+  /// A taken name is loud `already-exists`, never a silent provider
+  /// auto-rename (an Android provider that renamed it anyway has its fresh
+  /// folder deleted before the throw, so nothing is left behind). A
+  /// provider that cleaned the name (FAT-style characters on Android) is
+  /// loud `invalid-name` with the provider's name in the details, again
+  /// with the residue deleted. Only a fresh, empty folder is ever deleted:
+  /// should a provider hand back an existing folder instead, it is kept,
+  /// and the details say so (`residue: kept`, its `identifier`).
+  /// [ChildEntry.name] is the stored name.
+  ///
+  /// [name] follows the leaf-name rule of [lookupChild] ([ArgumentError]).
+  /// Other failures: `scope-closed`, `not-a-directory`, `not-found`, and
+  /// `permission-lost` (on Android also for a read-only grant, `reason:
+  /// read-only`).
+  ///
+  /// Android and iOS only; throws [UnsupportedError] elsewhere.
+  @experimental
+  Future<ChildEntry> createDirectory({
+    required AcquiredScope scope,
+    required String name,
+  }) async {
+    _logger.finest('createDirectory()');
+    _requireScopePlatform('createDirectory');
+    _requireLeafName(name);
+    _requireScopeLive(scope.id);
+    final result = await _channel.invokeMapMethod<String, Object?>(
+      'createDirectory',
+      {'scope': scope.id, 'name': name},
+    );
+    if (result == null) {
+      throw StateError('Got null response for createDirectory');
+    }
+    return ChildEntry._fromResult(result);
+  }
+
+  /// Deletes the file or directory [identifier] names. Single-shot: the
+  /// plugin holds access for this call only.
+  ///
+  /// Idempotent: an entry that is already gone is success, never
+  /// `not-found`. "Gone" is proven, never assumed: a provider that does not
+  /// answer, or a failing stick, stays loud rather than reading as deleted.
+  /// A non-empty directory without [recursive] is loud
+  /// `directory-not-empty`; with it, the plugin deletes depth-first
+  /// itself rather than trusting a provider's own recursion. Both checks
+  /// are best-effort: emptiness is decided by listing, so a child created
+  /// concurrently may be deleted anyway. Quiesce writers when that matters.
+  ///
+  /// A picked folder's own root (the identifier [openDirectory] returned,
+  /// or its repaired form) is refused as `root-protected`: only entries
+  /// inside a picked folder can be deleted, so one wrong identifier cannot
+  /// wipe a whole pick. That includes other spellings of the root on iOS
+  /// and on Android's system storage provider; other Android providers are
+  /// opaque, and there only the root's own identifier is recognized.
+  ///
+  /// A recursive delete is not atomic: when it fails partway (a provider
+  /// error, or on Android a tree deeper than 256 levels), what it already
+  /// deleted stays deleted, and the error is loud. On a failing Android
+  /// stick that still lists the parent but cannot read the entry, the entry
+  /// reads as gone: the platform reports both as a missing file.
+  ///
+  /// Other failures: `permission-lost` (on Android also for a read-only
+  /// grant, `reason: read-only`).
+  ///
+  /// Android and iOS only; throws [UnsupportedError] elsewhere.
+  @experimental
+  Future<void> deleteEntry({
+    required String identifier,
+    bool recursive = false,
+  }) async {
+    _logger.finest('deleteEntry()');
+    _requireScopePlatform('deleteEntry');
+    await _channel.invokeMethod<void>('deleteEntry', {
+      'identifier': identifier,
+      'recursive': recursive,
+    });
+  }
+
+  /// Moves [identifier] from the directory [sourceParent] holds into the
+  /// one [newParent] holds, renaming it to [newName] when given. A rename
+  /// is a move with the same scope twice and a [newName]. Returns a fresh
+  /// entry: identifiers may change across a move, so use the returned
+  /// [ChildEntry.identifier] from now on.
+  ///
+  /// [identifier] must be a direct child of [sourceParent] (`not-found`
+  /// otherwise). A taken target name is loud `already-exists` and nothing
+  /// moves: there is no atomic replace, so a caller that wants one deletes
+  /// the target first, deliberately. A provider that cleans [newName] is
+  /// `invalid-name` (details: the requested and the provider's name), with
+  /// the entry renamed back. A move and a rename together run as two
+  /// steps; if the rename fails and moving back fails too, the result is
+  /// loud `move-partial`, with the entry's actual identifier in the details
+  /// so the caller can find it. A move across providers or storage volumes
+  /// is `unsupported-move` and is not attempted (copy, then delete). A
+  /// picked folder's own root is `root-protected`, as for [deleteEntry].
+  /// A rename that changes only letter case is `already-exists` where the
+  /// storage ignores case (shared storage and FAT on Android, APFS on iOS).
+  ///
+  /// A move or rename can fail after it landed: when the volume goes away
+  /// while the result is verified, the error is `permission-lost` (`reason:
+  /// volume-absent`), and on Android a move with a rename adds `state:
+  /// unknown` and the `candidates` identifiers instead of guessing at a
+  /// rollback. List the parent before retrying.
+  ///
+  /// [newName] follows the leaf-name rule of [lookupChild]
+  /// ([ArgumentError]). Other failures: `scope-closed`, `not-a-directory`,
+  /// `permission-lost` (on Android also `reason: read-only`).
+  ///
+  /// Android and iOS only; throws [UnsupportedError] elsewhere.
+  @experimental
+  Future<ChildEntry> moveEntry({
+    required String identifier,
+    required AcquiredScope sourceParent,
+    required AcquiredScope newParent,
+    String? newName,
+  }) async {
+    _logger.finest('moveEntry()');
+    _requireScopePlatform('moveEntry');
+    if (newName != null) {
+      _requireLeafName(newName);
+    }
+    _requireScopeLive(sourceParent.id);
+    _requireScopeLive(newParent.id);
+    final result = await _channel
+        .invokeMapMethod<String, Object?>('moveEntry', {
+          'identifier': identifier,
+          'sourceParent': sourceParent.id,
+          'newParent': newParent.id,
+          'newName': newName,
+        });
+    if (result == null) {
+      throw StateError('Got null response for moveEntry');
+    }
+    return ChildEntry._fromResult(result);
+  }
+
   /// `scope-closed` unless [id] is a scope this isolate acquired and has
   /// not released.
   void _requireScopeLive(String id) {

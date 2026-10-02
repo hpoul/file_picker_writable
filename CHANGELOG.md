@@ -68,6 +68,25 @@
     built before upgrading may keep a cached hook step and ship without
     the shim (the reader then fails to resolve its native functions): run
     `flutter clean` once.
+  * Tree verbs (`doc/tree-writes-plan.md`): `createDirectory(scope:,
+    name:)` under a held parent scope, `deleteEntry(identifier:,
+    recursive:)` (single-shot; already gone is success; recursion is the
+    plugin's own depth-first walk), and `moveEntry(identifier:,
+    sourceParent:, newParent:, newName:)`, where a rename is a move with
+    the same scope twice. A move returns a fresh entry: use its
+    identifier from then on.
+  * A taken name is `already-exists` and nothing is changed, never a
+    silent auto-rename. A name the provider cleaned (Android stores
+    `12:30 ride` as `12_30 ride`, on internal storage too) is
+    `invalid-name` with `requested` and `actual` in the details, and the
+    new folder is deleted again, or the renamed entry renamed back.
+  * New error kinds: `already-exists`, `directory-not-empty`,
+    `unsupported-move` (across providers or storage volumes: copy, then
+    delete), `move-partial` (Android, a move plus rename whose rollback
+    failed; the entry's identifier in the details) and `root-protected`:
+    a picked folder's own root (or a single picked file) cannot be
+    deleted or moved, only what is inside a picked folder. On Android a
+    read-only tree grant is `permission-lost`, `reason: read-only`.
 * Android: every method-channel call now runs on a shared background
   TaskQueue instead of the main thread, so slow providers no longer block
   frames. The pickers and `init` still hop to the main thread. Launch URLs

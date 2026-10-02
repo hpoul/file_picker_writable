@@ -10,6 +10,11 @@ object ErrorKind {
   const val SCOPE_CLOSED = "scope-closed"
   const val NOT_A_DIRECTORY = "not-a-directory"
   const val NOT_A_FILE = "not-a-file"
+  const val ALREADY_EXISTS = "already-exists"
+  const val DIRECTORY_NOT_EMPTY = "directory-not-empty"
+  const val UNSUPPORTED_MOVE = "unsupported-move"
+  const val MOVE_PARTIAL = "move-partial"
+  const val ROOT_PROTECTED = "root-protected"
   const val INVALID_NAME = "invalid-name"
 }
 

@@ -118,6 +118,22 @@ struct ChildIdentifierTests {
     check(ChildIdentifier.isLeafName(".howitwent"), "dotfiles are leaves")
     check(ChildIdentifier.components(of: "a/\u{301}b") == ["a", "\u{301}b"], "scalar split keeps the separator")
 
+    // child(): what createDirectory and moveEntry mint for a new entry is
+    // exactly what a listing of its parent would hand out.
+    let rootURL = URL(fileURLWithPath: "/picked")
+    let picked = ResolvedIdentifier(url: rootURL, scopeURL: rootURL, isStale: false, rootBookmark: root, relativePath: "")
+    let tour = picked.child("2026 tour")
+    check(tour.relativePath == "2026 tour", "a root's child path is its name")
+    check(tour.url.path == "/picked/2026 tour", "a root's child URL")
+    check(tour.scopeURL == rootURL, "a child keeps the root's scope")
+    let clip = tour.child("clip:1.mp4")
+    check(clip.relativePath == "2026 tour/clip:1.mp4", "a grandchild path joins with /")
+    check(
+      clip.identifier(withRoot: root)
+        == ChildIdentifier.listingPrefix(root: root, parentPath: "2026 tour") + ChildIdentifier.encode("clip:1.mp4"),
+      "child() mints the listing's identifier"
+    )
+
     containment()
 
     if failures > 0 {
